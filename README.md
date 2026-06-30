@@ -13,20 +13,28 @@ Bridge server (Node, runs on localhost)   <- relay, no build step
       │  WebSocket
       ▼
 Chrome extension (Manifest V3)
-   ├─ background.js  (service worker: WS client, command dispatch)
-   └─ content.js     (reads the DOM, indexes elements, clicks/types/scrolls)
+   ├─ background.js  (service worker: WS client, command dispatch, target-tab pinning)
+   ├─ content.js     (DOM reads + accessibility tree/refs, clicks/types/scrolls)
+   └─ cdp.js         (opt-in chrome.debugger: coordinate input, background screenshots, console/network/HAR)
 ```
 
 The agent never talks to Chrome directly. It POSTs a command to the bridge; the
 bridge relays it to the extension over WebSocket; the extension runs it and the
 result travels back the same path.
 
-Control is done at the **DOM level** (no `chrome.debugger`, so no "is being
-debugged" banner). The extension extracts the interactive elements on the page,
-assigns each an **index**, and the agent acts by index ("click 5", "type into 8").
-This is the same approach browser-use / Playwright-agent mode use, and it is robust
-on most sites. A CDP (`chrome.debugger`) module can be added later for canvas /
-cross-origin-iframe / coordinate-click cases.
+Control is **DOM-first**: the extension reads the page — interactive elements with an
+**index** (`snapshot`), or the accessibility tree with stable **refs** (`read_page`) —
+and the agent acts by ref/index ("click ref_5", "type into 8"). No `chrome.debugger`, so
+no "is being debugged" banner. It **drops to CDP** (`chrome.debugger`) only where the DOM
+can't reach: pixel-coordinate clicks on canvas/WebGL/maps, screenshotting a background
+tab, console/network/HAR capture, and CSP-bypass JS eval.
+
+The agent **pins one target tab on first use** and keeps acting on it — including
+screenshots and clicks while that tab sits in the **background** — so you can keep using
+your other tabs without the agent following you or stealing focus. `group_tab` puts the
+controlled tab in a labelled tab group so you can see which one it is. This mirrors the
+official "Claude in Chrome" control model, kept **open** (no blocklist / org-lock /
+per-action gating) with the agent driven externally over MCP/HTTP.
 
 ## Setup
 
@@ -115,7 +123,11 @@ issue `click` / `type` / `scroll` / `navigate` -> `snapshot` again.
 
 ## Status
 
-MVP. See `PROTOCOL.md` for implemented commands and the roadmap at the bottom.
+Working. Control parity with the official "Claude in Chrome" surface (open): DOM-index +
+accessibility-tree (`read_page`) reads with stable refs, ref/coordinate interaction,
+background-tab control, screenshots (incl. background tabs), console/network/HAR capture,
+record/replay, and tab grouping. See `PROTOCOL.md` for the full command list + roadmap,
+and `docs/prior-art.md` for how this compares to similar projects.
 
 ## Security
 
