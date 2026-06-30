@@ -43,9 +43,14 @@ npm start          # listens on http://localhost:8765
 1. Open `chrome://extensions` (or `edge://extensions` on Microsoft Edge)
 2. Enable **Developer mode** (top right)
 3. **Load unpacked** -> select the `extension/` folder
-4. Click the extension icon; the popup shows the connection status to the bridge.
+4. Click the extension icon and press **Connect** in the popup.
 
-When both are running, the popup should read **Connected**.
+A freshly installed extension stays idle and makes no connection attempt (so a
+not-yet-started bridge produces no console error). The first time you press
+**Connect** and it succeeds, the extension remembers it and auto-reconnects on
+later browser starts — with a bounded retry (5 attempts). If the bridge is
+unreachable it stops and waits; press **Connect** again to retry. When both are
+running, the popup reads **Connected**.
 
 Works on any Chromium browser (Chrome, Edge). The host/port the extension dials
 is configurable on the extension's **options page** (popup -> "Open settings",

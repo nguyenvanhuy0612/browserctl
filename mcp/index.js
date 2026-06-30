@@ -59,7 +59,7 @@ server.registerTool(
   {
     title: "Snapshot page",
     description:
-      "Return the active tab's interactive elements (each with a stable 'index'), the page URL/title, and visible text. Call this first, then act on elements by index. Re-call after any action that changes the page.",
+      "Return the TARGET tab's interactive elements (each with a stable 'index'), the page URL/title, and visible text. The target tab is the last tab you opened/navigated/switched to; if you haven't touched any, it's the focused tab. Check the returned url/title (or call browser_current_tab) before reading sensitive pages. Call this first, then act on elements by index. Re-call after any action that changes the page.",
     inputSchema: {},
   },
   tool("snapshot", async () => text(await callBridge("snapshot")))
@@ -69,7 +69,7 @@ server.registerTool(
   "browser_navigate",
   {
     title: "Navigate",
-    description: "Load a URL in the active tab. Returns the final URL once loaded.",
+    description: "Load a URL in the target tab (pins it as the target for later commands). Returns the final URL once loaded.",
     inputSchema: { url: z.string().describe("Absolute URL to load") },
   },
   tool("navigate", async ({ url }) => text(await callBridge("navigate", { url })))
@@ -145,7 +145,7 @@ server.registerTool(
   "browser_new_tab",
   {
     title: "New tab",
-    description: "Open a new tab, optionally at a URL. Returns the new tab id.",
+    description: "Open a new tab, optionally at a URL, and make it the target tab for subsequent commands. Returns the new tab id.",
     inputSchema: { url: z.string().optional().describe("Optional URL to open") },
   },
   tool("new_tab", async ({ url }) => text(await callBridge("new_tab", { url })))
@@ -155,10 +155,21 @@ server.registerTool(
   "browser_switch_tab",
   {
     title: "Switch tab",
-    description: "Make the tab with the given id active.",
+    description: "Make the tab with the given id active and the target for subsequent commands.",
     inputSchema: { id: z.number().int().describe("Tab id from browser_list_tabs") },
   },
   tool("switch_tab", async ({ id }) => text(await callBridge("switch_tab", { id })))
+);
+
+server.registerTool(
+  "browser_current_tab",
+  {
+    title: "Current target tab",
+    description:
+      "Report which tab commands currently act on (id, url, title, whether it's pinned as the target vs. the fallback focused tab). Call this to confirm you're on the right page before snapshotting or reading sensitive content.",
+    inputSchema: {},
+  },
+  tool("current_tab", async () => text(await callBridge("current_tab")))
 );
 
 server.registerTool(

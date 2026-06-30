@@ -1,24 +1,57 @@
-// Reflects pipeline health by asking the bridge whether the extension is connected.
+// Reflects pipeline health by asking the service worker for its connection
+// state, and lets the user Connect / Disconnect on demand. No /status fetch:
+// when the bridge is down, a fetch would itself log a console error.
 const dot = document.getElementById("dot");
 const status = document.getElementById("status");
+const btn = document.getElementById("toggle");
 
 function set(state, text) {
   dot.className = "dot " + state;
   status.textContent = text;
 }
 
-async function refresh() {
-  const { bridgeHost = "127.0.0.1", bridgePort = 8765 } =
-    await chrome.storage.local.get(["bridgeHost", "bridgePort"]);
-  try {
-    const res = await fetch(`http://${bridgeHost}:${bridgePort}/status`, { cache: "no-store" });
-    const data = await res.json();
-    if (data.extensionConnected) set("on", "Connected");
-    else set("off", "Bridge up, extension reconnecting...");
-  } catch {
-    set("off", "Bridge not running");
+function render(state) {
+  const s = (state && state.connState) || "idle";
+  if (s === "connected") {
+    set("on", "Connected");
+    btn.textContent = "Disconnect";
+    btn.dataset.act = "disconnect";
+    btn.disabled = false;
+  } else if (s === "connecting") {
+    set("off", "Connecting...");
+    btn.textContent = "Connecting...";
+    btn.disabled = true;
+  } else if (s === "failed") {
+    set("off", "Not connected (bridge unreachable)");
+    btn.textContent = "Connect";
+    btn.dataset.act = "connect";
+    btn.disabled = false;
+  } else {
+    set("off", "Disconnected");
+    btn.textContent = "Connect";
+    btn.dataset.act = "connect";
+    btn.disabled = false;
   }
 }
+
+async function refresh() {
+  try {
+    const state = await chrome.runtime.sendMessage({ __aibc_getState: true });
+    render(state);
+  } catch {
+    // Service worker not reachable yet; leave the last rendered state.
+  }
+}
+
+btn.addEventListener("click", async () => {
+  const act = btn.dataset.act;
+  btn.disabled = true;
+  try {
+    if (act === "disconnect") await chrome.runtime.sendMessage({ __aibc_disconnect: true });
+    else await chrome.runtime.sendMessage({ __aibc_connect: true });
+  } catch {}
+  setTimeout(refresh, 200);
+});
 
 document.getElementById("options").addEventListener("click", (e) => {
   e.preventDefault();
@@ -26,4 +59,4 @@ document.getElementById("options").addEventListener("click", (e) => {
 });
 
 refresh();
-setInterval(refresh, 1500);
+setInterval(refresh, 1000);

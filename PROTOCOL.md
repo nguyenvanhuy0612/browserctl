@@ -16,7 +16,17 @@ The response is always JSON:
 { "ok": false, "error": "message" }  // failure
 ```
 
-All actions operate on the **active tab** unless noted.
+All actions operate on the **target tab** unless noted. The target tab is the
+last tab the agent opened (`new_tab`), switched to (`switch_tab`), or navigated
+(`navigate`); until the agent touches one, it falls back to the focused active
+tab. Pinning the target keeps reads/clicks on the intended tab even if the user
+manually switches tabs (so a snapshot can't silently land on another, possibly
+sensitive, tab). Closing the target tab unpins it. Use `current_tab` to check.
+
+### `current_tab`
+No params. Result: `{ id, url, title, active, pinned }` - which tab commands act
+on now. `pinned` is true when the agent has explicitly set the target, false
+when falling back to the focused tab.
 
 ## Page inspection
 
