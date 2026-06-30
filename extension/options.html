@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>AI Browser Control - Options</title>
+    <style>
+      body { font: 14px system-ui, sans-serif; max-width: 520px; margin: 32px auto; padding: 0 20px; color: #222; }
+      h1 { font-size: 18px; }
+      fieldset { border: 1px solid #ddd; border-radius: 8px; padding: 16px 18px; margin: 18px 0; }
+      legend { padding: 0 6px; color: #555; }
+      label { display: block; margin: 12px 0 4px; font-weight: 600; }
+      input { width: 100%; padding: 7px 9px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
+      .row { display: flex; gap: 12px; }
+      .row > div { flex: 1; }
+      button { margin-top: 16px; padding: 8px 16px; border: 0; border-radius: 6px; background: #2d6cdf; color: #fff; font-weight: 600; cursor: pointer; }
+      button:hover { background: #2559bd; }
+      .status { margin-top: 14px; min-height: 20px; font-size: 13px; }
+      .ok { color: #1e9e54; }
+      .err { color: #d33; }
+      .muted { color: #777; font-size: 12px; line-height: 1.5; }
+      .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #bbb; margin-right: 6px; }
+      .dot.on { background: #2ecc71; } .dot.off { background: #e74c3c; }
+      code { background: #f2f2f2; padding: 1px 4px; border-radius: 3px; }
+    </style>
+  </head>
+  <body>
+    <h1>AI Browser Control</h1>
+    <p class="muted">
+      This extension connects to a local bridge server, which relays commands from an
+      AI agent. Point it at wherever the bridge is running.
+    </p>
+
+    <fieldset>
+      <legend>Bridge server</legend>
+      <div class="row">
+        <div>
+          <label for="host">Host</label>
+          <input id="host" placeholder="127.0.0.1" />
+        </div>
+        <div>
+          <label for="port">Port</label>
+          <input id="port" type="number" placeholder="8765" />
+        </div>
+      </div>
+      <button id="save">Save &amp; reconnect</button>
+      <div class="status" id="status"></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Live status</legend>
+      <div><span id="dot" class="dot"></span><span id="conn">checking...</span></div>
+      <p class="muted" id="connurl"></p>
+    </fieldset>
+
+    <p class="muted">
+      Start the bridge with <code>npm start</code> in the <code>bridge/</code> folder.
+      The connection becomes active within a couple of seconds after saving.
+    </p>
+
+    <script src="options.js"></script>
+  </body>
+</html>

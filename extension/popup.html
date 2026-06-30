@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { font: 13px system-ui, sans-serif; width: 240px; margin: 0; padding: 14px; }
+      h1 { font-size: 14px; margin: 0 0 10px; }
+      .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+      .dot { width: 10px; height: 10px; border-radius: 50%; background: #bbb; }
+      .dot.on { background: #2ecc71; }
+      .dot.off { background: #e74c3c; }
+      .muted { color: #777; font-size: 11px; margin-top: 10px; line-height: 1.4; }
+      code { background: #f2f2f2; padding: 1px 4px; border-radius: 3px; }
+    </style>
+  </head>
+  <body>
+    <h1>AI Browser Control</h1>
+    <div class="row"><span id="dot" class="dot"></span><span id="status">checking...</span></div>
+    <div class="muted">
+      Start the bridge with <code>npm start</code> in the <code>bridge/</code> folder.<br />
+      <a href="#" id="options">Open settings</a> to change host/port.
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

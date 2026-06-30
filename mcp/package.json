@@ -1,0 +1,17 @@
+{
+  "name": "ai-browser-control-mcp",
+  "version": "0.1.0",
+  "description": "MCP server exposing the browser-control bridge as tools for Claude Code / Desktop",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "ai-browser-control-mcp": "index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  }
+}
