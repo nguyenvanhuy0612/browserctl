@@ -62,7 +62,7 @@ recommended path for Claude Code / Claude Desktop.
 cd mcp
 npm install
 # Register with Claude Code (run from anywhere; use the absolute path):
-claude mcp add browser -- node "C:/Users/HUYNGUYEN/Documents/ai-browser-control/mcp/index.js"
+claude mcp add browser -- node "C:/Users/HUYNGUYEN/Documents/my_notes/claude/ai-browser-control/mcp/index.js"
 ```
 
 Or add it to a project's `.mcp.json`:
@@ -72,7 +72,7 @@ Or add it to a project's `.mcp.json`:
   "mcpServers": {
     "browser": {
       "command": "node",
-      "args": ["C:/Users/HUYNGUYEN/Documents/ai-browser-control/mcp/index.js"],
+      "args": ["C:/Users/HUYNGUYEN/Documents/my_notes/claude/ai-browser-control/mcp/index.js"],
       "env": { "BRIDGE_URL": "http://127.0.0.1:8765" }
     }
   }
