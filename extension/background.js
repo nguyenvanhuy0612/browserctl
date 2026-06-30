@@ -4,18 +4,21 @@
 // the content script. Tab/window-level commands are handled here with chrome.*.
 // Console/network/HAR/eval commands are handled by the CDP module (cdp.js).
 
-import { handleCdp, CDP_ACTIONS } from "./cdp.js";
+import { handleCdp, CDP_ACTIONS, captureViewport, isAttached } from "./cdp.js";
 import { handleNet, NET_ACTIONS } from "./netlog.js";
 
 // DOM-level commands that run in the active tab's content script.
 const CONTENT_ACTIONS = [
   "snapshot",
+  "read_page",
+  "find",
   "click",
   "type",
   "scroll",
   "hover",
   "select_option",
   "press_key",
+  "wait_settle",
   "get_page_content",
   "click_selector",
   "fill_selector",
@@ -178,6 +181,8 @@ async function dispatch({ action, params = {} }) {
     case "screenshot":   return { ok: true, result: await screenshot(params) };
     case "list_tabs":    return { ok: true, result: await listTabs() };
     case "new_tab":      return { ok: true, result: await newTab(params) };
+    case "group_tab":    return { ok: true, result: await groupTab(params) };
+    case "ungroup_tab":  return { ok: true, result: await ungroupTab(params) };
     case "switch_tab":   return { ok: true, result: await switchTab(params) };
     case "close_tab":    return { ok: true, result: await closeTab(params) };
     case "go_back":      return { ok: true, result: await goBack() };
@@ -258,18 +263,27 @@ async function activeTab() {
   return tab;
 }
 
-// The tab DOM/CDP commands operate on: the pinned target if it still exists,
-// otherwise the focused active tab (no pinning on fallback).
+// The tab DOM/CDP commands operate on. Pin-on-first-touch: if a target is pinned and
+// still exists, use it; otherwise grab the focused active tab AND pin it, so the agent
+// locks onto one tab at its first command and never drifts onto a tab the user later
+// switches to. switch_tab / navigate / new_tab re-pin explicitly.
 async function targetTab() {
   if (targetTabId != null) {
     try {
       return await chrome.tabs.get(targetTabId);
     } catch {
-      targetTabId = null; // target was closed; fall back to the active tab
+      targetTabId = null; // target was closed; re-pin below
     }
   }
-  return await activeTab();
+  const tab = await activeTab();
+  targetTabId = tab.id;
+  return tab;
 }
+
+// If the pinned target tab is closed, unpin so the next command re-pins cleanly.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabId === targetTabId) targetTabId = null;
+});
 
 // Report which tab commands currently act on (for the agent to verify before reading).
 async function currentTab() {
@@ -303,17 +317,29 @@ function waitForComplete(tabId) {
   });
 }
 
-async function screenshot({ format = "png" } = {}) {
+async function screenshot({ format = "jpeg", quality = 55 } = {}) {
   const tab = await targetTab();
-  // captureVisibleTab only grabs the window's *visible* tab. Activate the target
-  // first so we never capture a different (possibly sensitive) tab that happens
-  // to be showing.
-  if (!tab.active) {
-    await chrome.tabs.update(tab.id, { active: true });
-    await new Promise((r) => setTimeout(r, 150));
+  // If a debugger session already exists on this tab, capture via CDP so the screenshot
+  // is in the same pixel space coordinate_click maps against (avoids a Retina/clip-scale
+  // mismatch). Otherwise prefer the no-banner path when the tab is foreground.
+  if (isAttached(tab.id)) {
+    return await captureViewport(tab.id, { format, quality });
   }
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format });
-  return { dataUrl };
+  // If the target is the active tab of its window, capture it directly — no debugger,
+  // no banner. captureVisibleTab grabs that window's visible tab regardless of OS focus.
+  if (tab.active) {
+    const opts = format === "png" ? { format: "png" } : { format: "jpeg", quality };
+    let dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, opts);
+    if (format !== "png" && dataUrl.length > 500000) {
+      dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 30 });
+    }
+    return { dataUrl };
+  }
+  // Background tab: capture via CDP so we DON'T activate it and steal the user's focus.
+  // Attaches the debugger on first use (the "is being debugged" banner appears on this
+  // tab only). Restricted pages (chrome://, Web Store) reject the debugger — that error
+  // surfaces rather than silently flipping the tab to the foreground.
+  return await captureViewport(tab.id, { format, quality });
 }
 
 async function listTabs() {
@@ -327,6 +353,28 @@ async function newTab({ url }) {
   const tab = await chrome.tabs.create(url ? { url } : {});
   targetTabId = tab.id; // pin: the agent now drives the tab it just opened
   return { id: tab.id };
+}
+
+// Put a tab into a labeled tab group so the user can see which tab the agent drives.
+// Defaults to the target tab. Grouping does NOT activate the tab, so this never steals
+// the user's focus. Also pins the grouped tab as the target.
+async function groupTab({ id, title = "aibc", color = "blue" } = {}) {
+  const tabId = id != null ? id : (await targetTab()).id;
+  const groupId = await chrome.tabs.group({ tabIds: [tabId] });
+  // Title/color need the "tabGroups" permission; the group still exists without it.
+  try {
+    await chrome.tabGroups.update(groupId, { title, color });
+  } catch (e) {
+    return { groupId, tabId, titled: false, note: `grouped, but could not set title/color: ${e.message}` };
+  }
+  targetTabId = tabId; // pin (no activation)
+  return { groupId, tabId, title, color };
+}
+
+async function ungroupTab({ id } = {}) {
+  const tabId = id != null ? id : (await targetTab()).id;
+  await chrome.tabs.ungroup(tabId);
+  return { ungrouped: tabId };
 }
 
 async function switchTab({ id }) {

@@ -13,13 +13,40 @@ const MAX_NETWORK = 2000;
 // tabId -> { console: [], network: Map(requestId -> entry) }
 const sessions = new Map();
 
-function attach(tabId) {
-  return new Promise((resolve, reject) => {
+// Per-tab metadata about the most recent CDP screenshot, so coordinate_click/drag can
+// map model coordinates (screenshot-pixel space) back to viewport CSS pixels. With
+// deviceScaleFactor forced to 1, the only scaling is captureViewport's clip.scale.
+const lastCapture = {}; // tabId -> { scale }
+
+export function isAttached(tabId) {
+  return sessions.has(tabId);
+}
+
+const BUTTON_MASK = { left: 1, right: 2, middle: 4 };
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+// Scale of the most recent CDP screenshot for a tab (1 if none). coordinate_* divide the
+// model's screenshot-pixel coords by this to get viewport CSS pixels.
+const captureScale = (tabId) => (lastCapture[tabId] && lastCapture[tabId].scale) || 1;
+
+async function attach(tabId) {
+  await new Promise((resolve, reject) => {
     chrome.debugger.attach({ tabId }, "1.3", () => {
       const e = chrome.runtime.lastError;
       if (e) reject(new Error(e.message)); else resolve();
     });
   });
+  // Force deviceScaleFactor to 1 so CDP screenshots are captured in CSS-pixel space,
+  // matching the coordinates coordinate_click / coordinate_drag dispatch. Without this,
+  // HiDPI/Retina displays (e.g. Apple Silicon) produce 2x screenshots, so every pixel
+  // coordinate the agent reads off them is off by the device pixel ratio. width/height
+  // stay at 0 (= "don't override this dimension"), so only the scale factor changes and
+  // the page does not reflow. Best-effort: a failure here must not fail the attach.
+  // Use sendRaw (not send) so a transient error here can't recurse into reattach.
+  try {
+    await sendRaw(tabId, "Emulation.setDeviceMetricsOverride", {
+      width: 0, height: 0, deviceScaleFactor: 1, mobile: false,
+    });
+  } catch {}
 }
 
 function detach(tabId) {
@@ -31,13 +58,71 @@ function detach(tabId) {
   });
 }
 
-function send(tabId, method, params = {}) {
+function sendRaw(tabId, method, params = {}) {
   return new Promise((resolve, reject) => {
     chrome.debugger.sendCommand({ tabId }, method, params, (res) => {
       const e = chrome.runtime.lastError;
       if (e) reject(new Error(e.message)); else resolve(res);
     });
   });
+}
+
+// send with one-shot auto-reattach: a dropped debugger (tab reload, service-worker
+// recycle) surfaces as "debugger is not attached"; re-attach once and retry so a single
+// action doesn't fail spuriously.
+async function send(tabId, method, params = {}) {
+  try {
+    return await sendRaw(tabId, method, params);
+  } catch (e) {
+    if (/debugger is not attached/i.test(e.message || "")) {
+      await attach(tabId);
+      return await sendRaw(tabId, method, params);
+    }
+    throw e;
+  }
+}
+
+// Ensure the debugger is attached to a tab and a session record exists, WITHOUT enabling
+// the event domains (console/network). Used by the lazy screenshot path so a background
+// capture works without a prior cdp_attach. cdp_attach later enables domains on demand.
+export async function ensureAttached(tabId) {
+  if (!sessions.has(tabId)) {
+    await attach(tabId);
+    sessions.set(tabId, { console: [], network: new Map(), domainsEnabled: false });
+  }
+  return sessions.get(tabId);
+}
+
+// Capture the visible viewport of a tab via CDP. Works on a BACKGROUND tab (the renderer
+// stays alive) so we never have to activate it and steal the user's focus. Sizes the
+// image down to the vision-token budget via clip.scale (resize happens inside CDP).
+export async function captureViewport(tabId, { format = "jpeg", quality = 55 } = {}) {
+  await ensureAttached(tabId);
+  const fmt = format === "png" ? "png" : "jpeg";
+  let clip;
+  try {
+    const m = await send(tabId, "Page.getLayoutMetrics");
+    const vp = m.cssVisualViewport || m.visualViewport || m.cssLayoutViewport || {};
+    const w = Math.round(vp.clientWidth || 0);
+    const h = Math.round(vp.clientHeight || 0);
+    if (w && h) {
+      const MAX_SIDE = 1568; // Anthropic vision tiling: longest side cap
+      const scale = Math.min(1, MAX_SIDE / Math.max(w, h));
+      clip = { x: 0, y: 0, width: w, height: h, scale };
+    }
+  } catch {}
+  // Record the scale so coordinate_click/drag can map screenshot pixels -> viewport.
+  lastCapture[tabId] = { scale: clip ? clip.scale : 1 };
+  const shoot = (q) => send(tabId, "Page.captureScreenshot", {
+    format: fmt,
+    ...(fmt === "jpeg" ? { quality: q } : {}),
+    ...(clip ? { clip } : {}),
+    captureBeyondViewport: false,
+    fromSurface: true,
+  });
+  let res = await shoot(quality);
+  if (fmt === "jpeg" && res.data.length > 500000) res = await shoot(30);
+  return { dataUrl: `data:image/${fmt};base64,${res.data}` };
 }
 
 function requireSession(tabId) {
@@ -220,13 +305,15 @@ function briefRequest(e) {
 export async function handleCdp(action, params, tabId) {
   switch (action) {
     case "cdp_attach": {
-      if (!sessions.has(tabId)) {
-        await attach(tabId);
-        sessions.set(tabId, { console: [], network: new Map() });
+      // The session may already exist (a lazy screenshot attached without enabling the
+      // event domains); enable them here if not already done.
+      const s = await ensureAttached(tabId);
+      if (!s.domainsEnabled) {
         await send(tabId, "Network.enable");
         await send(tabId, "Runtime.enable");
         await send(tabId, "Log.enable");
         await send(tabId, "Page.enable");
+        s.domainsEnabled = true;
       }
       return { ok: true, result: { attached: true, tabId } };
     }
@@ -305,13 +392,20 @@ export async function handleCdp(action, params, tabId) {
 
     case "capture_screenshot": {
       // Full-page screenshot via CDP (captures beyond the viewport). Requires attach.
+      // JPEG by default to keep the base64 payload (and the agent's token cost) small;
+      // pass format:"png" for a lossless image (e.g. pixel-diff QA). `quality` (jpeg only,
+      // default 55) is degraded once to 30 if the capture is still large.
       requireSession(tabId);
-      const format = params.format === "jpeg" ? "jpeg" : "png";
-      const res = await send(tabId, "Page.captureScreenshot", {
+      const format = params.format === "png" ? "png" : "jpeg";
+      const quality = params.quality ?? 55;
+      const shoot = (q) => send(tabId, "Page.captureScreenshot", {
         format,
+        ...(format === "jpeg" ? { quality: q } : {}),
         captureBeyondViewport: params.fullPage !== false,
         fromSurface: true,
       });
+      let res = await shoot(quality);
+      if (format === "jpeg" && res.data.length > 500000) res = await shoot(30);
       return { ok: true, result: { dataUrl: `data:image/${format};base64,${res.data}` } };
     }
 
@@ -338,30 +432,44 @@ export async function handleCdp(action, params, tabId) {
 
     case "coordinate_click": {
       requireSession(tabId);
-      const { x, y } = params;
+      const s = captureScale(tabId);
+      const x = params.x / s, y = params.y / s;
       const button = params.button || "left";
-      await send(tabId, "Input.dispatchMouseEvent", {
-        type: "mousePressed", x, y, button, clickCount: 1,
-      });
-      await send(tabId, "Input.dispatchMouseEvent", {
-        type: "mouseReleased", x, y, button, clickCount: 1,
-      });
+      const clickCount = params.clickCount || 1;
+      const buttons = BUTTON_MASK[button] || 1;
+      // Real click sequence: move, settle, press, brief hold, release — so sites that
+      // gate on hover/mousedown timing behave as with a human click.
+      await send(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+      await pause(40);
+      await send(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, buttons, clickCount });
+      await pause(12);
+      await send(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, buttons: 0, clickCount });
       return { ok: true, result: { clicked: { x, y } } };
     }
 
     case "coordinate_drag": {
       requireSession(tabId);
-      const { fromX, fromY, toX, toY } = params;
-      await send(tabId, "Input.dispatchMouseEvent", {
-        type: "mousePressed", x: fromX, y: fromY, button: "left", clickCount: 1,
-      });
-      await send(tabId, "Input.dispatchMouseEvent", {
-        type: "mouseMoved", x: toX, y: toY, button: "left",
-      });
-      await send(tabId, "Input.dispatchMouseEvent", {
-        type: "mouseReleased", x: toX, y: toY, button: "left", clickCount: 1,
-      });
+      const s = captureScale(tabId);
+      const fromX = params.fromX / s, fromY = params.fromY / s;
+      const toX = params.toX / s, toY = params.toY / s;
+      await send(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: fromX, y: fromY });
+      await send(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x: fromX, y: fromY, button: "left", buttons: 1, clickCount: 1 });
+      await pause(12);
+      // A couple of intermediate moves so drag-tracking handlers fire.
+      await send(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: (fromX + toX) / 2, y: (fromY + toY) / 2, button: "left", buttons: 1 });
+      await send(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: toX, y: toY, button: "left", buttons: 1 });
+      await pause(12);
+      await send(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x: toX, y: toY, button: "left", buttons: 0, clickCount: 1 });
       return { ok: true, result: { dragged: true } };
+    }
+
+    case "insert_text": {
+      // Type into the focused element via CDP, robust for emoji/IME/multibyte that
+      // char-by-char keycodes can't represent.
+      requireSession(tabId);
+      if (params.text === undefined) throw new Error("insert_text requires 'text'");
+      await send(tabId, "Input.insertText", { text: String(params.text) });
+      return { ok: true, result: { inserted: String(params.text).length } };
     }
 
     case "a11y_snapshot": {
@@ -502,6 +610,7 @@ export const CDP_ACTIONS = [
   "eval_js",
   "coordinate_click",
   "coordinate_drag",
+  "insert_text",
   "a11y_snapshot",
   "element_screenshot",
   "print_pdf",

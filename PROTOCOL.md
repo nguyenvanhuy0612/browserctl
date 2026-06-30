@@ -16,17 +16,20 @@ The response is always JSON:
 { "ok": false, "error": "message" }  // failure
 ```
 
-All actions operate on the **target tab** unless noted. The target tab is the
-last tab the agent opened (`new_tab`), switched to (`switch_tab`), or navigated
-(`navigate`); until the agent touches one, it falls back to the focused active
-tab. Pinning the target keeps reads/clicks on the intended tab even if the user
-manually switches tabs (so a snapshot can't silently land on another, possibly
-sensitive, tab). Closing the target tab unpins it. Use `current_tab` to check.
+All actions operate on the **target tab** unless noted. The target is **pinned on
+first touch**: the agent's first command pins the focused active tab, and it stays
+pinned even if the user switches or opens other tabs — so the agent keeps acting on
+its tab while the user works elsewhere, and a snapshot can't silently land on another
+(possibly sensitive) tab. `navigate` / `new_tab` / `switch_tab` re-pin explicitly;
+`switch_tab` is the way to retarget onto a different (e.g. user) tab. Closing the
+target tab unpins it (the next command re-pins the active tab). Use `current_tab` to
+check. Because control of a background tab uses CDP (`Page.captureScreenshot`,
+`Input.*`), DOM actions and screenshots act on the target even when it is NOT the
+visible tab — no activation, no focus steal.
 
 ### `current_tab`
 No params. Result: `{ id, url, title, active, pinned }` - which tab commands act
-on now. `pinned` is true when the agent has explicitly set the target, false
-when falling back to the focused tab.
+on now. `pinned` is true once a target is pinned (i.e. after the first command).
 
 ## Page inspection
 
@@ -71,8 +74,16 @@ any action that changes the page.
 (default 600). `direction: "down"` is the default.
 
 ### `screenshot`
-Captures the visible viewport of the active tab via `chrome.tabs.captureVisibleTab`.
-Result: `{ dataUrl: "data:image/png;base64,..." }`.
+Captures the visible viewport of the **target** tab. If the target is the foreground
+tab and the debugger isn't attached, uses `chrome.tabs.captureVisibleTab` (no banner).
+Otherwise (background tab, or already attached) captures via CDP `Page.captureScreenshot`
+so a background tab is captured **without activating it** (no focus steal); this attaches
+the debugger and shows the "is being debugged" bar on the target tab. The CDP path
+downscales to the vision-token budget (longest side ≤ 1568px) via `clip.scale`.
+`params: { format?: "jpeg"|"png", quality? }` - defaults to `jpeg` quality 55; auto-
+degrades to quality 30 if still large. Pass `format: "png"` for a lossless image (e.g.
+pixel-diff QA). Result: `{ dataUrl: "data:image/<jpeg|png>;base64,..." }`. Restricted
+pages (`chrome://`, Web Store) reject the debugger and surface that error.
 
 ## Tabs
 
@@ -153,7 +164,7 @@ response bodies. Per active tab.
 ### CDP extras
 - `get_response_body { requestId }` - fetch a captured response's body (best-effort; requires attach).
 - `export_har { bodies? }` - HAR now redacts sensitive headers; `bodies:true` includes response bodies.
-- `capture_screenshot { fullPage?, format? }` - full-page screenshot beyond the viewport (requires attach).
+- `capture_screenshot { fullPage?, format?, quality? }` - full-page screenshot beyond the viewport (requires attach). Defaults to `jpeg` quality 55 (auto-degrades to 30 if large); `format:"png"` for lossless. Also: `cdp_attach` now forces `deviceScaleFactor:1` so screenshots are in CSS-pixel space and `coordinate_click`/`coordinate_drag` line up on HiDPI/Retina (e.g. Apple Silicon).
 
 Privacy: `get_network_requests`, `net_get`, and `export_har` redact
 Cookie / Set-Cookie / Authorization and similar headers before returning.
@@ -187,6 +198,51 @@ Cookie / Set-Cookie / Authorization and similar headers before returning.
 
 ---
 
+## Added in v0.4 ("claude-for-chrome, open" control parity)
+
+Direction: match the official extension's control model, openly (no blocklist / org-lock /
+gating), agent stays external. Principle: **DOM-first, CDP-fallback** — structured work via
+the content script (no banner), CDP only for pixel input, background-tab capture, protocol
+capture, and CSP-bypass eval. See `docs/superpowers/specs/2026-06-30-claude-for-chrome-open-design.md`.
+
+### Background tab control
+- Target is **pinned on first touch** and held across user tab switches (see the target-tab
+  note up top). `screenshot` captures a background target via CDP without activating it.
+- CDP `send` **auto-reattaches once** on "debugger is not attached" (survives tab reloads /
+  service-worker recycles).
+- `cdp_attach` forces `deviceScaleFactor:1` so screenshots are CSS-pixel and coordinate
+  input lines up on HiDPI/Retina.
+
+### Accessibility-tree read & stable refs (content script, no banner)
+- `read_page { mode?: "interactive"|"all", depth?, ref_id?, maxChars? }` - the page as compact
+  indented text with roles, accessible names, and a stable `ref` on each interactive element
+  (`textbox "Email" [ref_5] type="email"`). Cheaper than a screenshot. Depth cap 15, output
+  cap ~50k chars with an actionable over-limit note. Does not pierce shadow DOM / iframes.
+- `find { query, max? }` - interactive elements whose name/text/placeholder/aria-label contains
+  `query`; returns up to `max` `{ ref, role, name, tag }`.
+- Stable `ref`s are WeakRef-backed (survive re-snapshots, don't mutate the DOM). `snapshot`
+  items now also carry a `ref`. `click` / `type` / `hover` / `select_option` / `press_key`
+  accept `ref` in addition to `index`.
+
+### Coordinate input upgrade (CDP)
+- `coordinate_click { x, y, button?, clickCount? }` / `coordinate_drag { fromX, fromY, toX, toY }`
+  now map coordinates from **screenshot-pixel space to the viewport** automatically (using the
+  scale of the last CDP screenshot), and use a real move → press → hold → release sequence with
+  the proper button bitmask. Pair with a screenshot first.
+- `insert_text { text }` - type into the focused element via `Input.insertText` (robust for
+  emoji/IME/multibyte). Requires attach.
+
+### Settle
+- `wait_settle { timeoutMs? }` - resolve once `document.readyState === "complete"` AND
+  `document.getAnimations().length === 0`. Catches CSS/JS animations that `wait_for` /
+  `wait_network_idle` miss. Use before a screenshot/read after navigation.
+
+Deferred (low marginal value for the external-agent model): CDP Mac editor commands
+(`Cmd+A`/`Cmd+Z`); mid-action domain re-check (needs an expected-domain the external agent
+doesn't supply).
+
+---
+
 ## Roadmap
 
 - [x] MCP server wrapper (`mcp/`) so Claude Code / Desktop use these as native tools.
@@ -200,9 +256,13 @@ Cookie / Set-Cookie / Authorization and similar headers before returning.
 - [x] CDP coordinate clicks + drag; accessibility-tree snapshot; element screenshot; PDF; audit; cookies.
 - [x] Record & replay; localStorage/sessionStorage; selector-based interaction.
 - [x] `reload_extension` for programmatic hot-reload.
+- [x] Background tab control (pin-on-first-touch + CDP background screenshot, no focus steal).
+- [x] Accessibility-tree read (`read_page`) + WeakRef refs + `find`; ref-based interaction.
+- [x] Coordinate remap (screenshot→viewport) + real click sequence + `insert_text`.
+- [x] `wait_settle` (readyState + getAnimations).
 - [ ] Streaming WebSocket endpoint for agents (push DOM-change/console events live).
-- [ ] Hard tab-group scoping (restrict the agent to an allowed set of tabs).
 - [ ] Persistent injected-script channel (cf. mcp-chrome inject_script).
 - [ ] Cross-origin iframe / file-dialog handling.
+- [ ] CDP Mac editor commands (`Cmd+A`/`Cmd+Z`) for in-canvas editing.
 - [ ] Multi-browser / multi-tab sessions addressed by id.
 - [ ] Optional API token on the bridge (only needed if it leaves a trusted machine).

@@ -59,10 +59,42 @@ server.registerTool(
   {
     title: "Snapshot page",
     description:
-      "Return the TARGET tab's interactive elements (each with a stable 'index'), the page URL/title, and visible text. The target tab is the last tab you opened/navigated/switched to; if you haven't touched any, it's the focused tab. Check the returned url/title (or call browser_current_tab) before reading sensitive pages. Call this first, then act on elements by index. Re-call after any action that changes the page.",
+      "Return the TARGET tab's interactive elements (each with an 'index' and a stable 'ref'), the page URL/title, and visible text. On your first command the focused tab is pinned as the target and stays pinned even if the user switches tabs (use browser_switch_tab to retarget). Check the returned url/title (or call browser_current_tab) before reading sensitive pages. Call this first, then act by ref/index. Re-call after any action that changes the page.",
     inputSchema: {},
   },
   tool("snapshot", async () => text(await callBridge("snapshot")))
+);
+
+server.registerTool(
+  "browser_read_page",
+  {
+    title: "Read page (accessibility tree)",
+    description:
+      "Return the TARGET tab's accessibility tree as compact indented text — roles, accessible names, and a stable 'ref' on each interactive element (e.g. textbox \"Email\" [ref_5]). Cheaper than a screenshot and usable for reasoning about structured pages. Act on results with browser_click/browser_type using the ref. mode='interactive' (default) lists actionable elements; mode='all' includes everything. Pass ref_id to focus a subtree, depth to limit nesting.",
+    inputSchema: {
+      mode: z.enum(["interactive", "all"]).optional().describe("Default 'interactive'"),
+      depth: z.number().int().optional().describe("Max nesting depth (default 15)"),
+      ref_id: z.string().optional().describe("Focus the subtree under this ref"),
+      maxChars: z.number().int().optional().describe("Output cap (default 50000)"),
+    },
+  },
+  tool("read_page", async ({ mode, depth, ref_id, maxChars }) =>
+    text(await callBridge("read_page", { mode, depth, ref_id, maxChars }))
+  )
+);
+
+server.registerTool(
+  "browser_find",
+  {
+    title: "Find elements by text",
+    description:
+      "Find interactive elements whose accessible name / text / placeholder / aria-label contains the query. Returns up to 'max' matches, each with a stable 'ref' to act on. Use when you know the label of a control but not its index.",
+    inputSchema: {
+      query: z.string().describe("Text to match (case-insensitive substring)"),
+      max: z.number().int().optional().describe("Max matches (default 20)"),
+    },
+  },
+  tool("find", async ({ query, max }) => text(await callBridge("find", { query, max })))
 );
 
 server.registerTool(
@@ -79,10 +111,13 @@ server.registerTool(
   "browser_click",
   {
     title: "Click element",
-    description: "Click the element with the given index from the latest snapshot.",
-    inputSchema: { index: z.number().int().describe("Element index from browser_snapshot") },
+    description: "Click an element identified by 'ref' (stable, from browser_read_page/browser_find/browser_snapshot) or 'index' (from the latest browser_snapshot). Prefer ref.",
+    inputSchema: {
+      index: z.number().int().optional().describe("Element index from browser_snapshot"),
+      ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5')"),
+    },
   },
-  tool("click", async ({ index }) => text(await callBridge("click", { index })))
+  tool("click", async ({ index, ref }) => text(await callBridge("click", { index, ref })))
 );
 
 server.registerTool(
@@ -90,15 +125,16 @@ server.registerTool(
   {
     title: "Type into element",
     description:
-      "Focus the element at the given index and set its text. Set submit=true to press Enter afterward.",
+      "Focus an element (by 'ref' or 'index') and set its text. Set submit=true to press Enter afterward.",
     inputSchema: {
-      index: z.number().int().describe("Element index from browser_snapshot"),
+      index: z.number().int().optional().describe("Element index from browser_snapshot"),
+      ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5')"),
       text: z.string().describe("Text to enter"),
       submit: z.boolean().optional().describe("Press Enter after typing"),
     },
   },
-  tool("type", async ({ index, text: t, submit }) =>
-    text(await callBridge("type", { index, text: t, submit }))
+  tool("type", async ({ index, ref, text: t, submit }) =>
+    text(await callBridge("type", { index, ref, text: t, submit }))
   )
 );
 
@@ -121,13 +157,17 @@ server.registerTool(
   "browser_screenshot",
   {
     title: "Screenshot",
-    description: "Capture the visible viewport of the active tab as a PNG image.",
-    inputSchema: {},
+    description:
+      "Capture the visible viewport of the TARGET tab. Works on a background tab without activating it (so the user can keep using other tabs); attaching the debugger for that shows the 'is being debugged' bar on the target tab. JPEG by default (smaller); pass format='png' for a lossless image (e.g. pixel-diff QA).",
+    inputSchema: {
+      format: z.enum(["png", "jpeg"]).optional().describe("Image format, default jpeg"),
+      quality: z.number().int().optional().describe("JPEG quality 1-100, default 55"),
+    },
   },
-  tool("screenshot", async () => {
-    const { dataUrl } = await callBridge("screenshot");
-    const base64 = dataUrl.replace(/^data:image\/png;base64,/, "");
-    return { content: [{ type: "image", data: base64, mimeType: "image/png" }] };
+  tool("screenshot", async ({ format, quality }) => {
+    const { dataUrl } = await callBridge("screenshot", { format, quality });
+    const m = dataUrl.match(/^data:image\/(png|jpeg);base64,(.*)$/);
+    return { content: [{ type: "image", data: m ? m[2] : dataUrl, mimeType: `image/${m ? m[1] : "jpeg"}` }] };
   })
 );
 
@@ -152,6 +192,31 @@ server.registerTool(
 );
 
 server.registerTool(
+  "browser_group_tab",
+  {
+    title: "Group a tab (visual marker)",
+    description:
+      "Put a tab into a labeled, colored tab group so you (and the user) can see which tab the agent drives. Defaults to the target tab; pass id to group a specific tab. Does NOT activate the tab (no focus steal) and pins the grouped tab as the target.",
+    inputSchema: {
+      id: z.number().int().optional().describe("Tab id to group (default: target tab)"),
+      title: z.string().optional().describe("Group label, default 'aibc'"),
+      color: z.enum(["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"]).optional().describe("Group color, default 'blue'"),
+    },
+  },
+  tool("group_tab", async ({ id, title, color }) => text(await callBridge("group_tab", { id, title, color })))
+);
+
+server.registerTool(
+  "browser_ungroup_tab",
+  {
+    title: "Ungroup a tab",
+    description: "Remove a tab from its tab group. Defaults to the target tab.",
+    inputSchema: { id: z.number().int().optional().describe("Tab id to ungroup (default: target tab)") },
+  },
+  tool("ungroup_tab", async ({ id }) => text(await callBridge("ungroup_tab", { id })))
+);
+
+server.registerTool(
   "browser_switch_tab",
   {
     title: "Switch tab",
@@ -166,7 +231,7 @@ server.registerTool(
   {
     title: "Current target tab",
     description:
-      "Report which tab commands currently act on (id, url, title, whether it's pinned as the target vs. the fallback focused tab). Call this to confirm you're on the right page before snapshotting or reading sensitive content.",
+      "Report which tab commands currently act on (id, url, title, and whether a target is pinned). The target is pinned on your first command and held across user tab switches. Call this to confirm you're on the right page before snapshotting or reading sensitive content.",
     inputSchema: {},
   },
   tool("current_tab", async () => text(await callBridge("current_tab")))
@@ -318,6 +383,17 @@ server.registerTool(
 );
 
 server.registerTool(
+  "browser_wait_settle",
+  {
+    title: "Wait for page to settle",
+    description:
+      "Wait until the page is fully loaded AND no CSS/JS animations are running (document.readyState complete + getAnimations() empty). Catches transitions that wait_for/network-idle miss. Use before a screenshot or read after navigation.",
+    inputSchema: { timeoutMs: z.number().int().optional().describe("Timeout in ms (default 10000)") },
+  },
+  tool("wait_settle", async ({ timeoutMs }) => text(await callBridge("wait_settle", { timeoutMs })))
+);
+
+server.registerTool(
   "browser_get_page_content",
   {
     title: "Get readable page content",
@@ -450,14 +526,25 @@ server.registerTool(
   "browser_coordinate_click",
   {
     title: "Click at coordinates",
-    description: "Click at viewport pixel coordinates (for canvas/WebGL/maps where DOM clicks fail). Requires browser_cdp_attach.",
+    description: "Click at pixel coordinates measured against the most recent screenshot of the target tab (for canvas/WebGL/maps where DOM clicks fail). Coordinates are auto-mapped from screenshot pixels to the viewport, so pass the x/y you read off the screenshot. Pair with a screenshot first. Requires browser_cdp_attach.",
     inputSchema: {
-      x: z.number().describe("Viewport X in CSS pixels"),
-      y: z.number().describe("Viewport Y in CSS pixels"),
+      x: z.number().describe("X in screenshot pixels"),
+      y: z.number().describe("Y in screenshot pixels"),
       button: z.enum(["left", "right", "middle"]).optional(),
+      clickCount: z.number().int().optional().describe("e.g. 2 for double-click"),
     },
   },
-  tool("coordinate_click", async ({ x, y, button }) => text(await callBridge("coordinate_click", { x, y, button })))
+  tool("coordinate_click", async ({ x, y, button, clickCount }) => text(await callBridge("coordinate_click", { x, y, button, clickCount })))
+);
+
+server.registerTool(
+  "browser_insert_text",
+  {
+    title: "Insert text (CDP)",
+    description: "Type text into the focused element via CDP Input.insertText — robust for emoji/IME/multibyte that key-by-key typing can't represent. Click/focus the field first. Requires browser_cdp_attach.",
+    inputSchema: { text: z.string().describe("Text to insert at the focus") },
+  },
+  tool("insert_text", async ({ text: t }) => text(await callBridge("insert_text", { text: t })))
 );
 
 server.registerTool(

@@ -57,7 +57,7 @@
     // Stamp each indexed node so resolve() can recover it after the cache goes stale.
     nodes.forEach((el, index) => el.setAttribute("data-aibc-ref", String(index)));
     const elements = nodes.map((el, index) => {
-      const item = { index, tag: el.tagName.toLowerCase(), text: elementText(el) };
+      const item = { index, ref: getOrAssignRef(el), tag: el.tagName.toLowerCase(), text: elementText(el) };
       if (el.tagName === "A" && el.href) item.href = el.getAttribute("href");
       if (el.tagName === "INPUT") {
         item.type = el.type || "text";
@@ -88,15 +88,185 @@
     throw new Error(`element ${index} is stale (re-snapshot)`);
   }
 
-  function click({ index }) {
-    const el = resolve(index);
-    el.scrollIntoView({ block: "center", inline: "center" });
-    el.click();
-    return { clicked: index };
+  // --- Stable element refs (WeakRef) ---
+  // Refs survive re-snapshots and don't mutate the DOM (unlike data-aibc-ref stamping).
+  // read_page / find / snapshot hand out ref ids; click/type/etc. also accept them.
+  let refCounter = 0;
+  const refMap = {};                   // refId -> WeakRef<Element>
+  const reverseRefMap = new WeakMap(); // Element -> refId
+
+  function getOrAssignRef(el) {
+    const existing = reverseRefMap.get(el);
+    if (existing && refMap[existing] && refMap[existing].deref() === el) return existing;
+    const ref = `ref_${++refCounter}`;
+    refMap[ref] = new WeakRef(el);
+    reverseRefMap.set(el, ref);
+    return ref;
   }
 
-  function type({ index, text, submit }) {
-    const el = resolve(index);
+  function resolveRef(refId) {
+    const wr = refMap[refId];
+    if (!wr) return null;
+    const el = wr.deref();
+    if (!el || !el.isConnected) { delete refMap[refId]; return null; }
+    return el;
+  }
+
+  // Resolve a target from either a stable ref or a per-snapshot index.
+  function resolveTarget({ index, ref } = {}) {
+    if (ref !== undefined && ref !== null) {
+      const el = resolveRef(ref);
+      if (!el) throw new Error(`ref "${ref}" not found or stale (re-run read_page / snapshot)`);
+      return el;
+    }
+    if (index !== undefined && index !== null) return resolve(index);
+    throw new Error("action requires an 'index' or 'ref'");
+  }
+
+  // --- Accessibility-tree read (compact indented text) ---
+  const TAG_ROLE = {
+    a: "link", button: "button", select: "combobox", textarea: "textbox",
+    h1: "heading", h2: "heading", h3: "heading", h4: "heading", h5: "heading", h6: "heading",
+    img: "img", nav: "navigation", main: "main", header: "banner", footer: "contentinfo",
+    form: "form", ul: "list", ol: "list", li: "listitem", table: "table",
+    summary: "button", label: "label", option: "option",
+  };
+  const INTERACTIVE_ROLES = new Set([
+    "link", "button", "textbox", "combobox", "checkbox", "radio", "slider",
+    "searchbox", "tab", "menuitem", "switch", "option",
+  ]);
+
+  function roleOf(el) {
+    const explicit = el.getAttribute && el.getAttribute("role");
+    if (explicit) return explicit;
+    const tag = el.tagName.toLowerCase();
+    if (tag === "input") {
+      const t = (el.getAttribute("type") || "text").toLowerCase();
+      if (t === "submit" || t === "button" || t === "reset") return "button";
+      if (t === "checkbox") return "checkbox";
+      if (t === "radio") return "radio";
+      if (t === "range") return "slider";
+      if (t === "search") return "searchbox";
+      if (t === "hidden") return null;
+      return "textbox";
+    }
+    return TAG_ROLE[tag] || null;
+  }
+
+  function accessibleName(el) {
+    const pick = (s) => (s ? String(s).trim().replace(/\s+/g, " ").slice(0, 100) : "");
+    let n = pick(el.getAttribute && el.getAttribute("aria-label"));
+    if (n) return n;
+    const labelledby = el.getAttribute && el.getAttribute("aria-labelledby");
+    if (labelledby) {
+      const lbl = document.getElementById(labelledby.split(/\s+/)[0]);
+      if (lbl) { n = pick(lbl.innerText); if (n) return n; }
+    }
+    n = pick(el.getAttribute && el.getAttribute("placeholder")); if (n) return n;
+    n = pick(el.getAttribute && el.getAttribute("title")); if (n) return n;
+    n = pick(el.getAttribute && el.getAttribute("alt")); if (n) return n;
+    if (el.id) {
+      const lab = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+      if (lab) { n = pick(lab.innerText); if (n) return n; }
+    }
+    if ("value" in el && el.value && String(el.value).length < 50) return pick(el.value);
+    const txt = pick(el.innerText || el.textContent);
+    if (txt.length >= 3) return txt;
+    return "";
+  }
+
+  function read_page({ mode = "interactive", depth = 15, ref_id, maxChars = 50000 } = {}) {
+    const root = ref_id ? resolveRef(ref_id) : document.body;
+    if (ref_id && !root) throw new Error(`ref "${ref_id}" not found or stale; call read_page without ref_id`);
+    if (!root) return { url: location.href, title: document.title, tree: "", truncated: false };
+    const all = mode === "all";
+    const lines = [];
+    let size = 0;
+    let truncated = false;
+
+    function emit(line) {
+      if (size + line.length + 1 > maxChars) { truncated = true; return false; }
+      lines.push(line);
+      size += line.length + 1;
+      return true;
+    }
+
+    function walk(el, d) {
+      if (truncated || d > depth) return;
+      for (const child of el.children) {
+        if (truncated) return;
+        if (!all) {
+          if (child.getAttribute && child.getAttribute("aria-hidden") === "true") continue;
+          if (!isVisible(child)) continue;
+        }
+        const role = roleOf(child);
+        const interactive = !!role && INTERACTIVE_ROLES.has(role);
+        if (all || interactive || role === "heading") {
+          const name = accessibleName(child);
+          let line = "  ".repeat(d) + (role || child.tagName.toLowerCase());
+          if (name) line += ` "${name}"`;
+          if (interactive) line += ` [${getOrAssignRef(child)}]`;
+          if (child.tagName === "INPUT") {
+            const t = child.getAttribute("type"); if (t) line += ` type="${t}"`;
+          }
+          if (child.tagName === "SELECT") {
+            const opts = Array.from(child.options)
+              .map((o) => (o.selected ? `${o.text.trim()} (selected)` : o.text.trim()))
+              .slice(0, 20);
+            line += ` options=${JSON.stringify(opts)}`;
+          }
+          if (!emit(line)) return;
+        }
+        walk(child, d + 1);
+      }
+    }
+
+    walk(root, 0);
+    return {
+      url: location.href,
+      title: document.title,
+      tree: lines.join("\n"),
+      truncated,
+      ...(truncated ? { note: "Output capped at maxChars. Reduce depth or pass a ref_id to focus a subtree." } : {}),
+    };
+  }
+
+  function find({ query, max = 20 } = {}) {
+    if (!query) throw new Error("find requires 'query'");
+    const q = String(query).toLowerCase();
+    const out = [];
+    for (const el of document.querySelectorAll(INTERACTIVE_SELECTOR)) {
+      if (!isVisible(el)) continue;
+      const name = accessibleName(el);
+      const hay = [
+        name,
+        el.getAttribute("placeholder"),
+        el.getAttribute("aria-label"),
+        el.getAttribute("title"),
+        el.textContent,
+      ].filter(Boolean).join(" ").toLowerCase();
+      if (hay.includes(q)) {
+        out.push({
+          ref: getOrAssignRef(el),
+          role: roleOf(el) || el.tagName.toLowerCase(),
+          name,
+          tag: el.tagName.toLowerCase(),
+        });
+        if (out.length >= max) break;
+      }
+    }
+    return { count: out.length, matches: out };
+  }
+
+  function click({ index, ref }) {
+    const el = resolveTarget({ index, ref });
+    el.scrollIntoView({ block: "center", inline: "center" });
+    el.click();
+    return { clicked: ref != null ? ref : index };
+  }
+
+  function type({ index, ref, text, submit }) {
+    const el = resolveTarget({ index, ref });
     el.scrollIntoView({ block: "center", inline: "center" });
     el.focus();
     if ("value" in el) {
@@ -107,7 +277,7 @@
       el.textContent = text;
       el.dispatchEvent(new Event("input", { bubbles: true }));
     } else {
-      throw new Error(`element ${index} is not editable`);
+      throw new Error("target element is not editable");
     }
     if (submit) {
       const opts = { bubbles: true, cancelable: true, key: "Enter", code: "Enter", keyCode: 13 };
@@ -115,7 +285,7 @@
       el.dispatchEvent(new KeyboardEvent("keyup", opts));
       if (el.form) el.form.requestSubmit?.();
     }
-    return { typed: index };
+    return { typed: ref != null ? ref : index };
   }
 
   function scroll({ direction = "down", amount = 600 }) {
@@ -124,19 +294,19 @@
     return { scrolledY: window.scrollY };
   }
 
-  function hover({ index }) {
-    const el = resolve(index);
+  function hover({ index, ref }) {
+    const el = resolveTarget({ index, ref });
     el.scrollIntoView({ block: "center", inline: "center" });
     const opts = { bubbles: true, cancelable: true };
     el.dispatchEvent(new MouseEvent("mouseover", opts));
     el.dispatchEvent(new MouseEvent("mouseenter", opts));
     el.dispatchEvent(new MouseEvent("mousemove", opts));
-    return { hovered: index };
+    return { hovered: ref != null ? ref : index };
   }
 
-  function select_option({ index, value, label }) {
-    const el = resolve(index);
-    if (el.tagName !== "SELECT") throw new Error(`element ${index} is not a select`);
+  function select_option({ index, ref, value, label }) {
+    const el = resolveTarget({ index, ref });
+    if (el.tagName !== "SELECT") throw new Error("target element is not a select");
     let matched = null;
     if (value !== undefined) {
       matched = Array.from(el.options).find((opt) => opt.value === value) || null;
@@ -154,8 +324,11 @@
     return { selected: value !== undefined ? value : label };
   }
 
-  function press_key({ key, index }) {
-    const target = index !== undefined ? resolve(index) : document.activeElement || document.body;
+  function press_key({ key, index, ref }) {
+    const target =
+      index !== undefined || ref !== undefined
+        ? resolveTarget({ index, ref })
+        : document.activeElement || document.body;
     if (target.focus) target.focus();
     const opts = { key, code: key, bubbles: true, cancelable: true };
     target.dispatchEvent(new KeyboardEvent("keydown", opts));
@@ -188,6 +361,24 @@
           return;
         }
         setTimeout(check, 100);
+      };
+      check();
+    });
+  }
+
+  // Wait until the page is loaded AND no CSS/JS animations are running. getAnimations()
+  // catches transitions/animations that a load- or network-idle wait misses.
+  function wait_settle({ timeoutMs = 10000 } = {}) {
+    const start = Date.now();
+    return new Promise((resolve) => {
+      const check = () => {
+        const ready = document.readyState === "complete";
+        const anims = document.getAnimations ? document.getAnimations().length === 0 : true;
+        if ((ready && anims) || Date.now() - start >= timeoutMs) {
+          resolve({ settled: ready && anims, readyState: document.readyState, waitedMs: Date.now() - start });
+          return;
+        }
+        setTimeout(check, 50);
       };
       check();
     });
@@ -365,6 +556,8 @@
 
   const handlers = {
     snapshot,
+    read_page,
+    find,
     click,
     type,
     scroll,
@@ -372,6 +565,7 @@
     select_option,
     press_key,
     wait_for,
+    wait_settle,
     get_page_content,
     click_selector,
     fill_selector,
