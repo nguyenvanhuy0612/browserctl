@@ -52,17 +52,35 @@ function tool(action, build) {
   };
 }
 
-const server = new McpServer({ name: "ai-browser-control", version: "0.1.0" });
+// Server-level operating policy. MCP clients surface this to the model on
+// connect, so it frames every action before any tool description is read. It
+// encodes the pinned-target-tab, background-first control model this bridge is
+// built around — the single most important thing an agent must get right here.
+const INSTRUCTIONS = `This server drives ONE pinned "target" tab in the background. Follow this policy on every task:
+
+- Pinned target: your first command pins the currently focused tab as the target, and it STAYS pinned even after the user switches to other tabs. Every command — DOM (click/type/navigate/read), CDP (debugger/console/network/eval), light network capture, and screenshots — acts on that pinned target, never on whatever tab the user is currently looking at.
+- Work in the background. Do NOT switch or foreground a tab in order to act on it: clicks, typing, navigation, reads, and screenshots all work while the target sits in the background. The user must be able to keep working in their own tab (e.g. GitLab) uninterrupted while you work yours (e.g. LinkedIn).
+- Call browser_group_tab once near the start so the user can see which tab you drive (a labeled tab group). It does not steal focus.
+- To act on a different page, use browser_new_tab or browser_navigate — both re-pin the target. Only use browser_switch_tab / browser_focus_window when the user explicitly asks to bring a tab forward, or when a step genuinely cannot run in the background.
+- Screenshots capture the background target without activating it (an "is being debugged" bar may appear on that tab only). Never foreground a tab just to screenshot it.
+- Before reading or screenshotting sensitive content, confirm the target with browser_current_tab.`;
+
+const server = new McpServer(
+  { name: "ai-browser-control", version: "0.2.0" },
+  { instructions: INSTRUCTIONS }
+);
 
 server.registerTool(
   "browser_snapshot",
   {
     title: "Snapshot page",
     description:
-      "Return the TARGET tab's interactive elements (each with an 'index' and a stable 'ref'), the page URL/title, and visible text. On your first command the focused tab is pinned as the target and stays pinned even if the user switches tabs (use browser_switch_tab to retarget). Check the returned url/title (or call browser_current_tab) before reading sensitive pages. Call this first, then act by ref/index. Re-call after any action that changes the page.",
-    inputSchema: {},
+      "Return the TARGET tab's interactive elements (each with an 'index' and a stable 'ref'), the page URL/title, and visible text. On your first command the focused tab is pinned as the target and stays pinned even if the user switches tabs (use browser_switch_tab to retarget). Check the returned url/title (or call browser_current_tab) before reading sensitive pages. Call this first, then act by ref/index. Re-call after any action that changes the page. Covers elements inside iframes (including cross-origin): a sub-frame element carries a 'frame' url and a frame-qualified ref like 'f3:ref_5' — pass that ref back verbatim to click/type it (index is top-frame only).",
+    inputSchema: {
+      maxText: z.number().int().optional().describe("Max characters of page body text to include (default 4000)"),
+    },
   },
-  tool("snapshot", async () => text(await callBridge("snapshot")))
+  tool("snapshot", async ({ maxText }) => text(await callBridge("snapshot", { maxText })))
 );
 
 server.registerTool(
@@ -70,7 +88,7 @@ server.registerTool(
   {
     title: "Read page (accessibility tree)",
     description:
-      "Return the TARGET tab's accessibility tree as compact indented text — roles, accessible names, and a stable 'ref' on each interactive element (e.g. textbox \"Email\" [ref_5]). Cheaper than a screenshot and usable for reasoning about structured pages. Act on results with browser_click/browser_type using the ref. mode='interactive' (default) lists actionable elements; mode='all' includes everything. Pass ref_id to focus a subtree, depth to limit nesting.",
+      "Return the TARGET tab's accessibility tree as compact indented text — roles, accessible names, and a stable 'ref' on each interactive element (e.g. textbox \"Email\" [ref_5]). Cheaper than a screenshot and usable for reasoning about structured pages. Act on results with browser_click/browser_type using the ref. mode='interactive' (default) lists actionable elements; mode='all' includes everything. Pass ref_id to focus a subtree, depth to limit nesting. iframe contents are appended under an 'iframe [f<id>] <url>' header with frame-qualified refs (e.g. f3:ref_5).",
     inputSchema: {
       mode: z.enum(["interactive", "all"]).optional().describe("Default 'interactive'"),
       depth: z.number().int().optional().describe("Max nesting depth (default 15)"),
@@ -88,7 +106,7 @@ server.registerTool(
   {
     title: "Find elements by text",
     description:
-      "Find interactive elements whose accessible name / text / placeholder / aria-label contains the query. Returns up to 'max' matches, each with a stable 'ref' to act on. Use when you know the label of a control but not its index.",
+      "Find interactive elements whose accessible name / text / placeholder / aria-label contains the query. Returns up to 'max' matches, each with a stable 'ref' to act on. Searches inside iframes too; matches from a sub-frame carry a frame-qualified ref (e.g. f3:ref_5) — pass it back verbatim. Use when you know the label of a control but not its index.",
     inputSchema: {
       query: z.string().describe("Text to match (case-insensitive substring)"),
       max: z.number().int().optional().describe("Max matches (default 20)"),
@@ -220,10 +238,13 @@ server.registerTool(
   "browser_switch_tab",
   {
     title: "Switch tab",
-    description: "Make the tab with the given id active and the target for subsequent commands.",
-    inputSchema: { id: z.number().int().describe("Tab id from browser_list_tabs") },
+    description: "Make the tab with the given id active and the target for subsequent commands. Activates the tab within its window but does NOT raise the window (no focus steal) unless focus=true. Prefer browser_navigate/browser_new_tab to work a new page; use this (especially focus=true) only when the user asks to bring a tab forward.",
+    inputSchema: {
+      id: z.number().int().describe("Tab id from browser_list_tabs"),
+      focus: z.boolean().optional().describe("Also raise the window to the foreground (steals the user's focus). Default false."),
+    },
   },
-  tool("switch_tab", async ({ id }) => text(await callBridge("switch_tab", { id })))
+  tool("switch_tab", async ({ id, focus }) => text(await callBridge("switch_tab", { id, focus })))
 );
 
 server.registerTool(
@@ -254,7 +275,7 @@ server.registerTool(
   {
     title: "Attach debugger",
     description:
-      "Attach the debugger to the active tab to start capturing console logs and network traffic. Shows an 'is being debugged' bar in the browser. Call this before get_console_logs / get_network_requests / export_har.",
+      "Attach the debugger to the target tab to start capturing console logs and network traffic. Shows an 'is being debugged' bar in the browser. Call this before get_console_logs / get_network_requests / export_har.",
     inputSchema: {},
   },
   tool("cdp_attach", async () => text(await callBridge("cdp_attach")))
@@ -264,7 +285,7 @@ server.registerTool(
   "browser_cdp_detach",
   {
     title: "Detach debugger",
-    description: "Detach the debugger from the active tab and stop capturing. Removes the debugging bar.",
+    description: "Detach the debugger from the target tab and stop capturing. Removes the debugging bar.",
     inputSchema: {},
   },
   tool("cdp_detach", async () => text(await callBridge("cdp_detach")))
@@ -306,7 +327,7 @@ server.registerTool(
   {
     title: "Export HAR",
     description:
-      "Export captured network traffic as a HAR 1.2 object (headers, status, timing). Sensitive headers (cookies, auth) are redacted. Set bodies=true to also include response bodies (best-effort, slower). Requires browser_cdp_attach.",
+      "Export captured network traffic as a HAR 1.2 object (headers, status, timing). Headers are included verbatim (local tool, no redaction). Set bodies=true to also include response bodies (best-effort, slower). Requires browser_cdp_attach.",
     inputSchema: { bodies: z.boolean().optional().describe("Include response bodies") },
   },
   tool("export_har", async ({ bodies }) => text(await callBridge("export_har", { bodies })))
@@ -317,7 +338,7 @@ server.registerTool(
   {
     title: "Evaluate JavaScript",
     description:
-      "Run a JavaScript expression in the active page and return its (JSON-serializable) value. If the debugger is attached it runs via Runtime.evaluate (bypasses page CSP); otherwise in the page MAIN world.",
+      "Run a JavaScript expression in the target page and return its value. The value must be JSON-serializable (functions/DOM nodes are dropped, via JSON round-trip). If the debugger is attached it runs via Runtime.evaluate (bypasses page CSP); otherwise in the page MAIN world.",
     inputSchema: { expression: z.string().describe("JavaScript expression to evaluate") },
   },
   tool("eval_js", async ({ expression }) => text(await callBridge("eval_js", { expression })))
@@ -329,25 +350,29 @@ server.registerTool(
   "browser_hover",
   {
     title: "Hover element",
-    description: "Hover the pointer over the element with the given snapshot index.",
-    inputSchema: { index: z.number().int().describe("Element index from browser_snapshot") },
+    description: "Hover the pointer over an element identified by 'ref' (from browser_read_page/browser_find/browser_snapshot) or 'index' (from the latest browser_snapshot). Prefer ref.",
+    inputSchema: {
+      index: z.number().int().optional().describe("Element index from browser_snapshot"),
+      ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5')"),
+    },
   },
-  tool("hover", async ({ index }) => text(await callBridge("hover", { index })))
+  tool("hover", async ({ index, ref }) => text(await callBridge("hover", { index, ref })))
 );
 
 server.registerTool(
   "browser_select_option",
   {
     title: "Select dropdown option",
-    description: "Select an option in a <select> element by value or by visible label.",
+    description: "Select an option in a <select> element (identified by 'ref' or 'index') by value or by visible label.",
     inputSchema: {
-      index: z.number().int().describe("Index of the <select> element"),
+      index: z.number().int().optional().describe("Index of the <select> element from browser_snapshot"),
+      ref: z.string().optional().describe("Stable ref of the <select> element (e.g. 'ref_5')"),
       value: z.string().optional().describe("Option value to select"),
       label: z.string().optional().describe("Visible option text to select"),
     },
   },
-  tool("select_option", async ({ index, value, label }) =>
-    text(await callBridge("select_option", { index, value, label }))
+  tool("select_option", async ({ index, ref, value, label }) =>
+    text(await callBridge("select_option", { index, ref, value, label }))
   )
 );
 
@@ -355,13 +380,15 @@ server.registerTool(
   "browser_press_key",
   {
     title: "Press a key",
-    description: "Dispatch a keyboard key (e.g. Enter, Escape, ArrowDown) to an element or the focused element.",
+    description: "Dispatch a keyboard key (e.g. Enter, Escape, ArrowDown) to an element or the focused element. Note: 'Enter' on a form field can submit the form. Pass modifiers (e.g. ['Meta','Shift']) for shortcuts like Cmd+A / Cmd+Z; modifier shortcuts run via CDP and need browser_cdp_attach first (on Mac, Cmd+A/Z/C/V/X map to real editor commands), acting on the focused element.",
     inputSchema: {
-      key: z.string().describe("Key name, e.g. 'Enter', 'Escape', 'ArrowDown'"),
-      index: z.number().int().optional().describe("Target element index; defaults to the focused element"),
+      key: z.string().describe("Key name, e.g. 'Enter', 'Escape', 'ArrowDown', or a letter for shortcuts"),
+      index: z.number().int().optional().describe("Target element index from browser_snapshot; defaults to the focused element"),
+      ref: z.string().optional().describe("Stable ref of the target element (e.g. 'ref_5'); defaults to the focused element"),
+      modifiers: z.array(z.enum(["Meta", "Control", "Alt", "Shift"])).optional().describe("Modifier keys held during the press (Meta = Cmd on Mac)"),
     },
   },
-  tool("press_key", async ({ key, index }) => text(await callBridge("press_key", { key, index })))
+  tool("press_key", async ({ key, index, ref, modifiers }) => text(await callBridge("press_key", { key, index, ref, modifiers })))
 );
 
 server.registerTool(
@@ -409,13 +436,13 @@ server.registerTool(
 
 server.registerTool(
   "browser_go_back",
-  { title: "Go back", description: "Navigate back in the active tab's history.", inputSchema: {} },
+  { title: "Go back", description: "Navigate back in the target tab's history.", inputSchema: {} },
   tool("go_back", async () => text(await callBridge("go_back")))
 );
 
 server.registerTool(
   "browser_go_forward",
-  { title: "Go forward", description: "Navigate forward in the active tab's history.", inputSchema: {} },
+  { title: "Go forward", description: "Navigate forward in the target tab's history.", inputSchema: {} },
   tool("go_forward", async () => text(await callBridge("go_forward")))
 );
 
@@ -423,7 +450,7 @@ server.registerTool(
   "browser_reload",
   {
     title: "Reload",
-    description: "Reload the active tab. Set bypassCache=true for a hard reload.",
+    description: "Reload the target tab. Set bypassCache=true for a hard reload.",
     inputSchema: { bypassCache: z.boolean().optional().describe("Hard reload, bypassing cache") },
   },
   tool("reload", async ({ bypassCache }) => text(await callBridge("reload", { bypassCache })))
@@ -443,7 +470,7 @@ server.registerTool(
   "browser_focus_window",
   {
     title: "Focus window",
-    description: "Bring the window with the given id to the foreground.",
+    description: "Bring the window with the given id to the foreground. Steals the user's OS focus — use only when the user explicitly asks to surface a window, not as part of background work.",
     inputSchema: { id: z.number().int().describe("Window id from browser_list_windows") },
   },
   tool("focus_window", async ({ id }) => text(await callBridge("focus_window", { id })))
@@ -456,7 +483,7 @@ server.registerTool(
   {
     title: "Start network capture (light)",
     description:
-      "Start capturing network requests for the active tab via webRequest. No debugger banner, but no response bodies. Clears the previous buffer.",
+      "Start capturing network requests for the target tab via webRequest. No debugger banner, but no response bodies. Clears the previous buffer.",
     inputSchema: {},
   },
   tool("net_start", async () => text(await callBridge("net_start")))
@@ -464,7 +491,7 @@ server.registerTool(
 
 server.registerTool(
   "browser_net_stop",
-  { title: "Stop network capture (light)", description: "Stop the webRequest capture for the active tab.", inputSchema: {} },
+  { title: "Stop network capture (light)", description: "Stop the webRequest capture for the target tab.", inputSchema: {} },
   tool("net_stop", async () => text(await callBridge("net_stop")))
 );
 
@@ -473,7 +500,7 @@ server.registerTool(
   {
     title: "Get captured network (light)",
     description:
-      "Return network requests captured by the light webRequest capture (method, url, type, status, timing). Sensitive headers are stripped.",
+      "Return network requests captured by the light webRequest capture (method, url, type, status, timing). Headers are included verbatim (local tool, no redaction).",
     inputSchema: {
       urlContains: z.string().optional().describe("Filter by URL substring"),
       limit: z.number().int().optional().describe("Max requests (default 200, newest)"),
@@ -486,7 +513,7 @@ server.registerTool(
 
 server.registerTool(
   "browser_net_clear",
-  { title: "Clear network capture (light)", description: "Clear the light network capture buffer for the active tab.", inputSchema: {} },
+  { title: "Clear network capture (light)", description: "Clear the light network capture buffer for the target tab.", inputSchema: {} },
   tool("net_clear", async () => text(await callBridge("net_clear")))
 );
 
@@ -511,10 +538,13 @@ server.registerTool(
     title: "Full-page screenshot",
     description:
       "Capture the entire page (beyond the viewport) as an image. Requires browser_cdp_attach (uses the debugger).",
-    inputSchema: { format: z.enum(["png", "jpeg"]).optional().describe("Image format, default png") },
+    inputSchema: {
+      format: z.enum(["png", "jpeg"]).optional().describe("Image format, default png"),
+      quality: z.number().int().optional().describe("JPEG quality 1-100, default 55 (jpeg only)"),
+    },
   },
-  tool("capture_screenshot", async ({ format }) => {
-    const { dataUrl } = await callBridge("capture_screenshot", { fullPage: true, format });
+  tool("capture_screenshot", async ({ format, quality }) => {
+    const { dataUrl } = await callBridge("capture_screenshot", { fullPage: true, format, quality });
     const m = dataUrl.match(/^data:image\/(png|jpeg);base64,(.*)$/);
     return { content: [{ type: "image", data: m ? m[2] : dataUrl, mimeType: `image/${m ? m[1] : "png"}` }] };
   })
@@ -573,11 +603,15 @@ server.registerTool(
   "browser_element_screenshot",
   {
     title: "Screenshot one element",
-    description: "Capture just the element at the given snapshot index as an image. Requires browser_cdp_attach.",
-    inputSchema: { index: z.number().int(), format: z.enum(["png", "jpeg"]).optional() },
+    description: "Capture just one element as an image, identified by 'ref' (from browser_read_page/browser_find/browser_snapshot) or 'index' (from the latest browser_snapshot). Prefer ref. Requires browser_cdp_attach.",
+    inputSchema: {
+      index: z.number().int().optional().describe("Element index from browser_snapshot"),
+      ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5')"),
+      format: z.enum(["png", "jpeg"]).optional(),
+    },
   },
-  tool("element_screenshot", async ({ index, format }) => {
-    const { dataUrl } = await callBridge("element_screenshot", { index, format });
+  tool("element_screenshot", async ({ index, ref, format }) => {
+    const { dataUrl } = await callBridge("element_screenshot", { index, ref, format });
     const m = dataUrl.match(/^data:image\/(png|jpeg);base64,(.*)$/);
     return { content: [{ type: "image", data: m ? m[2] : dataUrl, mimeType: `image/${m ? m[1] : "png"}` }] };
   })
@@ -705,7 +739,7 @@ server.registerTool(
   "browser_record_start",
   {
     title: "Start recording",
-    description: "Start recording user interactions (clicks, field changes) in the active tab. Replay later with browser_replay.",
+    description: "Start recording user interactions (clicks, field changes) in the target tab. Replay later with browser_replay.",
     inputSchema: {},
   },
   tool("record_start", async () => text(await callBridge("record_start")))
@@ -727,7 +761,7 @@ server.registerTool(
   "browser_replay",
   {
     title: "Replay steps",
-    description: "Replay recorded steps (or supplied steps) against the active tab. Optionally navigate to startUrl first.",
+    description: "Replay recorded steps (or supplied steps) against the target tab. Optionally navigate to startUrl first.",
     inputSchema: {
       startUrl: z.string().optional(),
       steps: z.array(z.object({
@@ -742,7 +776,7 @@ server.registerTool(
   "browser_wait_network_idle",
   {
     title: "Wait for network idle",
-    description: "Wait until the active tab has had no in-flight requests for idleMs (default 500), up to timeoutMs (default 10000). Reduces flaky waits.",
+    description: "Wait until the target tab has had no in-flight requests for idleMs (default 500), up to timeoutMs (default 10000). Reduces flaky waits.",
     inputSchema: { idleMs: z.number().int().optional(), timeoutMs: z.number().int().optional() },
   },
   tool("wait_network_idle", async ({ idleMs, timeoutMs }) =>

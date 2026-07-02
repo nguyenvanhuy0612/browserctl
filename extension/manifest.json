@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "AI Browser Control",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Lets an AI agent drive this browser via a local bridge server.",
-  "permissions": ["tabs", "tabGroups", "scripting", "activeTab", "alarms", "storage", "debugger", "webRequest"],
+  "permissions": ["tabs", "tabGroups", "scripting", "activeTab", "alarms", "storage", "debugger", "webRequest", "webNavigation"],
   "host_permissions": ["<all_urls>"],
   "options_ui": {
     "page": "options.html",
@@ -18,7 +18,7 @@
       "matches": ["<all_urls>"],
       "js": ["content.js"],
       "run_at": "document_idle",
-      "all_frames": false
+      "all_frames": true
     }
   ],
   "action": {

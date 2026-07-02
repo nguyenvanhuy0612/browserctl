@@ -18,13 +18,11 @@ function render(state) {
     btn.dataset.act = "disconnect";
     btn.disabled = false;
   } else if (s === "connecting") {
+    // Retries with capped backoff until the bridge answers. Keep Disconnect
+    // available so the user can stop the auto-retry loop while it's dialing.
     set("off", "Connecting...");
-    btn.textContent = "Connecting...";
-    btn.disabled = true;
-  } else if (s === "failed") {
-    set("off", "Not connected (bridge unreachable)");
-    btn.textContent = "Connect";
-    btn.dataset.act = "connect";
+    btn.textContent = "Disconnect";
+    btn.dataset.act = "disconnect";
     btn.disabled = false;
   } else {
     set("off", "Disconnected");

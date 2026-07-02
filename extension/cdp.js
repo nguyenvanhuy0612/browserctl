@@ -5,7 +5,7 @@
 // get_network_requests / export_har. eval_js works with or without attach
 // (attach bypasses page CSP via Runtime.evaluate).
 
-import { redactHeaderList, truncate } from "./util.js";
+import { truncate } from "./util.js";
 
 const MAX_CONSOLE = 1000;
 const MAX_NETWORK = 2000;
@@ -24,6 +24,33 @@ export function isAttached(tabId) {
 
 const BUTTON_MASK = { left: 1, right: 2, middle: 4 };
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Key dispatch helpers (used by the CDP press_key path for modifier shortcuts).
+const IS_MAC = /Mac/i.test((globalThis.navigator && navigator.userAgent) || "");
+const MOD_BITS = { alt: 1, control: 2, ctrl: 2, meta: 4, command: 4, cmd: 4, shift: 8 };
+const NAMED_VK = {
+  Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46,
+  ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, Home: 36, End: 35, " ": 32,
+};
+function modMask(mods) { let m = 0; for (const x of mods || []) m |= MOD_BITS[String(x).toLowerCase()] || 0; return m; }
+function vkOf(key) { if (!key) return 0; return key.length === 1 ? key.toUpperCase().charCodeAt(0) : (NAMED_VK[key] || 0); }
+// Mac NSResponder editor commands so Cmd+A / Cmd+Z etc. actually perform the edit — a bare
+// synthetic key event does not trigger native editing. No-op off Mac (there the modifier +
+// virtual-key code alone drives the native shortcut, e.g. Ctrl+A). Matches the official
+// extension's dispatchKeyEvent handling (see docs/prior-art.md #5).
+function macCommands(key, mods) {
+  if (!IS_MAC) return [];
+  const set = new Set((mods || []).map((x) => String(x).toLowerCase()));
+  if (!(set.has("meta") || set.has("command") || set.has("cmd"))) return [];
+  const k = (key || "").toLowerCase();
+  const shift = set.has("shift");
+  if (k === "a") return ["selectAll"];
+  if (k === "z") return shift ? ["redo"] : ["undo"];
+  if (k === "c") return ["copy"];
+  if (k === "v") return ["paste"];
+  if (k === "x") return ["cut"];
+  return [];
+}
 // Scale of the most recent CDP screenshot for a tab (1 if none). coordinate_* divide the
 // model's screenshot-pixel coords by this to get viewport CSS pixels.
 const captureScale = (tabId) => (lastCapture[tabId] && lastCapture[tabId].scale) || 1;
@@ -67,15 +94,28 @@ function sendRaw(tabId, method, params = {}) {
   });
 }
 
+// Enable the event domains. Uses sendRaw (not send) so it can be called from the
+// reattach path without recursing. Idempotent — safe to call more than once.
+async function enableDomains(tabId) {
+  await sendRaw(tabId, "Network.enable");
+  await sendRaw(tabId, "Runtime.enable");
+  await sendRaw(tabId, "Log.enable");
+  await sendRaw(tabId, "Page.enable");
+}
+
 // send with one-shot auto-reattach: a dropped debugger (tab reload, service-worker
 // recycle) surfaces as "debugger is not attached"; re-attach once and retry so a single
-// action doesn't fail spuriously.
+// action doesn't fail spuriously. If the session had domains enabled, re-enable them
+// after reattach — a bare re-attach loses Network/Runtime/Log/Page, so buffered
+// console/network events would otherwise silently stop arriving.
 async function send(tabId, method, params = {}) {
   try {
     return await sendRaw(tabId, method, params);
   } catch (e) {
     if (/debugger is not attached/i.test(e.message || "")) {
       await attach(tabId);
+      const s = sessions.get(tabId);
+      if (s && s.domainsEnabled) { try { await enableDomains(tabId); } catch {} }
       return await sendRaw(tabId, method, params);
     }
     throw e;
@@ -100,19 +140,27 @@ export async function captureViewport(tabId, { format = "jpeg", quality = 55 } =
   await ensureAttached(tabId);
   const fmt = format === "png" ? "png" : "jpeg";
   let clip;
+  let dpr = 1;
   try {
     const m = await send(tabId, "Page.getLayoutMetrics");
-    const vp = m.cssVisualViewport || m.visualViewport || m.cssLayoutViewport || {};
+    const vp = m.cssVisualViewport || m.cssLayoutViewport || m.visualViewport || {};
     const w = Math.round(vp.clientWidth || 0);
     const h = Math.round(vp.clientHeight || 0);
+    // Derive the device-pixel ratio actually in force from the device-vs-CSS viewport
+    // ratio. We force deviceScaleFactor=1 on attach so this is normally ~1, but if that
+    // override failed the captured image is dpr× larger than CSS pixels. Folding dpr into
+    // the recorded scale self-corrects coordinate_click/drag mapping either way.
+    const devVp = m.visualViewport || {};
+    if (w && devVp.clientWidth) dpr = Math.max(1, devVp.clientWidth / w);
     if (w && h) {
       const MAX_SIDE = 1568; // Anthropic vision tiling: longest side cap
       const scale = Math.min(1, MAX_SIDE / Math.max(w, h));
       clip = { x: 0, y: 0, width: w, height: h, scale };
     }
   } catch {}
-  // Record the scale so coordinate_click/drag can map screenshot pixels -> viewport.
-  lastCapture[tabId] = { scale: clip ? clip.scale : 1 };
+  // Record the effective screenshot->CSS-pixel scale so coordinate_click/drag can map
+  // model coordinates (read off the returned image) back to viewport CSS pixels.
+  lastCapture[tabId] = { scale: (clip ? clip.scale : 1) * dpr };
   const shoot = (q) => send(tabId, "Page.captureScreenshot", {
     format: fmt,
     ...(fmt === "jpeg" ? { quality: q } : {}),
@@ -200,8 +248,20 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 });
 
 chrome.debugger.onDetach.addListener((source) => {
-  if (source.tabId != null) sessions.delete(source.tabId);
+  if (source.tabId != null) {
+    sessions.delete(source.tabId);
+    delete lastCapture[source.tabId];
+  }
 });
+
+// Drop all per-tab CDP state for a closed tab. Called from background.js's
+// tabs.onRemoved. The debugger auto-detaches when the tab closes, so we only
+// clear our own bookkeeping (sessions is also cleared by onDetach, but that can
+// race with removal; lastCapture is otherwise never pruned).
+export function dropTab(tabId) {
+  sessions.delete(tabId);
+  delete lastCapture[tabId];
+}
 
 function pushConsole(s, entry) {
   s.console.push(entry);
@@ -241,7 +301,7 @@ function buildHar(entries, bodies) {
           method: e.request.method,
           url: e.request.url,
           httpVersion: resp.protocol || "HTTP/1.1",
-          headers: redactHeaderList(toHeaders(e.request.headers)),
+          headers: toHeaders(e.request.headers),
           queryString: [],
           cookies: [],
           headersSize: -1,
@@ -251,7 +311,7 @@ function buildHar(entries, bodies) {
           status: resp.status || (e.failed ? 0 : 0),
           statusText: resp.statusText || (e.failed || ""),
           httpVersion: resp.protocol || "HTTP/1.1",
-          headers: redactHeaderList(toHeaders(resp.headers)),
+          headers: toHeaders(resp.headers),
           cookies: [],
           content,
           redirectURL: "",
@@ -267,7 +327,7 @@ function buildHar(entries, bodies) {
   return {
     log: {
       version: "1.2",
-      creator: { name: "ai-browser-control", version: "0.1.0" },
+      creator: { name: "ai-browser-control", version: "0.2.0" },
       entries: harEntries,
     },
   };
@@ -291,6 +351,7 @@ function collectAxNodes(axNodes, max) {
 
 function briefRequest(e) {
   return {
+    requestId: e.requestId, // needed to fetch the body via get_response_body
     method: e.request.method,
     url: e.request.url,
     resourceType: e.resourceType,
@@ -308,13 +369,11 @@ export async function handleCdp(action, params, tabId) {
       // The session may already exist (a lazy screenshot attached without enabling the
       // event domains); enable them here if not already done.
       const s = await ensureAttached(tabId);
-      if (!s.domainsEnabled) {
-        await send(tabId, "Network.enable");
-        await send(tabId, "Runtime.enable");
-        await send(tabId, "Log.enable");
-        await send(tabId, "Page.enable");
-        s.domainsEnabled = true;
-      }
+      // Re-enable unconditionally (idempotent): a same-tab navigation resets all
+      // enabled domains WITHOUT firing onDetach, so gating on domainsEnabled would
+      // leave post-navigation capture silently dead. Re-calling enable is cheap.
+      await enableDomains(tabId);
+      s.domainsEnabled = true;
       return { ok: true, result: { attached: true, tabId } };
     }
 
@@ -463,6 +522,26 @@ export async function handleCdp(action, params, tabId) {
       return { ok: true, result: { dragged: true } };
     }
 
+    case "press_key_cdp": {
+      // Key press via CDP with modifier support + Mac editor commands. Acts on the page's
+      // currently focused element (click/type/focus the field first). Routed here by
+      // background.js only when modifiers are present and the debugger is attached.
+      requireSession(tabId);
+      const key = params.key;
+      if (!key) throw new Error("press_key requires 'key'");
+      const modifiers = modMask(params.modifiers);
+      const commands = macCommands(key, params.modifiers);
+      const evt = {
+        key,
+        windowsVirtualKeyCode: vkOf(key),
+        modifiers,
+        ...(commands.length ? { commands } : {}),
+      };
+      await send(tabId, "Input.dispatchKeyEvent", { type: "keyDown", ...evt });
+      await send(tabId, "Input.dispatchKeyEvent", { type: "keyUp", ...evt });
+      return { ok: true, result: { pressed: key, modifiers: params.modifiers || [], commands } };
+    }
+
     case "insert_text": {
       // Type into the focused element via CDP, robust for emoji/IME/multibyte that
       // char-by-char keycodes can't represent.
@@ -483,14 +562,20 @@ export async function handleCdp(action, params, tabId) {
 
     case "element_screenshot": {
       requireSession(tabId);
-      const index = params.index;
       const format = params.format || "png";
-      const rect = await send(tabId, "Runtime.evaluate", {
-        expression: `(()=>{const e=document.querySelector('[data-aibc-ref="${index}"]');if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,dpr:window.devicePixelRatio}})()`,
-        returnByValue: true,
-      });
-      const r = rect.result && rect.result.value;
-      if (!r) throw new Error(`no element at index ${index} (snapshot first)`);
+      // Prefer a rect resolved by the content script (which owns ref/index resolution,
+      // including shadow-DOM elements). Fall back to the data-aibc-ref index stamp for
+      // callers that still pass a raw index without a resolved rect.
+      let r = params.rect;
+      if (!r) {
+        const index = params.index;
+        const rect = await send(tabId, "Runtime.evaluate", {
+          expression: `(()=>{const e=document.querySelector('[data-aibc-ref="${index}"]');if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}})()`,
+          returnByValue: true,
+        });
+        r = rect.result && rect.result.value;
+      }
+      if (!r) throw new Error(`element not found (snapshot first, or pass a valid ref/index)`);
       const res = await send(tabId, "Page.captureScreenshot", {
         format,
         clip: { x: r.x, y: r.y, width: r.width, height: r.height, scale: 1 },

@@ -56,9 +56,17 @@ npm start          # listens on http://localhost:8765
 A freshly installed extension stays idle and makes no connection attempt (so a
 not-yet-started bridge produces no console error). The first time you press
 **Connect** and it succeeds, the extension remembers it and auto-reconnects on
-later browser starts — with a bounded retry (5 attempts). If the bridge is
-unreachable it stops and waits; press **Connect** again to retry. When both are
-running, the popup reads **Connected**.
+later browser starts. After that it keeps trying with capped exponential backoff
+(up to 30s between tries) and **never permanently gives up** on a transient
+outage — restart the bridge and the extension re-links on its own, no manual
+Connect needed. A `chrome.alarms` keepalive resumes reconnect even after the
+MV3 service worker is recycled. Only an explicit **Disconnect** stops the loop.
+When both are running, the popup reads **Connected**.
+
+While connected, the bridge sends an application-level heartbeat ping every ~20s.
+Receiving it resets the MV3 service-worker idle timer, so the socket stays
+genuinely open instead of dropping on an idle gap; the extension's pong lets the
+bridge drop a dead link promptly. The keepalive alarm is then only a fallback.
 
 Works on any Chromium browser (Chrome, Edge). The host/port the extension dials
 is configurable on the extension's **options page** (popup -> "Open settings",
@@ -70,6 +78,13 @@ or the Extensions page -> Details -> Extension options) and stored in
 The `mcp/` server exposes the browser as native tools (`browser_snapshot`,
 `browser_navigate`, `browser_click`, ...) for any MCP client. This is the
 recommended path for Claude Code / Claude Desktop.
+
+On connect, the server sends a set of **operating instructions** (surfaced to the
+model by the MCP client) that make every agent follow the same control model:
+pin one target tab, group it, and act on it **in the background** — never switch
+or foreground the user's current tab unless a step genuinely can't run in the
+background or the user asks. So while you keep working in your own tab (say
+GitLab), the agent drives its tab (say LinkedIn) without disturbing you.
 
 ```bash
 cd mcp
@@ -126,8 +141,27 @@ issue `click` / `type` / `scroll` / `navigate` -> `snapshot` again.
 Working. Control parity with the official "Claude in Chrome" surface (open): DOM-index +
 accessibility-tree (`read_page`) reads with stable refs, ref/coordinate interaction,
 background-tab control, screenshots (incl. background tabs), console/network/HAR capture,
-record/replay, and tab grouping. See `PROTOCOL.md` for the full command list + roadmap,
+record/replay, and tab grouping. Reads and interaction pierce open shadow DOM and cover
+iframes (including cross-origin) via all_frames injection with frame-qualified refs. See `PROTOCOL.md` for the full command list + roadmap,
 and `docs/prior-art.md` for how this compares to similar projects.
+
+## Testing
+
+End-to-end tests drive the live stack (bridge -> extension -> Chrome) by POSTing
+real commands against a controlled page the runner serves over http:
+
+```bash
+# bridge must be running and the extension connected
+node tests/e2e/run.mjs
+```
+
+It creates a dedicated tab, exercises 58/60 commands (all but `focus_window` and
+`reload_extension`, which steal focus / drop the connection), asserts behaviour
+including the framework-safe value setter, ref-addressed element screenshots,
+shadow-DOM reads, and history navigation, then closes the tab and prints a
+pass/fail + coverage report. After editing extension code, reload it
+(`chrome://extensions` -> reload, or the `reload_extension` command) before
+re-running so the test hits the new code.
 
 ## Security
 

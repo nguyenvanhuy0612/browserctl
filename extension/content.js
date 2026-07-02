@@ -49,12 +49,54 @@
     ).slice(0, 200);
   }
 
+  // Query helpers that pierce OPEN shadow roots (web components). iframes are a
+  // separate document tree not reachable here; they are handled instead by the
+  // manifest's all_frames injection (this script runs in every frame) + the
+  // background worker aggregating per-frame results with frame-qualified refs.
+  function deepQueryAll(selector, root = document) {
+    const out = [];
+    const visit = (node) => {
+      try { for (const el of node.querySelectorAll(selector)) out.push(el); } catch { return; }
+      for (const el of node.querySelectorAll("*")) if (el.shadowRoot) visit(el.shadowRoot);
+    };
+    visit(root);
+    return out;
+  }
+  function deepQuery(selector, root = document) {
+    const direct = root.querySelector(selector);
+    if (direct) return direct;
+    for (const el of root.querySelectorAll("*")) {
+      if (el.shadowRoot) {
+        const m = deepQuery(selector, el.shadowRoot);
+        if (m) return m;
+      }
+    }
+    return null;
+  }
+
+  // Set an input/textarea/select value through the PROTOTYPE's native setter so
+  // frameworks that wrap the value property (React/Vue/Ember) observe the change
+  // and don't revert it. React patches the instance's own setter to track edits;
+  // calling the prototype setter is what its value-tracker keys off.
+  function setNativeValue(el, value) {
+    const proto = Object.getPrototypeOf(el);
+    const ownSetter = Object.getOwnPropertyDescriptor(el, "value") &&
+      Object.getOwnPropertyDescriptor(el, "value").set;
+    const protoSetter = Object.getOwnPropertyDescriptor(proto, "value") &&
+      Object.getOwnPropertyDescriptor(proto, "value").set;
+    if (protoSetter && ownSetter !== protoSetter) protoSetter.call(el, value);
+    else if (protoSetter) protoSetter.call(el, value);
+    else el.value = value;
+  }
+
   function snapshot(params = {}) {
     const maxText = params.maxText || 4000;
-    const nodes = Array.from(document.querySelectorAll(INTERACTIVE_SELECTOR)).filter(isVisible);
+    const nodes = deepQueryAll(INTERACTIVE_SELECTOR).filter(isVisible);
 
     indexedElements = nodes;
-    // Stamp each indexed node so resolve() can recover it after the cache goes stale.
+    // Clear stamps from a prior snapshot so a stale index can't resolve to the wrong
+    // element, then re-stamp so resolve() can recover a node after the cache goes stale.
+    for (const el of document.querySelectorAll("[data-aibc-ref]")) el.removeAttribute("data-aibc-ref");
     nodes.forEach((el, index) => el.setAttribute("data-aibc-ref", String(index)));
     const elements = nodes.map((el, index) => {
       const item = { index, ref: getOrAssignRef(el), tag: el.tagName.toLowerCase(), text: elementText(el) };
@@ -218,6 +260,8 @@
           if (!emit(line)) return;
         }
         walk(child, d + 1);
+        // Descend into an open shadow root so web-component internals appear in the tree.
+        if (child.shadowRoot) walk(child.shadowRoot, d + 1);
       }
     }
 
@@ -235,7 +279,7 @@
     if (!query) throw new Error("find requires 'query'");
     const q = String(query).toLowerCase();
     const out = [];
-    for (const el of document.querySelectorAll(INTERACTIVE_SELECTOR)) {
+    for (const el of deepQueryAll(INTERACTIVE_SELECTOR)) {
       if (!isVisible(el)) continue;
       const name = accessibleName(el);
       const hay = [
@@ -270,7 +314,7 @@
     el.scrollIntoView({ block: "center", inline: "center" });
     el.focus();
     if ("value" in el) {
-      el.value = text;
+      setNativeValue(el, text);
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
     } else if (el.isContentEditable) {
@@ -384,6 +428,16 @@
     });
   }
 
+  // Resolve an element by ref/index and return its viewport rect. Used by
+  // element_screenshot so it can capture ref-addressed (and shadow-DOM) elements,
+  // not just the data-aibc-ref index stamp that only snapshot sets.
+  function element_rect({ index, ref } = {}) {
+    const el = resolveTarget({ index, ref });
+    el.scrollIntoView({ block: "center", inline: "center" });
+    const r = el.getBoundingClientRect();
+    return { x: r.x, y: r.y, width: r.width, height: r.height };
+  }
+
   function get_page_content({ maxChars = 8000 } = {}) {
     let container = document.querySelector("main") || document.querySelector("article");
     if (!container) {
@@ -404,7 +458,7 @@
   // Selector-based actions. Indices are per-snapshot, so replay needs stable
   // CSS selectors instead.
   function click_selector({ selector }) {
-    const el = document.querySelector(selector);
+    const el = deepQuery(selector);
     if (!el) throw new Error("no element matches " + selector);
     el.scrollIntoView({ block: "center", inline: "center" });
     el.click();
@@ -412,11 +466,11 @@
   }
 
   function fill_selector({ selector, value }) {
-    const el = document.querySelector(selector);
+    const el = deepQuery(selector);
     if (!el) throw new Error("no element matches " + selector);
     el.focus();
     if ("value" in el) {
-      el.value = value;
+      setNativeValue(el, value);
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
     } else if (el.isContentEditable) {
@@ -567,6 +621,7 @@
     wait_for,
     wait_settle,
     get_page_content,
+    element_rect,
     click_selector,
     fill_selector,
     storage_get,

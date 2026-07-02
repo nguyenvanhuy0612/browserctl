@@ -4,8 +4,8 @@
 // the content script. Tab/window-level commands are handled here with chrome.*.
 // Console/network/HAR/eval commands are handled by the CDP module (cdp.js).
 
-import { handleCdp, CDP_ACTIONS, captureViewport, isAttached } from "./cdp.js";
-import { handleNet, NET_ACTIONS } from "./netlog.js";
+import { handleCdp, CDP_ACTIONS, captureViewport, isAttached, dropTab as cdpDropTab } from "./cdp.js";
+import { handleNet, NET_ACTIONS, dropTab as netDropTab } from "./netlog.js";
 
 // DOM-level commands that run in the active tab's content script.
 const CONTENT_ACTIONS = [
@@ -30,11 +30,16 @@ const CONTENT_ACTIONS = [
 
 // Recorded interaction steps, accumulated from the content recorder (record_start).
 let recordingSteps = [];
+const MAX_RECORD_STEPS = 5000; // cap so a long/runaway recording can't grow unbounded
 
 // The content recorder pushes each captured step here via chrome.runtime.sendMessage.
 // The popup also talks to the worker here: read connection state, Connect, Disconnect.
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg && msg.__aibc_record_step) { recordingSteps.push(msg.__aibc_record_step); return; }
+  if (msg && msg.__aibc_record_step) {
+    recordingSteps.push(msg.__aibc_record_step);
+    if (recordingSteps.length > MAX_RECORD_STEPS) recordingSteps.shift();
+    return;
+  }
   if (msg && msg.__aibc_getState) {
     chrome.storage.local.get(["bridgeHost", "bridgePort"]).then((cfg) => {
       sendResponse({
@@ -52,7 +57,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 8765;
 const RECONNECT_MS = 2000;
-const MAX_ATTEMPTS = 5; // bounded auto-retry, then wait for a manual Connect
+const MAX_BACKOFF_MS = 30000; // cap the exponential backoff between reconnect tries
 
 let socket = null;
 let attempts = 0;
@@ -60,7 +65,8 @@ let reconnectTimer = null;
 
 // Are we actively trying to be connected? Drives whether close/keepalive retry.
 let wantConnect = false;
-// "idle" | "connecting" | "connected" | "failed" — reported to the popup.
+// "idle" | "connecting" | "connected" — reported to the popup. ("connecting"
+// persists across a down bridge: we retry with backoff instead of failing out.)
 let connState = "idle";
 
 // Bridge host/port are configurable on the options page (chrome.storage.local).
@@ -112,6 +118,9 @@ async function connect() {
   socket.addEventListener("message", async (event) => {
     let msg;
     try { msg = JSON.parse(event.data); } catch { return; }
+    // Heartbeat from the bridge. Receiving this message is itself what resets the
+    // MV3 service-worker idle timer; the pong lets the bridge detect a dead link.
+    if (msg.type === "ping") { try { socket.send(JSON.stringify({ type: "pong" })); } catch {} return; }
     const reply = await dispatch(msg).catch((err) => ({
       ok: false,
       error: String(err && err.message ? err.message : err),
@@ -123,21 +132,17 @@ async function connect() {
   socket.addEventListener("close", () => {
     const wasConnected = connState === "connected";
     socket = null;
-    if (wasConnected) attempts = 0; // a dropped live link gets a fresh retry budget
     if (!wantConnect) { connState = "idle"; return; }
-    if (attempts < MAX_ATTEMPTS) {
-      attempts++;
-      connState = "connecting";
-      console.log(`[ai-browser] bridge disconnected, retry ${attempts}/${MAX_ATTEMPTS}`);
-      reconnectTimer = setTimeout(connect, RECONNECT_MS);
-    } else {
-      // Give up quietly: no more attempts (so no more console errors). The user
-      // restarts the link from the popup's Connect button.
-      wantConnect = false;
-      connState = "failed";
-      chrome.storage.local.set({ giveUp: true });
-      console.log("[ai-browser] bridge unreachable; stopped. Press Connect in the popup to retry.");
-    }
+    // Never latch a permanent give-up on a transient outage: keep retrying with
+    // capped exponential backoff until we reconnect or the user hits Disconnect.
+    // A dropped live link restarts the backoff from the bottom. The setTimeout is
+    // best-effort (it dies if the service worker is suspended); the chrome.alarms
+    // keepalive below is the durable backstop that resumes reconnect after a recycle.
+    if (wasConnected) attempts = 0;
+    attempts++;
+    connState = "connecting";
+    const delay = Math.min(RECONNECT_MS * 2 ** (attempts - 1), MAX_BACKOFF_MS);
+    reconnectTimer = setTimeout(connect, delay);
   });
 
   socket.addEventListener("error", () => {
@@ -157,6 +162,26 @@ async function init() {
 
 // Route a command to the right handler. Returns { ok, result } or throws.
 async function dispatch({ action, params = {} }) {
+  // element_screenshot needs a rect the content script resolves (by ref/index, incl.
+  // shadow DOM), then CDP clips to it. Resolve the rect first, then hand it to the CDP
+  // handler so a read_page/find ref works, not just a snapshot index.
+  if (action === "element_screenshot") {
+    const tab = await targetTab();
+    const { frameId, params: p } = frameRoute(params);
+    const rectReply = await toContent("element_rect", { index: p.index, ref: p.ref }, frameId);
+    if (!rectReply.ok) return rectReply;
+    // NOTE: a sub-frame rect is frame-relative while the CDP clip is page-relative, so
+    // element_screenshot of a ref inside an iframe can be offset. Top-frame is exact.
+    return await handleCdp("element_screenshot", { rect: rectReply.result, format: params.format }, tab.id);
+  }
+
+  // press_key with modifiers (Cmd+A, Cmd+Z, ...) needs CDP so Mac editor commands fire;
+  // route there when the debugger is attached, else fall back to the DOM key dispatch.
+  if (action === "press_key" && Array.isArray(params.modifiers) && params.modifiers.length) {
+    const tab = await targetTab();
+    if (isAttached(tab.id)) return await handleCdp("press_key_cdp", params, tab.id);
+  }
+
   // CDP-backed commands (console/network/HAR/eval) operate on the target tab.
   if (CDP_ACTIONS.includes(action)) {
     const tab = await targetTab();
@@ -170,10 +195,15 @@ async function dispatch({ action, params = {} }) {
     return await handleNet(action, params, tab.id);
   }
 
-  // DOM-level commands run in the active tab's content script, which already
-  // replies in { ok, result|error } shape, so pass it through.
+  // DOM-level commands run in the target tab's content script(s), which already reply
+  // in { ok, result|error } shape. Reads (snapshot/read_page/find) aggregate across all
+  // frames; ref-addressed actions route to the frame that owns the ref (see frameRoute).
   if (CONTENT_ACTIONS.includes(action)) {
-    return await toContent(action, params);
+    if (action === "snapshot" || action === "read_page" || action === "find") {
+      return await crossFrame(action, params);
+    }
+    const { frameId, params: p } = frameRoute(params);
+    return await toContent(action, p, frameId);
   }
 
   switch (action) {
@@ -257,6 +287,21 @@ async function waitFor(params) {
 // silently land on a different (possibly sensitive) tab.
 let targetTabId = null;
 
+// Persist the pin to chrome.storage.session so it survives a service-worker recycle.
+// Without this, an MV3 suspend (~30s idle) drops targetTabId and the next command
+// silently re-pins onto whatever tab the user is now viewing — the exact drift the
+// pinning model exists to prevent. storage.session is in-memory (cleared on browser
+// close), which matches tab-id lifetime.
+function pinTarget(id) {
+  targetTabId = id;
+  chrome.storage.session.set({ targetTabId: id });
+}
+
+function unpinTarget() {
+  targetTabId = null;
+  chrome.storage.session.remove("targetTabId");
+}
+
 async function activeTab() {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab) throw new Error("no active tab");
@@ -268,21 +313,29 @@ async function activeTab() {
 // locks onto one tab at its first command and never drifts onto a tab the user later
 // switches to. switch_tab / navigate / new_tab re-pin explicitly.
 async function targetTab() {
+  // Recover the pin from session storage if the worker was recycled since it was set.
+  if (targetTabId == null) {
+    const { targetTabId: saved } = await chrome.storage.session.get("targetTabId");
+    if (saved != null) targetTabId = saved;
+  }
   if (targetTabId != null) {
     try {
       return await chrome.tabs.get(targetTabId);
     } catch {
-      targetTabId = null; // target was closed; re-pin below
+      unpinTarget(); // target was closed; re-pin below
     }
   }
   const tab = await activeTab();
-  targetTabId = tab.id;
+  pinTarget(tab.id);
   return tab;
 }
 
-// If the pinned target tab is closed, unpin so the next command re-pins cleanly.
+// If the pinned target tab is closed, unpin so the next command re-pins cleanly, and
+// drop any CDP/network state we held for it so those maps don't leak per closed tab.
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (tabId === targetTabId) targetTabId = null;
+  if (tabId === targetTabId) unpinTarget();
+  cdpDropTab(tabId);
+  netDropTab(tabId);
 });
 
 // Report which tab commands currently act on (for the agent to verify before reading).
@@ -294,22 +347,33 @@ async function currentTab() {
 async function navigate({ url }) {
   if (!url) throw new Error("navigate requires 'url'");
   const tab = await targetTab();
-  targetTabId = tab.id; // pin: subsequent reads stay on the tab we navigated
+  pinTarget(tab.id); // pin: subsequent reads stay on the tab we navigated
+  const done = waitForComplete(tab.id); // start listening BEFORE the load begins
   await chrome.tabs.update(tab.id, { url });
-  await waitForComplete(tab.id);
+  await done;
   const updated = await chrome.tabs.get(tab.id);
   return { url: updated.url };
 }
 
-// Resolve once the tab finishes loading (or after a safety timeout).
+// Resolve once the tab finishes a load STARTED after this call (or after a safety
+// timeout). Must be called before the tabs.update/reload that triggers the load so we
+// catch the loading->complete transition; resolving on the first "complete" seen would
+// otherwise race against the previous page's already-fired "complete". A same-document
+// (hash/SPA) navigation emits no load cycle, so if no "loading" is seen shortly we
+// resolve anyway rather than block for the full timeout.
 function waitForComplete(tabId) {
   return new Promise((resolve) => {
-    const timeout = setTimeout(finish, 15_000);
+    let sawLoading = false;
+    const hard = setTimeout(finish, 15_000);
+    const soft = setTimeout(() => { if (!sawLoading) finish(); }, 1500);
     function listener(id, info) {
-      if (id === tabId && info.status === "complete") finish();
+      if (id !== tabId) return;
+      if (info.status === "loading") sawLoading = true;
+      if (info.status === "complete" && sawLoading) finish();
     }
     function finish() {
-      clearTimeout(timeout);
+      clearTimeout(hard);
+      clearTimeout(soft);
       chrome.tabs.onUpdated.removeListener(listener);
       resolve();
     }
@@ -351,7 +415,7 @@ async function listTabs() {
 
 async function newTab({ url }) {
   const tab = await chrome.tabs.create(url ? { url } : {});
-  targetTabId = tab.id; // pin: the agent now drives the tab it just opened
+  pinTarget(tab.id); // pin: the agent now drives the tab it just opened
   return { id: tab.id };
 }
 
@@ -361,13 +425,13 @@ async function newTab({ url }) {
 async function groupTab({ id, title = "aibc", color = "blue" } = {}) {
   const tabId = id != null ? id : (await targetTab()).id;
   const groupId = await chrome.tabs.group({ tabIds: [tabId] });
+  pinTarget(tabId); // pin (no activation) — before the title step so a titling failure can't skip it
   // Title/color need the "tabGroups" permission; the group still exists without it.
   try {
     await chrome.tabGroups.update(groupId, { title, color });
   } catch (e) {
     return { groupId, tabId, titled: false, note: `grouped, but could not set title/color: ${e.message}` };
   }
-  targetTabId = tabId; // pin (no activation)
   return { groupId, tabId, title, color };
 }
 
@@ -377,37 +441,44 @@ async function ungroupTab({ id } = {}) {
   return { ungrouped: tabId };
 }
 
-async function switchTab({ id }) {
+async function switchTab({ id, focus = false }) {
   if (id == null) throw new Error("switch_tab requires 'id'");
   const tab = await chrome.tabs.update(id, { active: true });
-  await chrome.windows.update(tab.windowId, { focused: true });
-  targetTabId = tab.id; // pin to the tab the agent switched to
+  // Activating the tab within its window is enough to retarget. Raising the whole
+  // window steals OS focus from the user, so only do it when explicitly asked.
+  if (focus) await chrome.windows.update(tab.windowId, { focused: true });
+  pinTarget(tab.id); // pin to the tab the agent switched to
   return { id: tab.id };
 }
 
 async function closeTab({ id }) {
   if (id == null) throw new Error("close_tab requires 'id'");
   await chrome.tabs.remove(id);
-  if (id === targetTabId) targetTabId = null; // unpin a closed target
+  if (id === targetTabId) unpinTarget(); // unpin a closed target
   return { id };
 }
 
 async function goBack() {
   const tab = await targetTab();
+  const done = waitForComplete(tab.id); // wait for the history nav to land (same as navigate/reload)
   await chrome.tabs.goBack(tab.id);
+  await done;
   return { id: tab.id };
 }
 
 async function goForward() {
   const tab = await targetTab();
+  const done = waitForComplete(tab.id);
   await chrome.tabs.goForward(tab.id);
+  await done;
   return { id: tab.id };
 }
 
 async function reload({ bypassCache } = {}) {
   const tab = await targetTab();
+  const done = waitForComplete(tab.id); // listen before triggering the reload
   await chrome.tabs.reload(tab.id, { bypassCache: !!bypassCache });
-  await waitForComplete(tab.id);
+  await done;
   return { id: tab.id };
 }
 
@@ -430,16 +501,89 @@ async function focusWindow({ id }) {
   return { id };
 }
 
-// Send a message to the target tab's content script, injecting it if missing.
-async function toContent(action, params) {
+// Send a message to a specific frame's content script, injecting it if missing.
+// With all_frames injection every frame has a listener, so we ALWAYS target one
+// frame (frameId 0 = the top document) — otherwise every frame would reply and race.
+async function toContent(action, params, frameId = 0) {
   const tab = await targetTab();
+  const opts = { frameId };
   try {
-    return await chrome.tabs.sendMessage(tab.id, { action, params });
+    return await chrome.tabs.sendMessage(tab.id, { action, params }, opts);
   } catch (err) {
     // Content script not present (page predates install, or was reloaded): inject and retry.
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
-    return await chrome.tabs.sendMessage(tab.id, { action, params });
+    await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [frameId] }, files: ["content.js"] });
+    return await chrome.tabs.sendMessage(tab.id, { action, params }, opts);
   }
+}
+
+// Cross-frame refs are exposed to the agent as `f<frameId>:ref_N`; the top frame keeps
+// bare `ref_N` for compatibility. Split a params object into the owning frameId and the
+// params the in-frame content script expects (with the local, unprefixed ref).
+function frameRoute(params = {}) {
+  const m = typeof params.ref === "string" && params.ref.match(/^f(\d+):(.+)$/);
+  if (m) return { frameId: Number(m[1]), params: { ...params, ref: m[2] } };
+  return { frameId: 0, params };
+}
+
+// List frames worth querying for DOM reads: the top frame plus child frames that
+// actually loaded a document (skip about:blank / errored frames).
+async function contentFrames(tabId) {
+  let frames;
+  try { frames = await chrome.webNavigation.getAllFrames({ tabId }); } catch { frames = null; }
+  if (!frames) return [{ frameId: 0, url: "" }];
+  return frames
+    .filter((f) => f.frameId === 0 || (f.url && /^https?:|^file:/.test(f.url)))
+    .map((f) => ({ frameId: f.frameId, url: f.url || "" }));
+}
+
+// Run a DOM read (snapshot/read_page/find) across every frame and merge, prefixing
+// non-top-frame refs with `f<frameId>:` so a later click routes back to the right frame.
+async function crossFrame(action, params) {
+  const tab = await targetTab();
+  const frames = await contentFrames(tab.id);
+  const per = await Promise.all(frames.map(async (fr) => {
+    try {
+      const reply = await toContent(action, params, fr.frameId);
+      return reply && reply.ok ? { fr, result: reply.result } : null;
+    } catch { return null; }
+  }));
+  return mergeFrameResults(action, per.filter(Boolean));
+}
+
+const qualifyRef = (frameId, ref) => (frameId === 0 || !ref ? ref : `f${frameId}:${ref}`);
+
+function mergeFrameResults(action, parts) {
+  if (!parts.length) return { ok: true, result: { url: "", title: "", elements: [], text: "" } };
+  const top = parts.find((p) => p.fr.frameId === 0) || parts[0];
+  if (action === "snapshot") {
+    const elements = [];
+    for (const { fr, result } of parts) {
+      for (const el of result.elements || []) {
+        // Only the top frame's indices are addressable by number; sub-frame elements
+        // are ref-only (frame-qualified). Tag sub-frame elements with their frame url.
+        elements.push(fr.frameId === 0
+          ? el
+          : { ...el, index: undefined, ref: qualifyRef(fr.frameId, el.ref), frame: fr.url });
+      }
+    }
+    return { ok: true, result: { url: top.result.url, title: top.result.title, elements, text: top.result.text } };
+  }
+  if (action === "find") {
+    const matches = [];
+    for (const { fr, result } of parts)
+      for (const m of result.matches || [])
+        matches.push(fr.frameId === 0 ? m : { ...m, ref: qualifyRef(fr.frameId, m.ref), frame: fr.url });
+    return { ok: true, result: { count: matches.length, matches } };
+  }
+  // read_page: top-frame tree, then each sub-frame tree appended under a frame header,
+  // with every ref in that subtree frame-qualified.
+  let tree = top.result.tree || "";
+  for (const { fr, result } of parts) {
+    if (fr.frameId === 0 || !result.tree) continue;
+    const qualified = result.tree.replace(/\[(ref_\d+)\]/g, (_, r) => `[${qualifyRef(fr.frameId, r)}]`);
+    tree += `\n  iframe [f${fr.frameId}] ${fr.url}\n` + qualified.replace(/^/gm, "  ");
+  }
+  return { ok: true, result: { url: top.result.url, title: top.result.title, tree, truncated: !!top.result.truncated } };
 }
 
 // Reconnect when the bridge host/port changes on the options page — but only if

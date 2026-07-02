@@ -7,7 +7,6 @@
 //   - "host_permissions" must include "<all_urls>"
 // Without these the listeners below silently receive nothing.
 
-import { stripHeaders } from "./util.js";
 
 const MAX_BUFFER = 2000;
 
@@ -57,15 +56,24 @@ function getBuffer(tabId) {
   return b;
 }
 
+// Drop all per-tab state for a closed tab. Called from background.js's
+// tabs.onRemoved so buffers/inFlight/capturing don't accumulate one entry per
+// tab that ever loaded a URL for the life of the service worker.
+export function dropTab(tabId) {
+  capturing.delete(tabId);
+  buffers.delete(tabId);
+  inFlight.delete(tabId);
+}
+
 function clearBuffer(tabId) {
   buffers.set(tabId, { list: [], byId: new Map() });
 }
 
-// Convert a webRequest header array ([{name,value}]) to a stripped map.
-function headersToStrippedMap(list) {
+// Convert a webRequest header array ([{name,value}]) to a map (verbatim, no redaction).
+function headersToMap(list) {
   const map = {};
   for (const h of list || []) map[h.name] = h.value;
-  return stripHeaders(map);
+  return map;
 }
 
 // Best-effort byte size of a request body from details.requestBody.
@@ -130,7 +138,7 @@ chrome.webRequest.onSendHeaders.addListener(
   (details) => {
     if (!capturing.has(details.tabId)) return;
     const rec = getRecord(details.tabId, details.requestId);
-    rec.requestHeaders = headersToStrippedMap(details.requestHeaders);
+    rec.requestHeaders = headersToMap(details.requestHeaders);
   },
   FILTER,
   ["requestHeaders", "extraHeaders"]
@@ -142,7 +150,7 @@ chrome.webRequest.onHeadersReceived.addListener(
     const rec = getRecord(details.tabId, details.requestId);
     rec.statusCode = details.statusCode;
     rec.statusLine = details.statusLine;
-    rec.responseHeaders = headersToStrippedMap(details.responseHeaders);
+    rec.responseHeaders = headersToMap(details.responseHeaders);
   },
   FILTER,
   ["responseHeaders", "extraHeaders"]

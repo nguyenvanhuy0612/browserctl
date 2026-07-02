@@ -158,16 +158,17 @@ response bodies. Per active tab.
 - `net_start` - begin capturing (clears the buffer).
 - `net_stop` - stop capturing.
 - `net_get { urlContains?, limit? }` - return captured requests
-  (`{ method, url, type, status, fromCache, ip, error, timeMs }`); sensitive headers stripped.
+  (`{ method, url, type, status, fromCache, ip, error, timeMs }`); headers verbatim.
 - `net_clear` - empty the buffer.
 
 ### CDP extras
 - `get_response_body { requestId }` - fetch a captured response's body (best-effort; requires attach).
-- `export_har { bodies? }` - HAR now redacts sensitive headers; `bodies:true` includes response bodies.
+- `export_har { bodies? }` - HAR export; `bodies:true` includes response bodies.
 - `capture_screenshot { fullPage?, format?, quality? }` - full-page screenshot beyond the viewport (requires attach). Defaults to `jpeg` quality 55 (auto-degrades to 30 if large); `format:"png"` for lossless. Also: `cdp_attach` now forces `deviceScaleFactor:1` so screenshots are in CSS-pixel space and `coordinate_click`/`coordinate_drag` line up on HiDPI/Retina (e.g. Apple Silicon).
 
-Privacy: `get_network_requests`, `net_get`, and `export_har` redact
-Cookie / Set-Cookie / Authorization and similar headers before returning.
+Headers: `get_network_requests`, `net_get`, and `export_har` return request/response
+headers verbatim (including Cookie / Authorization) — this is a local, internal-only
+tool. Add a redaction pass in `util.js` if pointing it at a shared/untrusted context.
 
 ---
 
@@ -217,7 +218,9 @@ capture, and CSP-bypass eval. See `docs/superpowers/specs/2026-06-30-claude-for-
 - `read_page { mode?: "interactive"|"all", depth?, ref_id?, maxChars? }` - the page as compact
   indented text with roles, accessible names, and a stable `ref` on each interactive element
   (`textbox "Email" [ref_5] type="email"`). Cheaper than a screenshot. Depth cap 15, output
-  cap ~50k chars with an actionable over-limit note. Does not pierce shadow DOM / iframes.
+  cap ~50k chars with an actionable over-limit note. Pierces open shadow DOM, and covers
+  iframes (including cross-origin) via all_frames injection — sub-frame content is appended
+  under an `iframe [f<id>] <url>` header with frame-qualified refs (e.g. `f3:ref_5`).
 - `find { query, max? }` - interactive elements whose name/text/placeholder/aria-label contains
   `query`; returns up to `max` `{ ref, role, name, tag }`.
 - Stable `ref`s are WeakRef-backed (survive re-snapshots, don't mutate the DOM). `snapshot`
@@ -262,7 +265,7 @@ doesn't supply).
 - [x] `wait_settle` (readyState + getAnimations).
 - [ ] Streaming WebSocket endpoint for agents (push DOM-change/console events live).
 - [ ] Persistent injected-script channel (cf. mcp-chrome inject_script).
-- [ ] Cross-origin iframe / file-dialog handling.
-- [ ] CDP Mac editor commands (`Cmd+A`/`Cmd+Z`) for in-canvas editing.
+- [x] Cross-origin iframe support (all_frames injection + frame-qualified refs; DOM read + interaction routed per frame). Sub-frame `element_screenshot` offset and file-dialog handling still open.
+- [x] CDP Mac editor commands (`Cmd+A`/`Cmd+Z`/copy/paste/cut) via `press_key` modifiers.
 - [ ] Multi-browser / multi-tab sessions addressed by id.
 - [ ] Optional API token on the bridge (only needed if it leaves a trusted machine).

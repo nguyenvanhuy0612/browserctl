@@ -1,0 +1,88 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>aibc e2e test page</title></head>
+<body>
+  <h1 id="title">AIBC Test Page</h1>
+  <a href="/second.html" id="link">go second</a>
+
+  <button id="btn" onclick="window.__clicked=(window.__clicked||0)+1">Click Me</button>
+  <span id="clickcount">0</span>
+
+  <input id="plain" type="text" placeholder="Plain input" />
+
+  <!-- A "controlled" input that mimics React/Vue value-tracking: a direct
+       el.value = x (through the instance setter) is treated as "no change" and
+       reverted on the next input event, whereas going through the prototype's
+       native setter is seen as a real edit and sticks. This is exactly what the
+       setNativeValue() fix targets. -->
+  <input id="controlled" type="text" placeholder="Controlled input" />
+
+  <textarea id="area" placeholder="Notes"></textarea>
+
+  <select id="sel">
+    <option value="a">Apple</option>
+    <option value="b">Banana</option>
+    <option value="c">Cherry</option>
+  </select>
+
+  <button id="hovertarget">hover me</button>
+  <span id="hovered">no</span>
+
+  <!-- Web component with an interactive element inside an OPEN shadow root, to
+       exercise deepQueryAll/deepQuery shadow-DOM piercing. -->
+  <shadow-widget></shadow-widget>
+
+  <!-- Cross-origin iframe (served from a different port) to exercise all_frames
+       per-frame injection + frame-qualified refs. src filled in by the runner. -->
+  <iframe id="frm" src="__IFRAME_SRC__" width="320" height="140"></iframe>
+
+  <script>
+    // click counter mirror
+    const btn = document.getElementById('btn');
+    btn.addEventListener('click', () => {
+      document.getElementById('clickcount').textContent = String((window.__clicked)||0);
+    });
+
+    // hover mirror
+    const ht = document.getElementById('hovertarget');
+    ht.addEventListener('mouseover', () => { document.getElementById('hovered').textContent = 'yes'; });
+
+    // React-like controlled input
+    (function () {
+      const inp = document.getElementById('controlled');
+      const proto = Object.getPrototypeOf(inp);
+      const nativeDesc = Object.getOwnPropertyDescriptor(proto, 'value');
+      let tracked = '';   // what the framework "thinks" the value is
+      let model = '';     // the committed model value
+      Object.defineProperty(inp, 'value', {
+        configurable: true,
+        get() { return nativeDesc.get.call(this); },
+        set(v) { tracked = v; nativeDesc.set.call(this, v); }, // instance setter updates tracker
+      });
+      inp.addEventListener('input', () => {
+        const cur = nativeDesc.get.call(inp);
+        if (cur === tracked) {
+          // Tracker matches -> framework saw no change -> revert to model (the React bug path).
+          nativeDesc.set.call(inp, model);
+        } else {
+          model = cur; tracked = cur; // real edit committed
+        }
+      });
+    })();
+
+    // shadow DOM component
+    class ShadowWidget extends HTMLElement {
+      constructor() {
+        super();
+        const root = this.attachShadow({ mode: 'open' });
+        root.innerHTML = '<button id="shadowbtn">Shadow Button</button>';
+      }
+    }
+    customElements.define('shadow-widget', ShadowWidget);
+
+    // console + network signals for CDP/net tests
+    console.log('aibc-test-page-ready');
+    fetch('/ping.json').catch(() => {});
+  </script>
+</body>
+</html>
