@@ -4,7 +4,7 @@
 // the content script. Tab/window-level commands are handled here with chrome.*.
 // Console/network/HAR/eval commands are handled by the CDP module (cdp.js).
 
-import { handleCdp, CDP_ACTIONS, captureViewport, isAttached, dropTab as cdpDropTab } from "./cdp.js";
+import { handleCdp, CDP_ACTIONS, captureViewport, isAttached, setLastCaptureScale, dropTab as cdpDropTab } from "./cdp.js";
 import { handleNet, NET_ACTIONS, dropTab as netDropTab } from "./netlog.js";
 
 // DOM-level commands that run in the active tab's content script.
@@ -31,6 +31,16 @@ const CONTENT_ACTIONS = [
 // Recorded interaction steps, accumulated from the content recorder (record_start).
 let recordingSteps = [];
 const MAX_RECORD_STEPS = 5000; // cap so a long/runaway recording can't grow unbounded
+
+// Whether a recording is (believed to be) in progress in THIS service-worker instance.
+// Persisted to storage.session so record_get can tell "recycled mid-recording" (recording
+// was on, steps are now gone) apart from "never started" — the in-memory steps can't be
+// recovered, so the goal is an honest error instead of a silent empty count.
+let isRecording = false;
+const RECORDING_KEY = "aibc_recording";
+function persistRecording(on) {
+  chrome.storage.session.set({ [RECORDING_KEY]: on }).catch(() => {});
+}
 
 // The content recorder pushes each captured step here via chrome.runtime.sendMessage.
 // The popup also talks to the worker here: read connection state, Connect, Disconnect.
@@ -62,6 +72,10 @@ const MAX_BACKOFF_MS = 30000; // cap the exponential backoff between reconnect t
 let socket = null;
 let attempts = 0;
 let reconnectTimer = null;
+// Guards the async gap in connect() between the readyState check and the socket being
+// created/assigned (awaiting bridgeWsUrl()), so a second connect() call landing in that
+// gap (e.g. from the keepalive alarm) is a no-op instead of racing a duplicate socket.
+let connecting = false;
 
 // Are we actively trying to be connected? Drives whether close/keepalive retry.
 let wantConnect = false;
@@ -102,12 +116,31 @@ async function connect() {
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
     return;
   }
+  if (connecting) return; // another connect() is already past this point, awaiting the URL
+  connecting = true;
   clearTimeout(reconnectTimer);
   connState = "connecting";
-  const url = await bridgeWsUrl();
-  socket = new WebSocket(url);
+  let url;
+  try {
+    url = await bridgeWsUrl();
+  } finally {
+    connecting = false;
+  }
+  // Re-check after the await: wantConnect may have flipped, or another connect() call
+  // (e.g. from a close/error handler firing during the gap) may have already opened a
+  // live socket, in which case this call should not create a second one.
+  if (!wantConnect) return;
+  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  const ws = new WebSocket(url);
+  socket = ws;
 
-  socket.addEventListener("open", () => {
+  // Every handler below is bound to the local `ws` it was created for and ignores the
+  // event if `ws !== socket` — i.e. this socket has since been replaced/closed elsewhere
+  // — so a stale socket's late events can't act on (or close) the current live socket.
+  ws.addEventListener("open", () => {
+    if (ws !== socket) return;
     attempts = 0;
     connState = "connected";
     console.log("[ai-browser] bridge connected:", url);
@@ -115,21 +148,24 @@ async function connect() {
     chrome.storage.local.set({ autoConnect: true, giveUp: false });
   });
 
-  socket.addEventListener("message", async (event) => {
+  ws.addEventListener("message", async (event) => {
+    if (ws !== socket) return;
     let msg;
     try { msg = JSON.parse(event.data); } catch { return; }
     // Heartbeat from the bridge. Receiving this message is itself what resets the
     // MV3 service-worker idle timer; the pong lets the bridge detect a dead link.
-    if (msg.type === "ping") { try { socket.send(JSON.stringify({ type: "pong" })); } catch {} return; }
+    if (msg.type === "ping") { try { ws.send(JSON.stringify({ type: "pong" })); } catch {} return; }
     const reply = await dispatch(msg).catch((err) => ({
       ok: false,
       error: String(err && err.message ? err.message : err),
     }));
     reply.id = msg.id;
-    try { socket.send(JSON.stringify(reply)); } catch {}
+    if (ws !== socket) return; // replaced while dispatch() was in flight
+    try { ws.send(JSON.stringify(reply)); } catch {}
   });
 
-  socket.addEventListener("close", () => {
+  ws.addEventListener("close", () => {
+    if (ws !== socket) return; // a stale socket closing; the current socket already replaced it
     const wasConnected = connState === "connected";
     socket = null;
     if (!wantConnect) { connState = "idle"; return; }
@@ -145,8 +181,9 @@ async function connect() {
     reconnectTimer = setTimeout(connect, delay);
   });
 
-  socket.addEventListener("error", () => {
-    try { socket.close(); } catch {}
+  ws.addEventListener("error", () => {
+    if (ws !== socket) return;
+    try { ws.close(); } catch {}
   });
 }
 
@@ -176,10 +213,13 @@ async function dispatch({ action, params = {} }) {
   }
 
   // press_key with modifiers (Cmd+A, Cmd+Z, ...) needs CDP so Mac editor commands fire;
-  // route there when the debugger is attached, else fall back to the DOM key dispatch.
+  // route there when the debugger is attached. The content-script key dispatch ignores
+  // modifiers entirely, so falling through to it would silently drop them and report
+  // success — return a clear error instead so the caller knows to cdp_attach first.
   if (action === "press_key" && Array.isArray(params.modifiers) && params.modifiers.length) {
     const tab = await targetTab();
     if (isAttached(tab.id)) return await handleCdp("press_key_cdp", params, tab.id);
+    return { ok: false, error: "modifiers require cdp_attach" };
   }
 
   // CDP-backed commands (console/network/HAR/eval) operate on the target tab.
@@ -198,8 +238,11 @@ async function dispatch({ action, params = {} }) {
   // DOM-level commands run in the target tab's content script(s), which already reply
   // in { ok, result|error } shape. Reads (snapshot/read_page/find) aggregate across all
   // frames; ref-addressed actions route to the frame that owns the ref (see frameRoute).
+  // read_page with a ref_id is ref-addressed too (the ref lives in exactly one frame) —
+  // broadcasting it via crossFrame would fail in every frame and fall back to a fake
+  // empty result, so route it directly like the ref-addressed actions below.
   if (CONTENT_ACTIONS.includes(action)) {
-    if (action === "snapshot" || action === "read_page" || action === "find") {
+    if (action === "snapshot" || action === "find" || (action === "read_page" && !params.ref_id)) {
       return await crossFrame(action, params);
     }
     const { frameId, params: p } = frameRoute(params);
@@ -226,7 +269,18 @@ async function dispatch({ action, params = {} }) {
     case "reload_extension": return { ok: true, result: reloadExtension() };
     case "record_start":     return { ok: true, result: await recordStart() };
     case "record_stop":      return { ok: true, result: await recordStop() };
-    case "record_get":       return { ok: true, result: { count: recordingSteps.length, steps: recordingSteps } };
+    case "record_get": {
+      // isRecording resets to false on a fresh service-worker instance regardless of
+      // history, so a false here with no steps buffered is ambiguous — check the
+      // persisted flag to tell "never started" apart from "recycled mid-recording".
+      if (!isRecording && recordingSteps.length === 0) {
+        const { [RECORDING_KEY]: wasRecording } = await chrome.storage.session.get(RECORDING_KEY);
+        if (wasRecording) {
+          return { ok: false, error: "capture state was reset by a service-worker restart — call record_start again" };
+        }
+      }
+      return { ok: true, result: { count: recordingSteps.length, steps: recordingSteps } };
+    }
     case "replay":           return { ok: true, result: await replay(params) };
 
     default:
@@ -243,11 +297,15 @@ function reloadExtension() {
 
 async function recordStart() {
   recordingSteps = [];
+  isRecording = true;
+  persistRecording(true);
   await toContent("record_start", {});
   return { recording: true };
 }
 
 async function recordStop() {
+  isRecording = false;
+  persistRecording(false);
   await toContent("record_stop", {});
   return { recording: false, count: recordingSteps.length };
 }
@@ -381,6 +439,21 @@ function waitForComplete(tabId) {
   });
 }
 
+// Best-effort devicePixelRatio of a tab, for the captureVisibleTab path below (which
+// captures at device pixels, not CSS pixels — unlike the CDP paths, which force
+// deviceScaleFactor to 1). Falls back to 1 (no correction) if it can't be read.
+async function getDevicePixelRatio(tabId) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => window.devicePixelRatio || 1,
+    });
+    return result || 1;
+  } catch {
+    return 1;
+  }
+}
+
 async function screenshot({ format = "jpeg", quality = 55 } = {}) {
   const tab = await targetTab();
   // If a debugger session already exists on this tab, capture via CDP so the screenshot
@@ -397,6 +470,10 @@ async function screenshot({ format = "jpeg", quality = 55 } = {}) {
     if (format !== "png" && dataUrl.length > 500000) {
       dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 30 });
     }
+    // captureVisibleTab returns device pixels (2x on Retina); record that scale so a
+    // later coordinate_click (which divides by it) maps back to viewport CSS pixels
+    // regardless of which screenshot path ran last.
+    setLastCaptureScale(tab.id, await getDevicePixelRatio(tab.id));
     return { dataUrl };
   }
   // Background tab: capture via CDP so we DON'T activate it and steal the user's focus.
@@ -518,10 +595,16 @@ async function toContent(action, params, frameId = 0) {
 
 // Cross-frame refs are exposed to the agent as `f<frameId>:ref_N`; the top frame keeps
 // bare `ref_N` for compatibility. Split a params object into the owning frameId and the
-// params the in-frame content script expects (with the local, unprefixed ref).
+// params the in-frame content script expects (with the local, unprefixed ref). Checks
+// both `ref` (click/type/hover/...) and `ref_id` (read_page) — a frame-qualified ref_id
+// must route to (and be stripped for) the owning frame just like ref does, or it fails
+// to resolve in every frame and read_page falls back to a fabricated empty result.
 function frameRoute(params = {}) {
-  const m = typeof params.ref === "string" && params.ref.match(/^f(\d+):(.+)$/);
-  if (m) return { frameId: Number(m[1]), params: { ...params, ref: m[2] } };
+  for (const key of ["ref", "ref_id"]) {
+    const v = params[key];
+    const m = typeof v === "string" && v.match(/^f(\d+):(.+)$/);
+    if (m) return { frameId: Number(m[1]), params: { ...params, [key]: m[2] } };
+  }
   return { frameId: 0, params };
 }
 
@@ -553,7 +636,12 @@ async function crossFrame(action, params) {
 const qualifyRef = (frameId, ref) => (frameId === 0 || !ref ? ref : `f${frameId}:${ref}`);
 
 function mergeFrameResults(action, parts) {
-  if (!parts.length) return { ok: true, result: { url: "", title: "", elements: [], text: "" } };
+  // Every frame errored (restricted page, or a ref/ref_id that no frame could resolve) —
+  // return an honest error rather than a fabricated empty snapshot-shaped success, which
+  // would look to the caller like "the page really is empty".
+  if (!parts.length) {
+    return { ok: false, error: "no frame could handle this (page not accessible, or the ref/ref_id was not found in any frame)" };
+  }
   const top = parts.find((p) => p.fr.frameId === 0) || parts[0];
   if (action === "snapshot") {
     const elements = [];
@@ -601,7 +689,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 // Keep the service worker alive / reconnect promptly after it is recycled —
 // but only while we want a connection. Once we've given up, the alarm is a
 // no-op, so a recycled worker won't re-spam connection attempts.
-chrome.alarms.create("keepalive", { periodInMinutes: 0.4 });
+chrome.alarms.create("keepalive", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(() => {
   if (wantConnect && connState !== "connected") connect();
 });

@@ -1,11 +1,15 @@
 {
   "name": "ai-browser-control-bridge",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "Local bridge server relaying AI-agent commands to the Chrome extension",
   "type": "module",
   "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test ../tests/unit/*.test.mjs"
   },
   "dependencies": {
     "ws": "^8.18.0"

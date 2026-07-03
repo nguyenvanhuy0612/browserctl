@@ -55,6 +55,14 @@ function macCommands(key, mods) {
 // model's screenshot-pixel coords by this to get viewport CSS pixels.
 const captureScale = (tabId) => (lastCapture[tabId] && lastCapture[tabId].scale) || 1;
 
+// Record the effective screenshot->CSS-pixel scale for a tab. Exported so
+// background.js's non-CDP screenshot paths (chrome.tabs.captureVisibleTab) can
+// register their scale too — coordinate_click must remap correctly regardless
+// of which screenshot path ran last.
+export function setLastCaptureScale(tabId, scale) {
+  lastCapture[tabId] = { scale };
+}
+
 async function attach(tabId) {
   await new Promise((resolve, reject) => {
     chrome.debugger.attach({ tabId }, "1.3", () => {
@@ -122,6 +130,14 @@ async function send(tabId, method, params = {}) {
   }
 }
 
+// Key for persisting which tabs have an active CDP session, so a later read (after a
+// service-worker recycle wiped the in-memory `sessions` Map) can tell "capture was
+// running and got reset" apart from "never attached at all".
+const ATTACHED_KEY = "aibc_cdp_attached_tabs";
+function persistAttached() {
+  chrome.storage.session.set({ [ATTACHED_KEY]: [...sessions.keys()] }).catch(() => {});
+}
+
 // Ensure the debugger is attached to a tab and a session record exists, WITHOUT enabling
 // the event domains (console/network). Used by the lazy screenshot path so a background
 // capture works without a prior cdp_attach. cdp_attach later enables domains on demand.
@@ -129,6 +145,7 @@ export async function ensureAttached(tabId) {
   if (!sessions.has(tabId)) {
     await attach(tabId);
     sessions.set(tabId, { console: [], network: new Map(), domainsEnabled: false });
+    persistAttached();
   }
   return sessions.get(tabId);
 }
@@ -176,6 +193,35 @@ export async function captureViewport(tabId, { format = "jpeg", quality = 55 } =
 function requireSession(tabId) {
   const s = sessions.get(tabId);
   if (!s) throw new Error("not attached: call cdp_attach first");
+  return s;
+}
+
+// Like requireSession, but distinguishes "never attached" from "was attached, but the
+// service worker recycled and lost the in-memory session" (the live CDP buffers can't be
+// restored, so this surfaces an honest error instead of a later silent empty read).
+async function requireSessionOrExplainReset(tabId) {
+  const s = sessions.get(tabId);
+  if (s) return s;
+  try {
+    const { [ATTACHED_KEY]: ids } = await chrome.storage.session.get(ATTACHED_KEY);
+    if (Array.isArray(ids) && ids.includes(tabId)) {
+      throw new Error("capture state was reset by a service-worker restart — call cdp_attach again");
+    }
+  } catch (e) {
+    if (/service-worker restart/.test(e.message || "")) throw e;
+  }
+  throw new Error("not attached: call cdp_attach first");
+}
+
+// Require an attached session with the event domains enabled, auto-enabling them if the
+// session was only lazily attached (e.g. by a background screenshot) without a prior
+// cdp_attach. Used by the log/network read paths so they don't silently return count:0.
+async function requireDomains(tabId) {
+  const s = await requireSessionOrExplainReset(tabId);
+  if (!s.domainsEnabled) {
+    await enableDomains(tabId);
+    s.domainsEnabled = true;
+  }
   return s;
 }
 
@@ -251,6 +297,7 @@ chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId != null) {
     sessions.delete(source.tabId);
     delete lastCapture[source.tabId];
+    persistAttached();
   }
 });
 
@@ -261,6 +308,7 @@ chrome.debugger.onDetach.addListener((source) => {
 export function dropTab(tabId) {
   sessions.delete(tabId);
   delete lastCapture[tabId];
+  persistAttached();
 }
 
 function pushConsole(s, entry) {
@@ -327,7 +375,7 @@ function buildHar(entries, bodies) {
   return {
     log: {
       version: "1.2",
-      creator: { name: "ai-browser-control", version: "0.2.0" },
+      creator: { name: "ai-browser-control", version: "0.4.0" },
       entries: harEntries,
     },
   };
@@ -359,6 +407,9 @@ function briefRequest(e) {
     mimeType: e.response ? e.response.mimeType : null,
     size: e.encodedDataLength || null,
     failed: e.failed || null,
+    // Verbatim, no redaction — this is a local debug aid (see cross-cutting decision).
+    requestHeaders: e.request.headers || null,
+    responseHeaders: e.response ? e.response.headers || null : null,
   };
 }
 
@@ -381,12 +432,13 @@ export async function handleCdp(action, params, tabId) {
       if (sessions.has(tabId)) {
         try { await detach(tabId); } catch {}
         sessions.delete(tabId);
+        persistAttached();
       }
       return { ok: true, result: { attached: false, tabId } };
     }
 
     case "get_console_logs": {
-      const s = requireSession(tabId);
+      const s = await requireDomains(tabId);
       const limit = params.limit || 200;
       const logs = s.console.slice(-limit);
       if (params.clear) s.console.length = 0;
@@ -394,7 +446,7 @@ export async function handleCdp(action, params, tabId) {
     }
 
     case "get_network_requests": {
-      const s = requireSession(tabId);
+      const s = await requireDomains(tabId);
       const all = [...s.network.values()];
       const filtered = params.urlContains
         ? all.filter((e) => e.request.url.includes(params.urlContains))
@@ -457,6 +509,18 @@ export async function handleCdp(action, params, tabId) {
       requireSession(tabId);
       const format = params.format === "png" ? "png" : "jpeg";
       const quality = params.quality ?? 55;
+      // Record the screenshot->CSS-pixel scale for coordinate_click/drag, same dpr
+      // correction as captureViewport (this path has no clip.scale — only the dpr
+      // correction matters, since deviceScaleFactor is normally forced to 1 on attach).
+      let dpr = 1;
+      try {
+        const m = await send(tabId, "Page.getLayoutMetrics");
+        const vp = m.cssVisualViewport || m.cssLayoutViewport || {};
+        const devVp = m.visualViewport || {};
+        const w = Math.round(vp.clientWidth || 0);
+        if (w && devVp.clientWidth) dpr = Math.max(1, devVp.clientWidth / w);
+      } catch {}
+      lastCapture[tabId] = { scale: dpr };
       const shoot = (q) => send(tabId, "Page.captureScreenshot", {
         format,
         ...(format === "jpeg" ? { quality: q } : {}),
@@ -478,7 +542,14 @@ export async function handleCdp(action, params, tabId) {
         target: { tabId },
         world: "MAIN",
         func: (expr) => {
-          try { return { ok: true, value: JSON.parse(JSON.stringify(eval(expr))) }; }
+          try {
+            const v = eval(expr);
+            // JSON.stringify(undefined) returns undefined (not "undefined"), and
+            // JSON.parse(undefined) throws — surfacing a misleading error for a
+            // successful eval that simply returns nothing (assignments, void, DOM calls).
+            if (v === undefined) return { ok: true, value: null };
+            return { ok: true, value: JSON.parse(JSON.stringify(v)) };
+          }
           catch (err) { return { ok: false, error: String(err) }; }
         },
         args: [params.expression],
@@ -576,9 +647,20 @@ export async function handleCdp(action, params, tabId) {
         r = rect.result && rect.result.value;
       }
       if (!r) throw new Error(`element not found (snapshot first, or pass a valid ref/index)`);
+      // r is viewport-relative (getBoundingClientRect), but Page.captureScreenshot's
+      // clip is page-absolute when captureBeyondViewport is true — add the page scroll
+      // offset so a scrolled page clips the right region (Puppeteer does the same via
+      // layoutViewport.pageX/pageY).
+      let scrollX = 0, scrollY = 0;
+      try {
+        const m = await send(tabId, "Page.getLayoutMetrics");
+        const lvp = m.cssLayoutViewport || m.layoutViewport || {};
+        scrollX = lvp.pageX || 0;
+        scrollY = lvp.pageY || 0;
+      } catch {}
       const res = await send(tabId, "Page.captureScreenshot", {
         format,
-        clip: { x: r.x, y: r.y, width: r.width, height: r.height, scale: 1 },
+        clip: { x: r.x + scrollX, y: r.y + scrollY, width: r.width, height: r.height, scale: 1 },
         fromSurface: true,
         captureBeyondViewport: true,
       });

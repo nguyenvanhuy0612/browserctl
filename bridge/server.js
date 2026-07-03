@@ -15,17 +15,41 @@ import { WebSocketServer } from "ws";
 
 const PORT = Number(process.env.PORT) || 8765;
 const HOST = "127.0.0.1";
-const COMMAND_TIMEOUT_MS = 30_000;
+// Overridable via env so tests can exercise real timeout firing without a 30s wait;
+// unset in normal operation, so production behavior is unchanged.
+const COMMAND_TIMEOUT_MS = Number(process.env.COMMAND_TIMEOUT_MS) || 30_000;
 // A few actions legitimately run longer than the default (multi-step replay chains,
-// each with its own navigation wait). Give them a larger ceiling so the bridge doesn't
-// 504 while the extension is still legitimately working.
-const ACTION_TIMEOUT_MS = { replay: 120_000 };
+// each with its own navigation wait; export_har{bodies:true} can be slow to collect).
+// Give them a larger ceiling so the bridge doesn't 504 while the extension is still
+// legitimately working.
+const ACTION_TIMEOUT_MS = { replay: 120_000, export_har: 120_000 };
+// wait_for / wait_network_idle accept a caller-supplied timeoutMs that can legitimately
+// exceed the default command timeout (or be shorter). Honor it end-to-end by using
+// timeoutMs + a buffer (time for the extension to notice its own wait expired and
+// reply) as this request's bridge-side timeout, instead of the fixed default.
+const WAIT_ACTIONS = new Set(["wait_for", "wait_network_idle"]);
+const TIMEOUT_BUFFER_MS = 5_000;
+const MAX_TIMEOUT_MS = 300_000; // hard ceiling regardless of what a caller requests
 // App-level heartbeat. The inbound ping resets the extension's MV3 service-worker
 // idle timer (~30s), keeping the socket genuinely open instead of churning; the
 // pong lets us detect and drop a dead extension. Must be an application message,
 // not a protocol ws.ping() frame — the browser answers those itself without ever
 // waking the service worker's message handler.
 const HEARTBEAT_MS = 20_000;
+// Explicit inbound WS payload cap (matches ws's own default, named here so it's
+// visible/tunable and paired with a friendly error instead of a bare 1009 close).
+// Overridable via env for tests.
+const MAX_WS_PAYLOAD_BYTES = Number(process.env.MAX_WS_PAYLOAD_BYTES) || 100 * 1024 * 1024;
+
+// Per-command timeout, aware of the action being run. See WAIT_ACTIONS/ACTION_TIMEOUT_MS above.
+function computeTimeoutMs(action, params) {
+  let ms = ACTION_TIMEOUT_MS[action] || COMMAND_TIMEOUT_MS;
+  if (WAIT_ACTIONS.has(action)) {
+    const requested = Number(params && params.timeoutMs);
+    if (Number.isFinite(requested) && requested > 0) ms = requested + TIMEOUT_BUFFER_MS;
+  }
+  return Math.min(ms, MAX_TIMEOUT_MS);
+}
 
 // The single connected extension socket (we support one browser for now).
 let extensionSocket = null;
@@ -48,11 +72,23 @@ const server = http.createServer((req, res) => {
 });
 
 // WebSocket endpoint for the extension.
-const wss = new WebSocketServer({ server, path: "/extension" });
+const wss = new WebSocketServer({ server, path: "/extension", maxPayload: MAX_WS_PAYLOAD_BYTES });
+
+// Fail every in-flight command instead of letting its HTTP caller hang until its
+// own timeout: called on socket replacement and on close/error of the live socket.
+function rejectAllPending(reason) {
+  for (const entry of pending.values()) {
+    clearTimeout(entry.timer);
+    entry.resolve({ ok: false, error: reason });
+  }
+  pending.clear();
+}
 
 wss.on("connection", (ws) => {
   if (extensionSocket) {
-    // Replace any stale connection with the newest one.
+    // A new connection replaces the old one; anything still waiting on the old
+    // socket will never get a reply, so fail it now rather than at its own timeout.
+    rejectAllPending("extension disconnected");
     try { extensionSocket.close(); } catch {}
   }
   extensionSocket = ws;
@@ -75,11 +111,28 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
-    if (extensionSocket === ws) extensionSocket = null;
-    log("extension disconnected");
+    const wasActive = extensionSocket === ws;
+    if (wasActive) extensionSocket = null;
+    // Only a genuine disconnect of the currently-active socket should fail pending
+    // commands here — replacement already rejected (and cleared) pending at connect
+    // time, so a stale socket's belated close must not clobber requests already
+    // in flight against the new one.
+    if (wasActive) {
+      const reason = ws.aibcOversized ? "payload too large" : "extension disconnected";
+      rejectAllPending(reason);
+      log(ws.aibcOversized ? "extension disconnected (payload too large)" : "extension disconnected");
+    } else {
+      log("stale extension socket closed");
+    }
   });
 
-  ws.on("error", (err) => log("extension socket error:", err.message));
+  ws.on("error", (err) => {
+    log("extension socket error:", err.message);
+    // ws aborts the connection on an oversized inbound frame; remember why so the
+    // close handler above can reject pending callers with a friendlier reason than
+    // a bare disconnect.
+    if (err.code === "WS_ERR_UNSUPPORTED_MESSAGE_LENGTH") ws.aibcOversized = true;
+  });
 });
 
 // Heartbeat: ping the extension every HEARTBEAT_MS. If the previous ping went
@@ -111,7 +164,7 @@ function handleCommand(body, res) {
   const id = randomUUID();
   const message = { id, action, params: params || {} };
 
-  const timeoutMs = ACTION_TIMEOUT_MS[action] || COMMAND_TIMEOUT_MS;
+  const timeoutMs = computeTimeoutMs(action, params);
   const wait = new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(id);
@@ -142,7 +195,13 @@ function readBody(req) {
       if (settled) return;
       raw += chunk;
       if (raw.length > 5_000_000) {
-        req.destroy(); // stop the client from streaming more once we've bailed
+        // Reject now, but keep letting the stream drain to 'end' (the `settled`
+        // guard above stops us from buffering more into `raw`). Neither destroying
+        // nor pausing the request is safe here: destroying tears down the shared
+        // socket and kills the 400 response we're about to send; pausing leaves the
+        // rest of this oversized body unread on the socket, which then corrupts the
+        // next request if the connection is reused (keep-alive).
+        raw = "";
         done(reject, new Error("request body too large"));
       }
     });
@@ -168,7 +227,26 @@ function log(...args) {
   console.log(new Date().toISOString(), ...args);
 }
 
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(`port ${PORT} in use — another bridge running?`);
+    process.exit(1);
+  }
+  console.error("bridge server error:", err);
+});
+
+// Last-resort safety nets: log to stderr and keep running instead of dying silently
+// (or crashing the whole process) on a stray/unawaited rejection or thrown error.
+process.on("uncaughtException", (err) => {
+  console.error("uncaught exception:", err);
+});
+process.on("unhandledRejection", (err) => {
+  console.error("unhandled rejection:", err);
+});
+
 server.listen(PORT, HOST, () => {
   log(`bridge listening on http://${HOST}:${PORT}`);
   log(`extension should connect to ws://${HOST}:${PORT}/extension`);
 });
+
+export { computeTimeoutMs, server, wss };

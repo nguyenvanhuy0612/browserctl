@@ -55,6 +55,18 @@ async function cmd(action, params = {}) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Poll find(query) until it matches or the deadline passes, instead of a fixed
+// sleep-style delay — de-flakes waits on things that finish loading at variable
+// speed (e.g. a cross-origin iframe) without over- or under-waiting.
+async function pollFind(query, timeoutMs = 5000, intervalMs = 100) {
+  const deadline = Date.now() + timeoutMs;
+  let r = await cmd("find", { query });
+  while (!(r.matches && r.matches.length) && Date.now() < deadline) {
+    await sleep(intervalMs);
+    r = await cmd("find", { query });
+  }
+  return r;
+}
 let PORT;
 const results = [];
 async function test(name, fn) {
@@ -110,7 +122,7 @@ async function main() {
     // --- cross-origin iframe (all_frames + frame-qualified refs) ---
     let iframeBtnRef;
     await test("snapshot sees cross-origin iframe (frame-qualified ref)", async () => {
-      await cmd("wait_for", { timeoutMs: 900 }); // let the cross-origin iframe finish loading
+      await pollFind("Iframe Button"); // poll until the cross-origin iframe finishes loading
       const s = await cmd("snapshot", {});
       const el = (s.elements || []).find((e) => (e.text || "").includes("Iframe Button"));
       assert(el && /^f\d+:/.test(el.ref), `iframe button missing / not frame-qualified (ref=${el && el.ref})`);
@@ -145,7 +157,12 @@ async function main() {
       const v = await cmd("eval_js", { expression: "window.__clicked||0" });
       assert(v.value === 1, `click had no effect (clicked=${v.value})`);
     });
-    await test("click shadow button by ref", async () => { const ref = refByText(snap, "Shadow Button"); await cmd("click", { ref }); });
+    await test("click shadow button by ref + effect", async () => {
+      const ref = refByText(snap, "Shadow Button"); assert(ref, "no shadow button ref");
+      await cmd("click", { ref });
+      const v = await cmd("eval_js", { expression: "window.__shadowClicked||0" });
+      assert(v.value === 1, `shadow click had no effect (clicked=${v.value})`);
+    });
     await test("type into plain input", async () => {
       const ref = refByText(snap, "Plain input") || (snap.elements.find((e) => e.type === "text" && e.placeholder === "Plain input") || {}).ref;
       await cmd("type", { ref: ref || (await cmd("find", { query: "Plain" })).matches[0].ref, text: "hello" });
@@ -175,7 +192,7 @@ async function main() {
       const v = await cmd("eval_js", { expression: "document.getElementById('hovered').textContent" });
       assert(v.value === "yes", "hover had no effect");
     });
-    await test("press_key Enter on input (no throw)", async () => { const ref = (await cmd("find", { query: "Plain" })).matches[0].ref; await cmd("press_key", { ref, key: "Escape" }); });
+    await test("press_key Escape on input (no throw)", async () => { const ref = (await cmd("find", { query: "Plain" })).matches[0].ref; await cmd("press_key", { ref, key: "Escape" }); });
     await test("scroll", async () => { await cmd("scroll", { direction: "down", amount: 200 }); });
     await test("click_selector", async () => { await cmd("click_selector", { selector: "#btn" }); const v = await cmd("eval_js", { expression: "window.__clicked||0" }); assert(v.value >= 2, "click_selector no effect"); });
 

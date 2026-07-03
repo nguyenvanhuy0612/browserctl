@@ -1,5 +1,7 @@
 # Command protocol
 
+Current version: **0.4** (extension, bridge, and MCP server are versioned together).
+
 Agents send commands to the bridge:
 
 ```
@@ -31,6 +33,24 @@ visible tab — no activation, no focus steal.
 No params. Result: `{ id, url, title, active, pinned }` - which tab commands act
 on now. `pinned` is true once a target is pinned (i.e. after the first command).
 
+## Bridge <-> extension WebSocket frames
+
+The HTTP `/command` protocol above is what agents use. Internally, the bridge
+relays each command to the extension over a WebSocket (`ws://.../extension`)
+using its own small frame protocol:
+
+- Request (bridge -> extension): `{ "id", "action", "params" }` - same
+  `action`/`params` as the HTTP body, plus a `id` (UUID) the bridge generates to
+  match the reply.
+- Reply (extension -> bridge): `{ "id", "ok", "result" }` on success or
+  `{ "id", "ok": false, "error" }` on failure - `id` echoes the request. The
+  bridge un-wraps this into the HTTP response (dropping `id`).
+- Heartbeat (bridge -> extension -> bridge): `{ "type": "ping" }` every 20s,
+  answered with `{ "type": "pong" }`. This is an application-level message (not
+  a WS protocol ping/pong frame) because only a message wakes the extension's
+  MV3 service worker; it both resets the SW idle timer and lets the bridge
+  detect a dead extension.
+
 ## Page inspection
 
 ### `snapshot`
@@ -60,7 +80,8 @@ any action that changes the page.
 ## Actions
 
 ### `navigate`
-`params: { url }` - load `url` in the active tab. Returns `{ url }` once loaded.
+`params: { url }` - load `url` in the target tab (re-pins it as the target).
+Returns `{ url }` once loaded.
 
 ### `click`
 `params: { index }` - click the element with that snapshot index.
@@ -93,11 +114,24 @@ Result: `{ tabs: [ { id, url, title, active } ] }`.
 ### `new_tab`
 `params: { url? }` - open a new tab (optionally at `url`). Result: `{ id }`.
 
+### `group_tab`
+`params: { id?, title?, color? }` - put a tab into a labeled tab group (defaults
+to the target tab, `title:"aibc"`, `color:"blue"`) so the user can see which tab
+the agent drives. Does not activate the tab; also pins it as the target. Result:
+`{ groupId, tabId, title, color }` (or a `titled:false` note if the `tabGroups`
+permission is unavailable and only the grouping succeeded).
+
+### `ungroup_tab`
+`params: { id? }` - remove a tab from its tab group (defaults to the target
+tab). Result: `{ ungrouped: id }`.
+
 ### `switch_tab`
-`params: { id }` - make that tab active.
+`params: { id, focus? }` - activate that tab (making it the target). `focus:
+true` also raises its window to the foreground (steals OS focus); default
+`false` just activates the tab within its window.
 
 ### `close_tab`
-`params: { id }` - close that tab.
+`params: { id }` - close that tab. Unpins the target if it was the closed tab.
 
 ---
 
@@ -107,7 +141,7 @@ These use `chrome.debugger`. Attaching shows an "is being debugged" bar in the
 browser; it is opt-in. Attach once, act, then read the buffers.
 
 ### `cdp_attach`
-Attach the debugger to the active tab and start buffering console + network
+Attach the debugger to the target tab and start buffering console + network
 events. No params. Result: `{ attached: true, tabId }`.
 
 ### `cdp_detach`
@@ -125,7 +159,8 @@ filtered by URL substring. Requires attach.
 
 ### `export_har`
 Export captured traffic as a HAR 1.2 object: `{ log: { version, creator, entries } }`.
-Requires attach. (Bodies are not captured yet; headers/status/timing are.)
+Requires attach. Headers/status/timing are always included; pass `bodies: true`
+to also include response bodies (see `export_har { bodies? }` under "CDP extras" below).
 
 ### `eval_js`
 `params: { expression }` - evaluate a JS expression in the page, return its
@@ -136,10 +171,16 @@ CSP); otherwise in the page MAIN world (subject to CSP).
 
 ## Added in v0.2
 
-### More DOM interaction (active tab, content script)
+### More DOM interaction (target tab, content script)
 - `hover { index }` - dispatch mouseover/enter/move on the element.
 - `select_option { index, value?, label? }` - choose a `<select>` option by value or visible text.
-- `press_key { key, index? }` - dispatch a key (e.g. `Enter`, `Escape`, `ArrowDown`) to an element or the focused element.
+- `press_key { key, index?, ref?, modifiers? }` - dispatch a key (e.g. `Enter`, `Escape`, `ArrowDown`) to
+  an element (by `index` or `ref`) or the focused element (neither given). If `modifiers` (e.g.
+  `["Meta","Shift"]`) are given AND the debugger is already attached (`cdp_attach`), the press is
+  internally routed through CDP instead of the DOM, and on Mac drives real editor commands for
+  Cmd+A/Z/C/V/X (select-all/undo/redo/copy/paste/cut). Call `cdp_attach` first if you need modifiers:
+  without a prior attach, a `press_key` with `modifiers` returns an error (`"modifiers require cdp_attach"`)
+  rather than silently sending an unmodified key.
 - `wait_for { selector?, text?, gone?, timeoutMs? }` - wait until a selector/text appears (or disappears with `gone:true`); with neither, waits `timeoutMs` (default 1000). Selector/text waits poll in the page up to `timeoutMs` (default 8000).
 - `get_page_content { maxChars? }` - extract the main readable text: `{ title, url, text }` (default 8000 chars).
 
@@ -147,14 +188,14 @@ Element robustness: `snapshot` now stamps `data-aibc-ref="<index>"` on each inde
 element, so `click`/`type`/etc. still resolve after minor DOM churn.
 
 ### Navigation history & windows
-- `go_back` / `go_forward` - history navigation in the active tab.
+- `go_back` / `go_forward` - history navigation in the target tab.
 - `reload { bypassCache? }` - reload (hard reload with `bypassCache:true`).
 - `list_windows` - all windows with their tabs.
 - `focus_window { id }` - bring a window to the foreground.
 
 ### Light network capture (chrome.webRequest - NO debugger banner)
 Lighter alternative to the CDP network capture: no "is being debugged" bar, but no
-response bodies. Per active tab.
+response bodies. Per target tab.
 - `net_start` - begin capturing (clears the buffer).
 - `net_stop` - stop capturing.
 - `net_get { urlContains?, limit? }` - return captured requests
@@ -179,8 +220,13 @@ tool. Add a redaction pass in `util.js` if pointing it at a shared/untrusted con
 - `storage_get { area?, key? }` / `storage_set { area?, key, value }` / `storage_remove { area?, key }` / `storage_clear { area? }` - localStorage (`area:"local"`, default) or sessionStorage (`area:"session"`).
 
 ### Record & replay
-- `record_start` / `record_stop` - record clicks and field changes in the active tab.
-- `record_get` - return the recorded steps (`{ type, selector, value?, url? }`).
+- `record_start` / `record_stop` - record clicks and field changes in the target tab.
+- `record_get` - return the recorded steps: `{ count, steps }`. Each step is either
+  `{ type: "click", selector, text }` (element's visible text, truncated to 40 chars) or
+  `{ type: "input", selector, value }` (a field's new value on `change`). Selectors are
+  CSS, built to be replay-stable (id if unique, else an `nth-of-type` path). Navigation is
+  **not** recorded - `replay` accepts a `{ type: "navigate", url }` step, but the recorder
+  itself never emits one; add navigate steps by hand if a replay needs to change pages.
 - `replay { steps?, startUrl? }` - replay recorded (or supplied) steps; navigates to `startUrl` first if given.
 
 ### Network idle
@@ -189,7 +235,9 @@ tool. Add a redaction pass in `util.js` if pointing it at a shared/untrusted con
 ### CDP power tools (require `cdp_attach`)
 - `coordinate_click { x, y, button? }` / `coordinate_drag { fromX, fromY, toX, toY }` - real mouse input by pixel (canvas/WebGL/maps).
 - `a11y_snapshot { max? }` - accessibility tree (role/name/value).
-- `element_screenshot { index, format? }` - screenshot one element by snapshot index.
+- `element_screenshot { index?, ref?, format? }` - screenshot one element, addressed by
+  snapshot `index` or a stable `ref` (from `read_page`/`find`/`snapshot`); resolved by the
+  content script (so shadow-DOM elements work too), then clipped via CDP.
 - `print_pdf` - render the page to a PDF (`{ base64 }`).
 - `audit` - performance metrics + count of interactive elements missing an accessible name.
 - `get_cookies { urlContains? }` / `set_cookie { name, value, url|domain, ... }` / `delete_cookies { name, url? }`.
@@ -240,9 +288,8 @@ capture, and CSP-bypass eval. See `docs/superpowers/specs/2026-06-30-claude-for-
   `document.getAnimations().length === 0`. Catches CSS/JS animations that `wait_for` /
   `wait_network_idle` miss. Use before a screenshot/read after navigation.
 
-Deferred (low marginal value for the external-agent model): CDP Mac editor commands
-(`Cmd+A`/`Cmd+Z`); mid-action domain re-check (needs an expected-domain the external agent
-doesn't supply).
+Deferred (low marginal value for the external-agent model): mid-action domain re-check
+(needs an expected-domain the external agent doesn't supply).
 
 ---
 
@@ -253,7 +300,9 @@ doesn't supply).
 - [x] Capture response bodies in HAR (`Network.getResponseBody`) + `get_response_body`.
 - [x] `wait_for` (selector / text / time).
 - [x] Light network capture via `chrome.webRequest` (no debugger banner).
-- [x] Secret stripping (cookies/auth) on network/HAR output.
+- [ ] Secret stripping (cookies/auth) on network/HAR output - **not planned**: headers are
+  returned verbatim by design (see "Headers" note under "Added in v0.2"); this is a local,
+  single-user, internal tool, not a shared/untrusted service.
 - [x] More interaction: hover, select_option, press_key; nav history; windows; full-page screenshot.
 - [x] `wait_network_idle` (with stale-request pruning).
 - [x] CDP coordinate clicks + drag; accessibility-tree snapshot; element screenshot; PDF; audit; cookies.
@@ -263,6 +312,7 @@ doesn't supply).
 - [x] Accessibility-tree read (`read_page`) + WeakRef refs + `find`; ref-based interaction.
 - [x] Coordinate remap (screenshot→viewport) + real click sequence + `insert_text`.
 - [x] `wait_settle` (readyState + getAnimations).
+- [x] `group_tab` / `ungroup_tab` (labeled tab group as a visual "which tab is the agent driving" marker).
 - [ ] Streaming WebSocket endpoint for agents (push DOM-change/console events live).
 - [ ] Persistent injected-script channel (cf. mcp-chrome inject_script).
 - [x] Cross-origin iframe support (all_frames injection + frame-qualified refs; DOM read + interaction routed per frame). Sub-frame `element_screenshot` offset and file-dialog handling still open.

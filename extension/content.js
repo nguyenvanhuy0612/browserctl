@@ -28,7 +28,7 @@
 
   function isVisible(el) {
     const rect = el.getBoundingClientRect();
-    if (rect.width === 0 && rect.height === 0) return false;
+    if (rect.width === 0 || rect.height === 0) return false;
     const style = getComputedStyle(el);
     if (style.visibility === "hidden" || style.display === "none" || style.opacity === "0") {
       return false;
@@ -96,7 +96,9 @@
     indexedElements = nodes;
     // Clear stamps from a prior snapshot so a stale index can't resolve to the wrong
     // element, then re-stamp so resolve() can recover a node after the cache goes stale.
-    for (const el of document.querySelectorAll("[data-aibc-ref]")) el.removeAttribute("data-aibc-ref");
+    // Use the shadow-piercing query (matching the stamping below) so stale stamps on
+    // shadow-DOM elements don't accumulate across snapshots.
+    for (const el of deepQueryAll("[data-aibc-ref]")) el.removeAttribute("data-aibc-ref");
     nodes.forEach((el, index) => el.setAttribute("data-aibc-ref", String(index)));
     const elements = nodes.map((el, index) => {
       const item = { index, ref: getOrAssignRef(el), tag: el.tagName.toLowerCase(), text: elementText(el) };
@@ -313,7 +315,15 @@
     const el = resolveTarget({ index, ref });
     el.scrollIntoView({ block: "center", inline: "center" });
     el.focus();
-    if ("value" in el) {
+    const inputType = el.tagName === "INPUT" ? (el.type || "").toLowerCase() : "";
+    if (inputType === "checkbox" || inputType === "radio") {
+      // Setting .value on a checkbox/radio has no visible effect (it just changes the
+      // submitted value, not the checked state) and reporting success would be
+      // misleading — set .checked instead, interpreting text as a truthy string.
+      el.checked = /^(true|1|yes|on|checked)$/i.test(String(text).trim());
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    } else if ("value" in el) {
       setNativeValue(el, text);
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
@@ -351,13 +361,14 @@
   function select_option({ index, ref, value, label }) {
     const el = resolveTarget({ index, ref });
     if (el.tagName !== "SELECT") throw new Error("target element is not a select");
+    const which = ref != null ? `ref ${ref}` : `index ${index}`;
     let matched = null;
     if (value !== undefined) {
       matched = Array.from(el.options).find((opt) => opt.value === value) || null;
-      if (!matched) throw new Error(`no option with value "${value}" in select ${index}`);
+      if (!matched) throw new Error(`no option with value "${value}" in select (${which})`);
     } else if (label !== undefined) {
       matched = Array.from(el.options).find((opt) => opt.text.trim() === label) || null;
-      if (!matched) throw new Error(`no option with label "${label}" in select ${index}`);
+      if (!matched) throw new Error(`no option with label "${label}" in select (${which})`);
     } else {
       throw new Error("select_option requires value or label");
     }
@@ -391,7 +402,7 @@
       const check = () => {
         let present;
         if (selector !== undefined) {
-          present = !!document.querySelector(selector);
+          present = !!deepQuery(selector);
         } else {
           present = (document.body ? document.body.innerText : "").includes(text);
         }

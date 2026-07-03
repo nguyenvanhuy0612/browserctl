@@ -76,6 +76,9 @@
         super();
         const root = this.attachShadow({ mode: 'open' });
         root.innerHTML = '<button id="shadowbtn">Shadow Button</button>';
+        root.getElementById('shadowbtn').addEventListener('click', () => {
+          window.__shadowClicked = (window.__shadowClicked || 0) + 1;
+        });
       }
     }
     customElements.define('shadow-widget', ShadowWidget);

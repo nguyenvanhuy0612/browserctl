@@ -63,10 +63,28 @@ export function dropTab(tabId) {
   capturing.delete(tabId);
   buffers.delete(tabId);
   inFlight.delete(tabId);
+  persistCapturing();
 }
 
 function clearBuffer(tabId) {
   buffers.set(tabId, { list: [], byId: new Map() });
+}
+
+// Persist which tabs are being captured, so net_get can tell "never started" apart from
+// "was capturing, then the service worker recycled and lost the in-memory buffer" — the
+// buffered requests can't be recovered, so the goal is an honest error, not a silent
+// empty/zero read.
+const CAPTURING_KEY = "aibc_net_capturing_tabs";
+function persistCapturing() {
+  chrome.storage.session.set({ [CAPTURING_KEY]: [...capturing] }).catch(() => {});
+}
+async function wasCapturingBeforeRestart(tabId) {
+  try {
+    const { [CAPTURING_KEY]: ids } = await chrome.storage.session.get(CAPTURING_KEY);
+    return Array.isArray(ids) && ids.includes(tabId);
+  } catch {
+    return false;
+  }
 }
 
 // Convert a webRequest header array ([{name,value}]) to a map (verbatim, no redaction).
@@ -208,6 +226,9 @@ function briefRecord(rec) {
     ip: rec.ip != null ? rec.ip : null,
     error: rec.error != null ? rec.error : null,
     timeMs,
+    // Verbatim, no redaction — this is a local debug aid (see cross-cutting decision).
+    requestHeaders: rec.requestHeaders || null,
+    responseHeaders: rec.responseHeaders || null,
   };
 }
 
@@ -260,17 +281,22 @@ export async function handleNet(action, params, tabId) {
       requireTabId(tabId);
       capturing.add(tabId);
       clearBuffer(tabId);
+      persistCapturing();
       return { ok: true, result: { capturing: true, tabId } };
     }
 
     case "net_stop": {
       requireTabId(tabId);
       capturing.delete(tabId);
+      persistCapturing();
       return { ok: true, result: { capturing: false, tabId } };
     }
 
     case "net_get": {
       requireTabId(tabId);
+      if (!capturing.has(tabId) && (await wasCapturingBeforeRestart(tabId))) {
+        throw new Error("capture state was reset by a service-worker restart — call net_start again");
+      }
       const b = getBuffer(tabId);
       let records = b.list;
       if (params.urlContains) {

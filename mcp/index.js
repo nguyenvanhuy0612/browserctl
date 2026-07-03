@@ -66,7 +66,7 @@ const INSTRUCTIONS = `This server drives ONE pinned "target" tab in the backgrou
 - Before reading or screenshotting sensitive content, confirm the target with browser_current_tab.`;
 
 const server = new McpServer(
-  { name: "ai-browser-control", version: "0.2.0" },
+  { name: "ai-browser-control", version: "0.4.0" },
   { instructions: INSTRUCTIONS }
 );
 
@@ -130,10 +130,12 @@ server.registerTool(
   {
     title: "Click element",
     description: "Click an element identified by 'ref' (stable, from browser_read_page/browser_find/browser_snapshot) or 'index' (from the latest browser_snapshot). Prefer ref.",
-    inputSchema: {
+    inputSchema: z.object({
       index: z.number().int().optional().describe("Element index from browser_snapshot"),
       ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5')"),
-    },
+    }).refine((v) => v.index !== undefined || v.ref !== undefined, {
+      message: "Provide at least one of 'ref' or 'index'.",
+    }),
   },
   tool("click", async ({ index, ref }) => text(await callBridge("click", { index, ref })))
 );
@@ -144,12 +146,14 @@ server.registerTool(
     title: "Type into element",
     description:
       "Focus an element (by 'ref' or 'index') and set its text. Set submit=true to press Enter afterward.",
-    inputSchema: {
+    inputSchema: z.object({
       index: z.number().int().optional().describe("Element index from browser_snapshot"),
       ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5')"),
       text: z.string().describe("Text to enter"),
       submit: z.boolean().optional().describe("Press Enter after typing"),
-    },
+    }).refine((v) => v.index !== undefined || v.ref !== undefined, {
+      message: "Provide at least one of 'ref' or 'index'.",
+    }),
   },
   tool("type", async ({ index, ref, text: t, submit }) =>
     text(await callBridge("type", { index, ref, text: t, submit }))
@@ -185,7 +189,8 @@ server.registerTool(
   tool("screenshot", async ({ format, quality }) => {
     const { dataUrl } = await callBridge("screenshot", { format, quality });
     const m = dataUrl.match(/^data:image\/(png|jpeg);base64,(.*)$/);
-    return { content: [{ type: "image", data: m ? m[2] : dataUrl, mimeType: `image/${m ? m[1] : "jpeg"}` }] };
+    if (!m) throw new Error(`screenshot returned an unrecognized data URL (expected data:image/png|jpeg;base64,...)`);
+    return { content: [{ type: "image", data: m[2], mimeType: `image/${m[1]}` }] };
   })
 );
 
@@ -351,10 +356,12 @@ server.registerTool(
   {
     title: "Hover element",
     description: "Hover the pointer over an element identified by 'ref' (from browser_read_page/browser_find/browser_snapshot) or 'index' (from the latest browser_snapshot). Prefer ref.",
-    inputSchema: {
+    inputSchema: z.object({
       index: z.number().int().optional().describe("Element index from browser_snapshot"),
       ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5')"),
-    },
+    }).refine((v) => v.index !== undefined || v.ref !== undefined, {
+      message: "Provide at least one of 'ref' or 'index'.",
+    }),
   },
   tool("hover", async ({ index, ref }) => text(await callBridge("hover", { index, ref })))
 );
@@ -364,12 +371,14 @@ server.registerTool(
   {
     title: "Select dropdown option",
     description: "Select an option in a <select> element (identified by 'ref' or 'index') by value or by visible label.",
-    inputSchema: {
+    inputSchema: z.object({
       index: z.number().int().optional().describe("Index of the <select> element from browser_snapshot"),
       ref: z.string().optional().describe("Stable ref of the <select> element (e.g. 'ref_5')"),
       value: z.string().optional().describe("Option value to select"),
       label: z.string().optional().describe("Visible option text to select"),
-    },
+    }).refine((v) => v.index !== undefined || v.ref !== undefined, {
+      message: "Provide at least one of 'ref' or 'index'.",
+    }),
   },
   tool("select_option", async ({ index, ref, value, label }) =>
     text(await callBridge("select_option", { index, ref, value, label }))
@@ -537,16 +546,17 @@ server.registerTool(
   {
     title: "Full-page screenshot",
     description:
-      "Capture the entire page (beyond the viewport) as an image. Requires browser_cdp_attach (uses the debugger).",
+      "Capture the entire page (beyond the viewport) as an image. JPEG by default (quality 55, smaller); pass format='png' for a lossless image (e.g. pixel-diff QA). Requires browser_cdp_attach (uses the debugger).",
     inputSchema: {
-      format: z.enum(["png", "jpeg"]).optional().describe("Image format, default png"),
+      format: z.enum(["png", "jpeg"]).optional().describe("Image format, default jpeg"),
       quality: z.number().int().optional().describe("JPEG quality 1-100, default 55 (jpeg only)"),
     },
   },
   tool("capture_screenshot", async ({ format, quality }) => {
     const { dataUrl } = await callBridge("capture_screenshot", { fullPage: true, format, quality });
     const m = dataUrl.match(/^data:image\/(png|jpeg);base64,(.*)$/);
-    return { content: [{ type: "image", data: m ? m[2] : dataUrl, mimeType: `image/${m ? m[1] : "png"}` }] };
+    if (!m) throw new Error(`capture_screenshot returned an unrecognized data URL (expected data:image/png|jpeg;base64,...)`);
+    return { content: [{ type: "image", data: m[2], mimeType: `image/${m[1]}` }] };
   })
 );
 
@@ -613,7 +623,8 @@ server.registerTool(
   tool("element_screenshot", async ({ index, ref, format }) => {
     const { dataUrl } = await callBridge("element_screenshot", { index, ref, format });
     const m = dataUrl.match(/^data:image\/(png|jpeg);base64,(.*)$/);
-    return { content: [{ type: "image", data: m ? m[2] : dataUrl, mimeType: `image/${m ? m[1] : "png"}` }] };
+    if (!m) throw new Error(`element_screenshot returned an unrecognized data URL (expected data:image/png|jpeg;base64,...)`);
+    return { content: [{ type: "image", data: m[2], mimeType: `image/${m[1]}` }] };
   })
 );
 
@@ -641,7 +652,7 @@ server.registerTool(
   "browser_get_cookies",
   {
     title: "Get cookies",
-    description: "Return browser cookies, optionally filtered by domain/url substring. Requires browser_cdp_attach.",
+    description: "Return browser cookies, optionally filtered to cookies whose domain contains this substring. Requires browser_cdp_attach.",
     inputSchema: { urlContains: z.string().optional() },
   },
   tool("get_cookies", async ({ urlContains }) => text(await callBridge("get_cookies", { urlContains })))

@@ -89,8 +89,11 @@ GitLab), the agent drives its tab (say LinkedIn) without disturbing you.
 ```bash
 cd mcp
 npm install
-# Register with Claude Code (run from anywhere; use the absolute path):
+# Register with Claude Code (run from anywhere; use the absolute path to mcp/index.js on this machine):
+# Windows:
 claude mcp add browser -- node "C:/Users/HUYNGUYEN/Documents/my_notes/claude/ai-browser-control/mcp/index.js"
+# macOS:
+claude mcp add browser -- node "/Users/admin/Documents/my_notes/claude/ai-browser-control/mcp/index.js"
 ```
 
 Or add it to a project's `.mcp.json`:
@@ -100,7 +103,7 @@ Or add it to a project's `.mcp.json`:
   "mcpServers": {
     "browser": {
       "command": "node",
-      "args": ["C:/Users/HUYNGUYEN/Documents/my_notes/claude/ai-browser-control/mcp/index.js"],
+      "args": ["/absolute/path/to/my_notes/claude/ai-browser-control/mcp/index.js"],
       "env": { "BRIDGE_URL": "http://127.0.0.1:8765" }
     }
   }
@@ -155,7 +158,7 @@ real commands against a controlled page the runner serves over http:
 node tests/e2e/run.mjs
 ```
 
-It creates a dedicated tab, exercises 58/60 commands (all but `focus_window` and
+It creates a dedicated tab, exercises nearly all commands (all but `focus_window` and
 `reload_extension`, which steal focus / drop the connection), asserts behaviour
 including the framework-safe value setter, ref-addressed element screenshots,
 shadow-DOM reads, and history navigation, then closes the tab and prints a
@@ -165,10 +168,27 @@ re-running so the test hits the new code.
 
 ## Security
 
-Internal-use tool, by design: no login, no auth. The bridge listens on `localhost`
-only; anything that can reach `localhost:8765` can drive your browser, so do not
-expose the port. An optional API token is left on the roadmap for if this ever
-leaves a trusted machine.
+**This is a single-user, internal tool.** It runs on my own machine, driven by my
+own agent, and is not meant to be shared, exposed, or run on a multi-user host. The
+security model is deliberately "trusted local machine": there is **no auth and no
+access control**, by design. The hardening items below are known and **intentionally
+not implemented** — none of them affect the MCP/HTTP functionality, so for a
+single-user setup they buy nothing. If this project is ever shared or moved off a
+trusted machine, revisit them first.
+
+Known, accepted risks (single-user only):
+
+- **Any web page you visit can reach the bridge.** The bridge binds `127.0.0.1`, but
+  a page you browse can `fetch("http://127.0.0.1:8765/command", ...)` as a no-preflight
+  "simple" request (or open `ws://127.0.0.1:8765/extension`) and issue commands to your
+  browser. Localhost binding does not stop same-machine web content; only an `Origin`
+  allowlist + shared token would, and neither is implemented.
+- **The extension↔bridge link is unauthenticated cleartext ws**, and the bridge host is
+  user-configurable on the options page. Whatever answers on that socket gets full browser
+  control. Keep the host at the `127.0.0.1` default.
+- **`get_cookies` reads cookies for the whole browser profile** (all sites), not just the
+  target tab. There is no redaction on network/HAR/cookie output — headers (incl.
+  `Cookie` / `Authorization`) come back verbatim, which is the point for a local debug tool.
 
 **Prompt injection still applies.** A web page can embed hidden text that tries to
 hijack whatever agent is driving the browser (the same risk the official Claude in
