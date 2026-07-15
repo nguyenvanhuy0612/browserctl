@@ -101,6 +101,10 @@ const NO_TAB_TOOLS = new Set([
   "browser_list_tabs", "browser_new_tab", "browser_group_tab", "browser_ungroup_tab",
   "browser_switch_tab", "browser_close_tab", "browser_list_windows", "browser_focus_window",
   "browser_reload_extension", "browser_record_get",
+  // Manages its own tab identity (open-or-reuse, like browser_new_tab) — declares its
+  // own tabId field below with composite-specific semantics instead of the generic
+  // per-command-override one.
+  "browser_open_and_read",
 ]);
 
 // Auto-add tabId to every tab-scoped tool's inputSchema in one place, instead of
@@ -166,6 +170,24 @@ server.registerTool(
     },
   },
   tool("find", async ({ query, max }) => text(await callBridge("find", { query, max })))
+);
+
+server.registerTool(
+  "browser_find_text",
+  {
+    title: "Find text on the page",
+    description:
+      "Search the FULL page text (not just interactive elements) for a query and return matching snippets with surrounding context, each flagged 'visible' (false for screen-reader-only/off-screen text) and paired with the nearest clickable/typeable ancestor if one exists ('nearestInteractive': {ref, tag, text}), so a hit can be turned into an action in one follow-up call. A match may span an inline element boundary (e.g. a name in its own link followed by plain text) — when it touches 2+ distinct interactive ancestors, an additional 'spanInteractives' array lists all of them (nearestInteractive stays the first/start one). Use this to answer 'does this page contain X, and where' — e.g. a rating, a price, a status string sitting in plain text that browser_find/browser_snapshot can't see (they only index interactive elements by design). For 'what can I click', use browser_find instead. Top frame only (like browser_get_page_content) — does not search iframes.",
+    inputSchema: {
+      query: z.string().describe("Text to match (case-insensitive substring by default)"),
+      regex: z.boolean().optional().describe("Treat query as a JS regex pattern instead of a literal substring. Default false."),
+      max: z.number().int().optional().describe("Max matches (default 20)"),
+      contextChars: z.number().int().optional().describe("Characters of context to include before/after each match (default 80)"),
+    },
+  },
+  tool("find_text", async ({ query, regex, max, contextChars }) =>
+    text(await callBridge("find_text", { query, regex, max, contextChars }))
+  )
 );
 
 server.registerTool(
@@ -265,6 +287,73 @@ server.registerTool(
     inputSchema: { url: z.string().optional().describe("Optional URL to open") },
   },
   tool("new_tab", async ({ url }) => text(await callBridge("new_tab", { url })))
+);
+
+server.registerTool(
+  "browser_open_and_read",
+  {
+    title: "Open (or reuse) a tab and read it in one call",
+    description:
+      "Composite convenience: open a URL in a new tab (or navigate/reuse an existing one via tabId), wait for it to load, then read its content — replacing the browser_new_tab + browser_wait_network_idle/browser_wait_settle + browser_get_page_content/browser_snapshot sequence with a single call. On a wait timeout this does NOT error: it returns whatever content exists with waited.settled=false, since the page is usually still readable. Always returns the tabId so you can keep driving that tab (e.g. with further tabId-scoped calls) for background/concurrent multi-tab work.",
+    inputSchema: {
+      url: z.string().optional().describe("URL to open. Omit to just wait+read an existing tab (requires tabId)."),
+      tabId: z.number().int().optional().describe("Reuse this specific tab (from browser_list_tabs) instead of opening a new one. If url is also given, navigates this tab to url first."),
+      wait: z.enum(["network-idle", "settle", "none"]).optional().describe("Default 'network-idle'."),
+      timeoutMs: z.number().int().optional().describe("Wait timeout in ms, default 15000."),
+      read: z.enum(["text", "snapshot", "both"]).optional().describe("Default 'text' (browser_get_page_content). 'snapshot' returns interactive elements instead. 'both' returns both."),
+      maxChars: z.number().int().optional().describe("Max chars for text content, default 8000; also caps snapshot's page-text field."),
+    },
+  },
+  tool("open_and_read", async ({ url, tabId, wait = "network-idle", timeoutMs = 15000, read = "text", maxChars = 8000 }) => {
+    if (!url && tabId == null) throw new Error("open_and_read requires 'url' and/or 'tabId'");
+
+    let targetTabId = tabId;
+    if (targetTabId == null) {
+      const opened = await callBridge("new_tab", { url });
+      targetTabId = opened.id;
+    } else if (url) {
+      await callBridge("navigate", { url, tabId: targetTabId });
+    }
+
+    const waitStart = Date.now();
+    let settled = true;
+    if (wait === "network-idle") {
+      try { await callBridge("wait_network_idle", { tabId: targetTabId, timeoutMs }); }
+      catch { settled = false; }
+    } else if (wait === "settle") {
+      try { await callBridge("wait_settle", { tabId: targetTabId, timeoutMs }); }
+      catch { settled = false; }
+    }
+    const elapsedMs = Date.now() - waitStart;
+
+    const out = { tabId: targetTabId, waited: { settled, elapsedMs } };
+
+    // Check for a PDF BEFORE attempting a DOM-dependent read: get_page_content/snapshot
+    // both fast-fail on a PDF tab (Chrome's built-in viewer isn't a real DOM), which
+    // would otherwise throw here and discard the tabId this call just opened — losing
+    // exactly the info (confirmed PDF + its URL) the caller needs to recover. PDFs are a
+    // real, confirmed case (bank rate sheets), not a hypothetical.
+    const pdfCheck = await callBridge("read_pdf", { tabId: targetTabId });
+    if (pdfCheck.isPdf) {
+      out.isPdf = true;
+      out.url = pdfCheck.url;
+      out.note = pdfCheck.note;
+      return text(out);
+    }
+
+    if (read === "text" || read === "both") {
+      const content = await callBridge("get_page_content", { tabId: targetTabId, maxChars });
+      out.title = content.title;
+      out.url = content.url;
+      out.text = content.text;
+    }
+    if (read === "snapshot" || read === "both") {
+      const snap = await callBridge("snapshot", { tabId: targetTabId, maxText: maxChars });
+      out.snapshot = snap;
+      if (out.title == null) { out.title = snap.title; out.url = snap.url; }
+    }
+    return text(out);
+  })
 );
 
 server.registerTool(
@@ -494,6 +583,17 @@ server.registerTool(
   )
 );
 
+server.registerTool(
+  "browser_read_pdf",
+  {
+    title: "Read a PDF tab",
+    description:
+      "Call this when the target tab is showing a PDF (browser_get_page_content/browser_find_text/browser_snapshot/browser_click all fail on a PDF tab with 'no readable DOM' — Chrome's built-in PDF viewer isn't a real DOM, so those tools cannot see its text). Returns the tab's URL and an isPdf verdict; this extension does NOT extract PDF text itself (a hand-rolled parser silently mis-reads subset/CID-font PDFs — dangerous for numeric data like a rate sheet). Fetch the returned URL yourself and read it with your own PDF-reading capability instead of retrying the DOM-based tools.",
+    inputSchema: {},
+  },
+  tool("read_pdf", async () => text(await callBridge("read_pdf")))
+);
+
 // --- Navigation history & windows ---
 
 server.registerTool(
@@ -679,6 +779,22 @@ server.registerTool(
     if (!m) throw new Error(`element_screenshot returned an unrecognized data URL (expected data:image/png|jpeg;base64,...)`);
     return { content: [{ type: "image", data: m[2], mimeType: `image/${m[1]}` }] };
   })
+);
+
+server.registerTool(
+  "browser_describe_element",
+  {
+    title: "Describe one element",
+    description:
+      "Given a ref (from browser_snapshot/browser_read_page/browser_find/browser_find_text) or an index (from the latest browser_snapshot), return everything useful for debugging it: tag, full attribute dump, bounding rect, a visibility verdict WITH the specific reason it failed if not visible ('zero-size rect' | 'visibility:hidden' | 'display:none' | 'opacity:0' | 'disabled' | 'visible'), and whether it matches the interactive-element selector browser_find/browser_snapshot use. Use this to understand why a click/type failed, why an element didn't show up in browser_snapshot, or to inspect an element browser_find_text pointed at via nearestInteractive. Does not return full computed style (hundreds of mostly-noise properties) — just the fields that explain real failures.",
+    inputSchema: z.object({
+      index: z.number().int().optional().describe("Element index from browser_snapshot"),
+      ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5')"),
+    }).refine((v) => v.index !== undefined || v.ref !== undefined, {
+      message: "Provide at least one of 'ref' or 'index'.",
+    }),
+  },
+  tool("describe_element", async ({ index, ref }) => text(await callBridge("describe_element", { index, ref })))
 );
 
 server.registerTool(

@@ -12,6 +12,7 @@ const CONTENT_ACTIONS = [
   "snapshot",
   "read_page",
   "find",
+  "find_text",
   "click",
   "type",
   "scroll",
@@ -20,6 +21,7 @@ const CONTENT_ACTIONS = [
   "press_key",
   "wait_settle",
   "get_page_content",
+  "describe_element",
   "click_selector",
   "fill_selector",
   "storage_get",
@@ -242,6 +244,41 @@ async function dispatch({ action, params = {} }) {
   // broadcasting it via crossFrame would fail in every frame and fall back to a fake
   // empty result, so route it directly like the ref-addressed actions below.
   if (CONTENT_ACTIONS.includes(action)) {
+    // Fast-fail on a PDF tab: Chrome's built-in PDF viewer isn't a real DOM (no text
+    // nodes for get_page_content/find_text to read, no INTERACTIVE_SELECTOR elements
+    // for snapshot/find/click), so every content action would otherwise silently return
+    // empty/confusing results — an agent burned 50-60+ tool calls discovering that the
+    // hard way before this check existed. One cheap URL check here, before crossFrame OR
+    // toContent, covers every content action in one place.
+    const tab = await targetTab(params);
+    if (looksLikePdf(tab.url)) {
+      return { ok: false, error: `tab is showing a PDF (no readable DOM) — call read_pdf instead of '${action}'` };
+    }
+    // Pin the tab resolved above as an explicit tabId for the rest of this dispatch.
+    // Without this, when the caller used the global pin (no params.tabId), the SECOND
+    // targetTab() resolution below (inside crossFrame/toContent) could land on a
+    // different tab if the pinned target closes in the brief window between the two
+    // calls — silently re-pinning onto whatever's now active, the exact drift the
+    // pinning model exists to prevent. An explicit tabId fails closed ("tab not found")
+    // instead.
+    if (params.tabId == null) params = { ...params, tabId: tab.id };
+    // Mark "a click just happened" for the focus-steal catch below — click and
+    // click_selector are the two actions that invoke a real DOM .click(), which can hit a
+    // target="_blank" link or an onclick handler's window.open(). Only register a
+    // candidate when the CURRENT foreground tab is itself one we're driving — Chrome
+    // attributes a spawned tab's opener to the foreground tab regardless of which
+    // (possibly background) tab actually fired the click, so gating on drivenTabIds
+    // keeps an unrelated tab the user opens by hand in their own foreground tab from
+    // being mistaken for our own automation.
+    if (action === "click" || action === "click_selector") {
+      try {
+        const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        if (active && drivenTabIds.has(active.id)) {
+          pruneClickCandidates();
+          clickCandidates.push({ at: Date.now(), restoreTo: active.id });
+        }
+      } catch {}
+    }
     if (action === "snapshot" || action === "find" || (action === "read_page" && !params.ref_id)) {
       return await crossFrame(action, params);
     }
@@ -264,6 +301,7 @@ async function dispatch({ action, params = {} }) {
     case "list_windows": return { ok: true, result: await listWindows() };
     case "focus_window": return { ok: true, result: await focusWindow(params) };
     case "current_tab":  return { ok: true, result: await currentTab(params) };
+    case "read_pdf":     return { ok: true, result: await readPdf(params) };
     case "wait_for":     return await waitFor(params);
 
     case "reload_extension": return { ok: true, result: reloadExtension() };
@@ -349,6 +387,34 @@ async function waitFor(params) {
 // silently land on a different (possibly sensitive) tab.
 let targetTabId = null;
 
+// Every tab we've resolved as a target (pinned or explicit tabId) at least once. Used
+// below ONLY to gate the focus-steal correction against a driven tab's foreground
+// identity — NOT to match a spawned tab's openerTabId directly (see the long comment
+// on the onCreated/onActivated pair for why that doesn't work).
+const drivenTabIds = new Set();
+
+// A click on a driven (possibly background) tab can hit a target="_blank" link or
+// window.open(), which Chrome opens as a new ACTIVE tab by default — entirely outside
+// our own chrome.tabs.create() calls (which already pass active:false), so that fix
+// alone doesn't cover it. Tracked as a QUEUE (not a single scalar): with several agents
+// each clicking their own driven tab concurrently, or one click spawning two popups, a
+// single "last click" variable would let one candidate silently overwrite another's
+// tracking. Each entry is {at, restoreTo}; pruned to RECENT_CLICK_WINDOW_MS.
+let clickCandidates = [];
+const RECENT_CLICK_WINDOW_MS = 800; // observed actual creation latency is ~6ms; this
+  // stays generous while narrowing the window an unrelated user action could land in.
+
+function pruneClickCandidates() {
+  const cutoff = Date.now() - RECENT_CLICK_WINDOW_MS;
+  clickCandidates = clickCandidates.filter((c) => c.at > cutoff);
+}
+
+// spawnedTabId -> tabId to restore focus to. A Map (not a single scalar) so onActivated
+// only ever acts on the SPECIFIC tab it was told to correct — an unrelated activation
+// (user alt-tabs, another agent's tab, a second spawned tab) can't consume or clear a
+// pending correction that belongs to a different tab.
+const pendingFocusRestores = new Map();
+
 // Persist the pin to chrome.storage.session so it survives a service-worker recycle.
 // Without this, an MV3 suspend (~30s idle) drops targetTabId and the next command
 // silently re-pins onto whatever tab the user is now viewing — the exact drift the
@@ -370,6 +436,34 @@ async function activeTab() {
   return tab;
 }
 
+// Cheap, deterministic heuristic: does this URL point at a .pdf file (Chrome renders
+// those with its built-in PDF viewer, not a real DOM)? Checks the path only, so a
+// query/fragment after ".pdf" doesn't defeat it and an unrelated ".pdf" substring
+// elsewhere in the URL doesn't false-positive. Doesn't catch PDFs served without a
+// literal .pdf extension — a known, accepted gap (see read_pdf).
+function looksLikePdf(url) {
+  if (!url) return false;
+  try { return /\.pdf$/i.test(new URL(url).pathname); }
+  catch { return false; }
+}
+
+// Report whether the target tab is showing a PDF and, if so, its URL — this extension
+// does not extract PDF text itself (Chrome's built-in viewer isn't a real DOM, and a
+// hand-rolled parser silently mis-reads subset/CID-font PDFs, which is worse than
+// erroring for numeric data like a rate sheet). The caller is expected to fetch the URL
+// and read it with its own PDF-reading capability instead.
+async function readPdf(params) {
+  const tab = await targetTab(params);
+  const isPdf = looksLikePdf(tab.url);
+  return {
+    url: tab.url,
+    isPdf,
+    note: isPdf
+      ? "This extension does not extract PDF text. Fetch this URL and read it with your own PDF-reading capability."
+      : "This tab's URL does not look like a PDF (no .pdf extension found in the path).",
+  };
+}
+
 // The tab DOM/CDP commands operate on. Pin-on-first-touch: if a target is pinned and
 // still exists, use it; otherwise grab the focused active tab AND pin it, so the agent
 // locks onto one tab at its first command and never drifts onto a tab the user later
@@ -383,7 +477,9 @@ async function targetTab(params) {
     const id = Number(params.tabId);
     if (!Number.isInteger(id)) throw new Error(`invalid tabId: ${params.tabId}`);
     try {
-      return await chrome.tabs.get(id);
+      const tab = await chrome.tabs.get(id);
+      drivenTabIds.add(tab.id);
+      return tab;
     } catch {
       throw new Error(`tab ${id} not found`);
     }
@@ -395,7 +491,9 @@ async function targetTab(params) {
   }
   if (targetTabId != null) {
     try {
-      return await chrome.tabs.get(targetTabId);
+      const tab = await chrome.tabs.get(targetTabId);
+      drivenTabIds.add(tab.id);
+      return tab;
     } catch {
       unpinTarget(); // target was closed; re-pin below
     }
@@ -406,11 +504,40 @@ async function targetTab(params) {
 }
 
 // If the pinned target tab is closed, unpin so the next command re-pins cleanly, and
-// drop any CDP/network state we held for it so those maps don't leak per closed tab.
+// drop any CDP/network/focus-restore state we held for it so nothing leaks per closed tab.
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (tabId === targetTabId) unpinTarget();
+  drivenTabIds.delete(tabId);
+  pendingFocusRestores.delete(tabId);
   cdpDropTab(tabId);
   netDropTab(tabId);
+});
+
+// A click we just dispatched can hit a target="_blank" link or a window.open() call,
+// which Chrome opens as a new ACTIVE tab by default — outside our own tab-creation calls
+// (new_tab already passes active:false), so it needs its own catch here.
+//
+// A same-tick chrome.tabs.update(newTab, {active:false}) inside onCreated resolves
+// without error but does NOT stick — confirmed empirically: Chrome activates the new
+// target="_blank" tab in a step that runs AFTER onCreated fires, silently overwriting our
+// correction. onActivated is the authoritative "this tab is now shown" event (it fires
+// after whatever internal step actually flips activation), so react to THAT instead: claim
+// the oldest pending click candidate for the newly created tab in onCreated, then when
+// onActivated confirms that SPECIFIC tab actually became active, restore focus to
+// whichever tab was in front when that click was dispatched.
+chrome.tabs.onCreated.addListener((tab) => {
+  pruneClickCandidates();
+  if (tab.openerTabId == null || clickCandidates.length === 0) return;
+  const candidate = clickCandidates.shift(); // FIFO: oldest pending click claims this tab
+  pendingFocusRestores.set(tab.id, candidate.restoreTo);
+  chrome.tabs.update(tab.id, { active: false }).catch(() => {}); // best-effort; onActivated below is the real fix
+});
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  const restoreTo = pendingFocusRestores.get(tabId);
+  if (restoreTo == null) return; // an unrelated activation — never touches other tabs' pending entries
+  pendingFocusRestores.delete(tabId);
+  chrome.tabs.update(restoreTo, { active: true }).catch(() => {});
 });
 
 // Report which tab commands currently act on (for the agent to verify before reading).
@@ -513,7 +640,11 @@ async function listTabs() {
 }
 
 async function newTab({ url }) {
-  const tab = await chrome.tabs.create(url ? { url } : {});
+  // active:false — chrome.tabs.create() defaults to activating (switching the user's
+  // view to) the new tab, which is exactly the focus-steal this whole extension is
+  // built to avoid. Every other action here is already background-safe; this was the
+  // one call site that wasn't.
+  const tab = await chrome.tabs.create({ ...(url ? { url } : {}), active: false });
   pinTarget(tab.id); // pin: the agent now drives the tab it just opened
   return { id: tab.id };
 }

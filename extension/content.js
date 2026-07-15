@@ -26,15 +26,21 @@
     "[onclick]",
   ].join(",");
 
-  function isVisible(el) {
+  // Single source of truth for why an element is/isn't visible — isVisible() and
+  // describe_element() both read this so the two never drift apart.
+  function visibilityReason(el) {
     const rect = el.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return false;
+    if (rect.width === 0 || rect.height === 0) return "zero-size rect";
     const style = getComputedStyle(el);
-    if (style.visibility === "hidden" || style.display === "none" || style.opacity === "0") {
-      return false;
-    }
-    if (el.disabled) return false;
-    return true;
+    if (style.visibility === "hidden") return "visibility:hidden";
+    if (style.display === "none") return "display:none";
+    if (style.opacity === "0") return "opacity:0";
+    if (el.disabled) return "disabled";
+    return null; // visible
+  }
+
+  function isVisible(el) {
+    return visibilityReason(el) === null;
   }
 
   function elementText(el) {
@@ -304,6 +310,136 @@
     return { count: out.length, matches: out };
   }
 
+  // Block-level tags that bound a find_text "container" — text is flattened within one
+  // of these (never across them), so a match can span an inline element boundary
+  // (a name in its own <a>, followed by plain sibling text) without also merging
+  // unrelated paragraphs/cells into one giant string.
+  const BLOCK_TAGS = new Set([
+    "DIV", "P", "LI", "TD", "TH", "SECTION", "ARTICLE", "ASIDE", "HEADER", "FOOTER",
+    "MAIN", "NAV", "H1", "H2", "H3", "H4", "H5", "H6", "BLOCKQUOTE", "DD", "DT",
+    "FIGCAPTION", "PRE", "TABLE", "UL", "OL", "FORM", "BODY",
+  ]);
+
+  // Nearest block-level ancestor of el (walking up from el itself), memoized per call
+  // since many text nodes share the same immediate parent. Tag-name check only — no
+  // getComputedStyle — so this stays cheap even on a DOM with thousands of nodes.
+  function blockContainerOf(el, cache) {
+    if (cache.has(el)) return cache.get(el);
+    let e = el;
+    while (e !== document.body && e.parentElement && !BLOCK_TAGS.has(e.tagName)) {
+      e = e.parentElement;
+    }
+    cache.set(el, e);
+    return e;
+  }
+
+  // Rightmost segment index with start <= offset (binary search).
+  function segmentIndexAt(segments, offset) {
+    let lo = 0, hi = segments.length - 1, ans = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (segments[mid].start <= offset) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return ans;
+  }
+
+  // All segments whose text range overlaps [startOff, endOff).
+  function segmentsInRange(segments, startOff, endOff) {
+    const out = [];
+    let i = segmentIndexAt(segments, startOff);
+    while (i < segments.length && segments[i].start < endOff) { out.push(segments[i]); i++; }
+    return out;
+  }
+
+  // Search full page TEXT (not just interactive elements) for a query, returning
+  // matching snippets with surrounding context plus the nearest clickable/typeable
+  // ancestor(s) — the "does this page contain X, and where" query. Deliberately
+  // separate from `find`: widening find's INTERACTIVE_SELECTOR scope to "anything with
+  // matching text" would flood its result set on content-heavy pages and defeat its
+  // purpose (finding things to act on). find/snapshot stay "what can I click";
+  // find_text is "what does the page say, and is it near something clickable".
+  //
+  // Matches within a text NODE'S nearest block-level container, not just one text node:
+  // real pages routinely break a sentence across inline elements (a person's name in its
+  // own <a>, followed by plain sibling text), and a per-node-only search misses those
+  // entirely — confirmed empirically on a real page ("Kim Bình" + "recommends" in
+  // separate nodes; querying the two together found nothing before this fix).
+  function find_text({ query, regex = false, max = 20, contextChars = 80 } = {}) {
+    if (!query) throw new Error("find_text requires 'query'");
+    // Literal mode: escape regex metachars, then make whitespace tolerant (\s+) so a
+    // match can span the raw whitespace/newlines of the source HTML without needing to
+    // normalize (and therefore offset-remap) the flattened container text.
+    const pattern = regex
+      ? query
+      : String(query).replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+    const matcher = new RegExp(pattern, "gi");
+
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+        const tag = node.parentElement && node.parentElement.tagName;
+        if (tag === "SCRIPT" || tag === "STYLE" || tag === "NOSCRIPT") return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+
+    // Pass 1: group text nodes by nearest block-level container, building each
+    // container's flattened raw text plus an offset -> node segment map.
+    const containerCache = new Map();
+    const containers = new Map(); // blockEl -> { flat, segments: [{start, node}] }
+    let node;
+    while ((node = walker.nextNode())) {
+      const container = blockContainerOf(node.parentElement, containerCache);
+      let rec = containers.get(container);
+      if (!rec) { rec = { flat: "", segments: [] }; containers.set(container, rec); }
+      rec.segments.push({ start: rec.flat.length, node });
+      rec.flat += node.nodeValue;
+    }
+
+    // Pass 2: match within each container's flattened text.
+    const matches = [];
+    for (const { flat, segments } of containers.values()) {
+      if (matches.length >= max) break;
+      matcher.lastIndex = 0;
+      let m;
+      while ((m = matcher.exec(flat)) && matches.length < max) {
+        const matchStart = m.index;
+        const matchEnd = matchStart + m[0].length;
+        const touched = segmentsInRange(segments, matchStart, matchEnd);
+        const ancestors = [];
+        const seenRefs = new Set();
+        for (const seg of touched) {
+          const parent = seg.node.parentElement;
+          const ancestor = parent ? parent.closest(INTERACTIVE_SELECTOR) : null;
+          if (!ancestor) continue;
+          const ref = getOrAssignRef(ancestor);
+          if (seenRefs.has(ref)) continue;
+          seenRefs.add(ref);
+          ancestors.push({ ref, tag: ancestor.tagName.toLowerCase(), text: elementText(ancestor) });
+        }
+        const start = Math.max(0, matchStart - contextChars);
+        const end = Math.min(flat.length, matchEnd + contextChars);
+        const snippet =
+          (start > 0 ? "…" : "") +
+          flat.slice(start, end).trim().replace(/\s+/g, " ") +
+          (end < flat.length ? "…" : "");
+        const startParent = segments[segmentIndexAt(segments, matchStart)].node.parentElement;
+        const match = {
+          snippet,
+          visible: startParent ? isVisible(startParent) : false,
+          nearestInteractive: ancestors[0] || null,
+        };
+        // Only present when the match spans 2+ distinct interactive ancestors (e.g. a
+        // name-link followed by more linked text) — nearestInteractive alone stays the
+        // common-case field so existing callers reading it don't need to change.
+        if (ancestors.length > 1) match.spanInteractives = ancestors;
+        matches.push(match);
+        if (m.index === matcher.lastIndex) matcher.lastIndex++; // guard against zero-length match loops
+      }
+    }
+    return { count: matches.length, matches };
+  }
+
   function click({ index, ref }) {
     const el = resolveTarget({ index, ref });
     el.scrollIntoView({ block: "center", inline: "center" });
@@ -449,6 +585,77 @@
     return { x: r.x, y: r.y, width: r.width, height: r.height };
   }
 
+  // Resolve an element by ref/index and dump everything useful for debugging why an
+  // action failed or why an element wasn't visible/actionable — the archaeology an
+  // agent (or a human) otherwise does by hand: attributes, rect, and a visibility
+  // VERDICT WITH REASON (not just true/false) via the same check isVisible() uses.
+  // Deliberately excludes the full computed-style dump (hundreds of properties, mostly
+  // noise) — attributes + rect + visibility reason covers the real failure modes.
+  function describe_element({ index, ref } = {}) {
+    const el = resolveTarget({ index, ref });
+    const attributes = {};
+    for (const attr of el.attributes) attributes[attr.name] = attr.value;
+    const r = el.getBoundingClientRect();
+    const reason = visibilityReason(el);
+    return {
+      tag: el.tagName.toLowerCase(),
+      text: elementText(el),
+      attributes,
+      rect: { x: r.x, y: r.y, width: r.width, height: r.height },
+      visible: reason === null,
+      visibilityReason: reason || "visible",
+      matchesInteractiveSelector: el.matches(INTERACTIVE_SELECTOR),
+    };
+  }
+
+  // Collapse 3+ consecutive repeats of an identical short unit (<=5 words, <=40 chars)
+  // into "unit ×N" instead of deleting them. Targets visually-hidden accessible-label
+  // spam (e.g. Facebook stamps a hidden "Facebook" label next to every avatar image;
+  // innerText picks it up even though sighted users never see it, since it isn't
+  // display:none, just visually clipped). Annotating rather than deleting keeps
+  // legitimate short repeats readable (a QA results column of "PASS PASS PASS PASS"
+  // becomes "PASS ×4", arguably clearer, not lossy).
+  //
+  // A single backreference regex (e.g. /((?:\S+ ){0,4}\S+)(?: \1){2,}/) looks tempting
+  // but is WRONG here: its greedy quantifier locks onto the longest unit length that
+  // still finds 2+ repeats and never backtracks to a shorter one just because it'd
+  // cover more ground — on a run of N identical single-word tokens it can match a
+  // 5-token "unit" repeated a few times and leave most of the run uncollapsed. Explicit
+  // token comparison sidesteps that: for each position, try unit lengths 1..5 and keep
+  // whichever finds the most total repeats (for a homogeneous run that's always the
+  // 1-token unit, since more, smaller repeats beats fewer, larger ones).
+  function collapseRepeatedRuns(text) {
+    const tokens = text.split(" ");
+    const out = [];
+    let i = 0;
+    while (i < tokens.length) {
+      let bestUnitLen = 0;
+      let bestRepeats = 1;
+      for (let unitLen = 1; unitLen <= 5 && i + unitLen <= tokens.length; unitLen++) {
+        const unit = tokens.slice(i, i + unitLen).join(" ");
+        if (unit.length > 40) break; // guard: only short units, never paragraphs
+        let repeats = 1;
+        let j = i + unitLen;
+        while (j + unitLen <= tokens.length && tokens.slice(j, j + unitLen).join(" ") === unit) {
+          repeats++;
+          j += unitLen;
+        }
+        if (repeats >= 3 && repeats > bestRepeats) {
+          bestUnitLen = unitLen;
+          bestRepeats = repeats;
+        }
+      }
+      if (bestUnitLen > 0) {
+        out.push(`${tokens.slice(i, i + bestUnitLen).join(" ")} ×${bestRepeats}`);
+        i += bestUnitLen * bestRepeats;
+      } else {
+        out.push(tokens[i]);
+        i++;
+      }
+    }
+    return out.join(" ");
+  }
+
   function get_page_content({ maxChars = 8000 } = {}) {
     let container = document.querySelector("main") || document.querySelector("article");
     if (!container) {
@@ -462,6 +669,7 @@
     }
     if (!container) container = document.body;
     let text = ((container && container.innerText) || "").replace(/\s+/g, " ").trim();
+    text = collapseRepeatedRuns(text);
     if (text.length > maxChars) text = text.slice(0, maxChars) + "...[truncated]";
     return { title: document.title, url: location.href, text };
   }
@@ -623,6 +831,7 @@
     snapshot,
     read_page,
     find,
+    find_text,
     click,
     type,
     scroll,
@@ -633,6 +842,7 @@
     wait_settle,
     get_page_content,
     element_rect,
+    describe_element,
     click_selector,
     fill_selector,
     storage_get,
