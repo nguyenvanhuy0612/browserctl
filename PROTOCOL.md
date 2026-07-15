@@ -29,6 +29,17 @@ check. Because control of a background tab uses CDP (`Page.captureScreenshot`,
 `Input.*`), DOM actions and screenshots act on the target even when it is NOT the
 visible tab — no activation, no focus steal.
 
+**Per-command tab override (`params.tabId`).** Any tab-scoped action may carry a
+`tabId` (from `list_tabs`) to run *that one command* against *that specific tab*,
+ignoring — and not changing — the pinned target. This lets multiple agents drive
+different tabs concurrently: each passes its own `tabId` and they never race on the
+single global pin. Omit `tabId` to use the pinned target (unchanged default behavior).
+`navigate` with an explicit `tabId` loads that tab without re-pinning; an unknown
+`tabId` returns `tab <id> not found` rather than silently falling back to the pin.
+Tab/window-management actions (`list_tabs`, `new_tab`, `switch_tab`, `close_tab`,
+`group_tab`, `ungroup_tab`, `list_windows`, `focus_window`) do not take `tabId` — they
+already take their own `id` or none.
+
 ### `current_tab`
 No params. Result: `{ id, url, title, active, pinned }` - which tab commands act
 on now. `pinned` is true once a target is pinned (i.e. after the first command).
@@ -317,5 +328,7 @@ Deferred (low marginal value for the external-agent model): mid-action domain re
 - [ ] Persistent injected-script channel (cf. mcp-chrome inject_script).
 - [x] Cross-origin iframe support (all_frames injection + frame-qualified refs; DOM read + interaction routed per frame). Sub-frame `element_screenshot` offset and file-dialog handling still open.
 - [x] CDP Mac editor commands (`Cmd+A`/`Cmd+Z`/copy/paste/cut) via `press_key` modifiers.
-- [ ] Multi-browser / multi-tab sessions addressed by id.
+- [x] Multi-tab addressing: per-command `params.tabId` runs a command against a specific
+  tab without changing the pinned target, so multiple agents can drive different tabs
+  concurrently. (Multi-*browser* sessions — separate cookie jars — still open.)
 - [ ] Optional API token on the bridge (only needed if it leaves a trusted machine).

@@ -10,12 +10,21 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 
 const BRIDGE_URL = process.env.BRIDGE_URL || "http://127.0.0.1:8765";
 
+// Carries the per-call tabId (if the tool was invoked with one) down to callBridge
+// without every build having to thread it through explicitly. AsyncLocalStorage keeps
+// this isolated per async call chain, so concurrent tool invocations (e.g. several
+// agents each driving a different tab) never see each other's tabId.
+const tabStore = new AsyncLocalStorage();
+
 // POST a command to the bridge and return its result, throwing on failure.
 async function callBridge(action, params = {}) {
+  const tabId = tabStore.getStore();
+  if (tabId != null && params.tabId == null) params = { ...params, tabId };
   let res;
   try {
     res = await fetch(`${BRIDGE_URL}/command`, {
@@ -42,10 +51,13 @@ function fail(err) {
 }
 
 // Wrap a handler so bridge errors become MCP tool errors instead of crashing.
+// Run the build inside the tabStore context seeded with args.tabId so any callBridge
+// it makes routes to that tab (see tabStore/callBridge above). tabId undefined => no
+// override => the bridge uses the pinned target, exactly as before.
 function tool(action, build) {
   return async (args = {}) => {
     try {
-      return await build(args);
+      return await tabStore.run(args.tabId, () => build(args));
     } catch (err) {
       return fail(err);
     }
@@ -63,12 +75,53 @@ const INSTRUCTIONS = `This server drives ONE pinned "target" tab in the backgrou
 - Call browser_group_tab once near the start so the user can see which tab you drive (a labeled tab group). It does not steal focus.
 - To act on a different page, use browser_new_tab or browser_navigate — both re-pin the target. Only use browser_switch_tab / browser_focus_window when the user explicitly asks to bring a tab forward, or when a step genuinely cannot run in the background.
 - Screenshots capture the background target without activating it (an "is being debugged" bar may appear on that tab only). Never foreground a tab just to screenshot it.
-- Before reading or screenshotting sensitive content, confirm the target with browser_current_tab.`;
+- Before reading or screenshotting sensitive content, confirm the target with browser_current_tab.
+- Driving several tabs at once: every tab-scoped tool accepts an optional tabId (from browser_list_tabs). Pass it to run THAT command against THAT tab without changing the pinned target — so parallel agents can each drive a different tab without racing on the single pin. Omit tabId to use the pinned target.`;
 
 const server = new McpServer(
   { name: "ai-browser-control", version: "0.4.0" },
   { instructions: INSTRUCTIONS }
 );
+
+// Optional per-command tab override, offered on every tab-scoped tool. Passing it
+// routes THIS command to a specific tab without changing the pinned target, so several
+// agents can drive different tabs concurrently. See tabStore/callBridge and the
+// extension's targetTab(params).
+const TAB_ID_FIELD = z
+  .number()
+  .int()
+  .optional()
+  .describe(
+    "Target a specific tab id (from browser_list_tabs) for THIS command only, without changing the pinned target. Omit to use the pinned target. Lets multiple agents drive different tabs concurrently."
+  );
+
+// Tools that manage tabs/windows or the extension itself are NOT tab-scoped: they take
+// their own id (or none), so tabId does not apply and must not be injected.
+const NO_TAB_TOOLS = new Set([
+  "browser_list_tabs", "browser_new_tab", "browser_group_tab", "browser_ungroup_tab",
+  "browser_switch_tab", "browser_close_tab", "browser_list_windows", "browser_focus_window",
+  "browser_reload_extension", "browser_record_get",
+]);
+
+// Auto-add tabId to every tab-scoped tool's inputSchema in one place, instead of
+// duplicating the field across ~45 tool definitions. Handles the two schema shapes used
+// below: a raw shape (plain object of zod fields) and a zod object (incl. one wrapped by
+// .refine()). Builds don't change — tool()/callBridge pick tabId up from the context.
+function withTabId(schema) {
+  // zod object (incl. one carrying a .refine() check, e.g. browser_click): .extend
+  // adds the field and preserves the refinement (verified on zod 4).
+  if (schema instanceof z.ZodObject) return schema.extend({ tabId: TAB_ID_FIELD });
+  if (schema instanceof z.ZodType) return schema; // some other zod shape — leave it
+  return { ...schema, tabId: TAB_ID_FIELD }; // raw shape (plain object of fields), incl. {}
+}
+
+const _registerTool = server.registerTool.bind(server);
+server.registerTool = (name, config, handler) => {
+  if (!NO_TAB_TOOLS.has(name) && config && "inputSchema" in config) {
+    config = { ...config, inputSchema: withTabId(config.inputSchema) };
+  }
+  return _registerTool(name, config, handler);
+};
 
 server.registerTool(
   "browser_snapshot",

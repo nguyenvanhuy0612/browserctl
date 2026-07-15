@@ -203,9 +203,9 @@ async function dispatch({ action, params = {} }) {
   // shadow DOM), then CDP clips to it. Resolve the rect first, then hand it to the CDP
   // handler so a read_page/find ref works, not just a snapshot index.
   if (action === "element_screenshot") {
-    const tab = await targetTab();
+    const tab = await targetTab(params);
     const { frameId, params: p } = frameRoute(params);
-    const rectReply = await toContent("element_rect", { index: p.index, ref: p.ref }, frameId);
+    const rectReply = await toContent("element_rect", { index: p.index, ref: p.ref, tabId: params.tabId }, frameId);
     if (!rectReply.ok) return rectReply;
     // NOTE: a sub-frame rect is frame-relative while the CDP clip is page-relative, so
     // element_screenshot of a ref inside an iframe can be offset. Top-frame is exact.
@@ -217,21 +217,21 @@ async function dispatch({ action, params = {} }) {
   // modifiers entirely, so falling through to it would silently drop them and report
   // success — return a clear error instead so the caller knows to cdp_attach first.
   if (action === "press_key" && Array.isArray(params.modifiers) && params.modifiers.length) {
-    const tab = await targetTab();
+    const tab = await targetTab(params);
     if (isAttached(tab.id)) return await handleCdp("press_key_cdp", params, tab.id);
     return { ok: false, error: "modifiers require cdp_attach" };
   }
 
   // CDP-backed commands (console/network/HAR/eval) operate on the target tab.
   if (CDP_ACTIONS.includes(action)) {
-    const tab = await targetTab();
+    const tab = await targetTab(params);
     return await handleCdp(action, params, tab.id);
   }
 
   // Light network capture (chrome.webRequest, no debugger banner).
   // handleNet already returns { ok, result }, so pass it through (no double-wrap).
   if (NET_ACTIONS.includes(action)) {
-    const tab = await targetTab();
+    const tab = await targetTab(params);
     return await handleNet(action, params, tab.id);
   }
 
@@ -258,17 +258,17 @@ async function dispatch({ action, params = {} }) {
     case "ungroup_tab":  return { ok: true, result: await ungroupTab(params) };
     case "switch_tab":   return { ok: true, result: await switchTab(params) };
     case "close_tab":    return { ok: true, result: await closeTab(params) };
-    case "go_back":      return { ok: true, result: await goBack() };
-    case "go_forward":   return { ok: true, result: await goForward() };
+    case "go_back":      return { ok: true, result: await goBack(params) };
+    case "go_forward":   return { ok: true, result: await goForward(params) };
     case "reload":       return { ok: true, result: await reload(params) };
     case "list_windows": return { ok: true, result: await listWindows() };
     case "focus_window": return { ok: true, result: await focusWindow(params) };
-    case "current_tab":  return { ok: true, result: await currentTab() };
+    case "current_tab":  return { ok: true, result: await currentTab(params) };
     case "wait_for":     return await waitFor(params);
 
     case "reload_extension": return { ok: true, result: reloadExtension() };
-    case "record_start":     return { ok: true, result: await recordStart() };
-    case "record_stop":      return { ok: true, result: await recordStop() };
+    case "record_start":     return { ok: true, result: await recordStart(params) };
+    case "record_stop":      return { ok: true, result: await recordStop(params) };
     case "record_get": {
       // isRecording resets to false on a fresh service-worker instance regardless of
       // history, so a false here with no steps buffered is ambiguous — check the
@@ -295,33 +295,37 @@ function reloadExtension() {
   return { reloading: true };
 }
 
-async function recordStart() {
+// NOTE: recordingSteps/isRecording are single, extension-wide state (one recording at a
+// time), unlike other actions here. Passing tabId targets the content-script listener at
+// the right tab, but two agents cannot record two tabs concurrently — the second
+// record_start resets the one shared buffer. Not fixed here; documented as a known limit.
+async function recordStart(params) {
   recordingSteps = [];
   isRecording = true;
   persistRecording(true);
-  await toContent("record_start", {});
+  await toContent("record_start", { tabId: params && params.tabId });
   return { recording: true };
 }
 
-async function recordStop() {
+async function recordStop(params) {
   isRecording = false;
   persistRecording(false);
-  await toContent("record_stop", {});
+  await toContent("record_stop", { tabId: params && params.tabId });
   return { recording: false, count: recordingSteps.length };
 }
 
-// Replay recorded (or supplied) steps against the active tab.
-async function replay({ steps, startUrl } = {}) {
+// Replay recorded (or supplied) steps against the target tab (or params.tabId).
+async function replay({ steps, startUrl, tabId } = {}) {
   const plan = steps || recordingSteps;
-  if (startUrl) { await navigate({ url: startUrl }); }
+  if (startUrl) { await navigate({ url: startUrl, tabId }); }
   const done = [];
   for (const step of plan) {
     if (step.type === "navigate" && step.url) {
-      await navigate({ url: step.url });
+      await navigate({ url: step.url, tabId });
     } else if (step.type === "click") {
-      await toContent("click_selector", { selector: step.selector });
+      await toContent("click_selector", { selector: step.selector, tabId });
     } else if (step.type === "input") {
-      await toContent("fill_selector", { selector: step.selector, value: step.value });
+      await toContent("fill_selector", { selector: step.selector, value: step.value, tabId });
     } else {
       continue;
     }
@@ -370,7 +374,20 @@ async function activeTab() {
 // still exists, use it; otherwise grab the focused active tab AND pin it, so the agent
 // locks onto one tab at its first command and never drifts onto a tab the user later
 // switches to. switch_tab / navigate / new_tab re-pin explicitly.
-async function targetTab() {
+//
+// Per-command override: any command may carry params.tabId to act on THAT specific tab
+// for this one command WITHOUT touching the global pin. This lets several agents drive
+// different tabs concurrently (each passes its own tabId) instead of racing on one pin.
+async function targetTab(params) {
+  if (params && params.tabId != null) {
+    const id = Number(params.tabId);
+    if (!Number.isInteger(id)) throw new Error(`invalid tabId: ${params.tabId}`);
+    try {
+      return await chrome.tabs.get(id);
+    } catch {
+      throw new Error(`tab ${id} not found`);
+    }
+  }
   // Recover the pin from session storage if the worker was recycled since it was set.
   if (targetTabId == null) {
     const { targetTabId: saved } = await chrome.storage.session.get("targetTabId");
@@ -397,15 +414,19 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 // Report which tab commands currently act on (for the agent to verify before reading).
-async function currentTab() {
-  const tab = await targetTab();
+// With params.tabId, report that specific tab; `pinned` still reflects the global pin.
+async function currentTab(params) {
+  const tab = await targetTab(params);
   return { id: tab.id, url: tab.url, title: tab.title, active: tab.active, pinned: targetTabId != null };
 }
 
-async function navigate({ url }) {
+async function navigate(params = {}) {
+  const { url } = params;
   if (!url) throw new Error("navigate requires 'url'");
-  const tab = await targetTab();
-  pinTarget(tab.id); // pin: subsequent reads stay on the tab we navigated
+  const tab = await targetTab(params);
+  // Re-pin only when driving the global target; an explicit tabId navigates that tab
+  // without hijacking the pin (so concurrent per-tab agents don't clobber each other).
+  if (params.tabId == null) pinTarget(tab.id); // pin: subsequent reads stay on the tab we navigated
   const done = waitForComplete(tab.id); // start listening BEFORE the load begins
   await chrome.tabs.update(tab.id, { url });
   await done;
@@ -454,8 +475,9 @@ async function getDevicePixelRatio(tabId) {
   }
 }
 
-async function screenshot({ format = "jpeg", quality = 55 } = {}) {
-  const tab = await targetTab();
+async function screenshot(params = {}) {
+  const { format = "jpeg", quality = 55 } = params;
+  const tab = await targetTab(params);
   // If a debugger session already exists on this tab, capture via CDP so the screenshot
   // is in the same pixel space coordinate_click maps against (avoids a Retina/clip-scale
   // mismatch). Otherwise prefer the no-banner path when the tab is foreground.
@@ -535,24 +557,25 @@ async function closeTab({ id }) {
   return { id };
 }
 
-async function goBack() {
-  const tab = await targetTab();
+async function goBack(params) {
+  const tab = await targetTab(params);
   const done = waitForComplete(tab.id); // wait for the history nav to land (same as navigate/reload)
   await chrome.tabs.goBack(tab.id);
   await done;
   return { id: tab.id };
 }
 
-async function goForward() {
-  const tab = await targetTab();
+async function goForward(params) {
+  const tab = await targetTab(params);
   const done = waitForComplete(tab.id);
   await chrome.tabs.goForward(tab.id);
   await done;
   return { id: tab.id };
 }
 
-async function reload({ bypassCache } = {}) {
-  const tab = await targetTab();
+async function reload(params = {}) {
+  const { bypassCache } = params;
+  const tab = await targetTab(params);
   const done = waitForComplete(tab.id); // listen before triggering the reload
   await chrome.tabs.reload(tab.id, { bypassCache: !!bypassCache });
   await done;
@@ -582,7 +605,7 @@ async function focusWindow({ id }) {
 // With all_frames injection every frame has a listener, so we ALWAYS target one
 // frame (frameId 0 = the top document) — otherwise every frame would reply and race.
 async function toContent(action, params, frameId = 0) {
-  const tab = await targetTab();
+  const tab = await targetTab(params);
   const opts = { frameId };
   try {
     return await chrome.tabs.sendMessage(tab.id, { action, params }, opts);
@@ -622,7 +645,7 @@ async function contentFrames(tabId) {
 // Run a DOM read (snapshot/read_page/find) across every frame and merge, prefixing
 // non-top-frame refs with `f<frameId>:` so a later click routes back to the right frame.
 async function crossFrame(action, params) {
-  const tab = await targetTab();
+  const tab = await targetTab(params);
   const frames = await contentFrames(tab.id);
   const per = await Promise.all(frames.map(async (fr) => {
     try {
