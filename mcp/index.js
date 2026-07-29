@@ -491,6 +491,17 @@ server.registerTool(
   tool("eval_js", async ({ expression }) => text(await callBridge("eval_js", { expression })))
 );
 
+server.registerTool(
+  "browser_spoof_visibility",
+  {
+    title: "Spoof page visibility (unblock background lazy-load)",
+    description:
+      "Make the target tab's page JS believe it's visible/focused (document.hidden=false, document.visibilityState='visible', fires a visibilitychange event), WITHOUT actually foregrounding the tab or stealing the user's focus. Use this when scrolling a backgrounded tab isn't loading new content — many sites (e.g. infinite-scroll feeds) deliberately pause lazy-loading via the Page Visibility API while a tab is hidden, as a resource-saving pattern. This is explicit and opt-in on purpose: call it once before scrolling a background tab that needs to lazy-load, not automatically on every scroll — visibility state is also used for other things a site might not want spoofed unconditionally (video autoplay, polling/websocket resume, analytics time-on-page). Attaches the CDP debugger if not already attached (shows the 'is being debugged' bar). KNOWN LIMITATION: this patches JS-visible state only — it does not lift Chrome's renderer-level throttling of a backgrounded tab (requestAnimationFrame doesn't fire, IntersectionObserver rides the same throttled pipeline). If a site's lazy-load is driven by rAF/IO rather than a visibilitychange or scroll listener, this may not help; there is no further automatic fallback (foregrounding the tab, even briefly, is a deliberate manual decision this tool will never make for you).",
+    inputSchema: {},
+  },
+  tool("spoof_visibility", async () => text(await callBridge("spoof_visibility")))
+);
+
 // --- More DOM interaction (content script) ---
 
 server.registerTool(

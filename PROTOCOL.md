@@ -272,6 +272,22 @@ capture, and CSP-bypass eval. See `docs/superpowers/specs/2026-06-30-claude-for-
   service-worker recycles).
 - `cdp_attach` forces `deviceScaleFactor:1` so screenshots are CSS-pixel and coordinate
   input lines up on HiDPI/Retina.
+- `spoof_visibility` - many sites deliberately pause lazy-load/infinite-scroll while
+  `document.hidden` is true (a resource-saving pattern gated on the Page Visibility API), so
+  scrolling a genuinely backgrounded tab can load zero new content even though scrolling
+  itself and reading already-loaded DOM both work fine in the background. This action
+  patches `document.hidden`/`visibilityState` to report visible and fires a
+  `visibilitychange` event, WITHOUT activating the tab — confirmed to unstick Facebook's
+  feed lazy-load in exactly this scenario. Explicit and opt-in (call once before scrolling a
+  background tab that needs to lazy-load); not automatic on every scroll, since visibility
+  state is also used for things a site may not want spoofed unconditionally (video autoplay,
+  polling/websocket resume, analytics time-on-page). Attaches CDP if not already attached.
+  **Known limitation:** patches JS-visible state only, not Chrome's renderer-level
+  throttling of a backgrounded tab (`requestAnimationFrame` doesn't fire; `IntersectionObserver`
+  rides the same throttled pipeline) — a site whose lazy-load depends on rAF/IO rather than a
+  visibilitychange/scroll listener may still not budge. No automatic fallback is built for
+  that case; briefly foregrounding the tab and restoring focus afterward is a deliberate
+  manual decision this action will never make on its own.
 
 ### Accessibility-tree read & stable refs (content script, no banner)
 - `read_page { mode?: "interactive"|"all", depth?, ref_id?, maxChars? }` - the page as compact

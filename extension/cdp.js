@@ -532,6 +532,43 @@ export async function handleCdp(action, params, tabId) {
       return { ok: true, result: { dataUrl: `data:image/${format};base64,${res.data}` } };
     }
 
+    // Make a backgrounded tab's page JS believe it's visible/focused, so lazy-load /
+    // infinite-scroll code gated on document.visibilityState (a common, deliberate
+    // resource-saving pattern) fires while the tab never actually becomes the foreground
+    // one — the human keeps their own tab. Explicit, opt-in action (not automatic on
+    // every scroll/read): visibility state is also used for OTHER things a site may not
+    // want spoofed unconditionally (video autoplay, polling/websocket resume, analytics
+    // time-on-page), so the caller must ask for this deliberately, once, when it knows
+    // the target relies on lazy-loading.
+    //
+    // KNOWN LIMITATION (confirmed, not just theoretical): this patches JS-visible state
+    // only. It does NOT lift Chrome's renderer-level throttling of a backgrounded tab —
+    // requestAnimationFrame doesn't fire, IntersectionObserver callbacks ride the (also
+    // throttled) rendering pipeline. If a site's loader is driven by rAF/IO rather than a
+    // visibilitychange/scroll listener, this may not help; there is no further fallback
+    // built here (see PROTOCOL.md for the documented alternative: briefly foreground the
+    // tab, restore after).
+    case "spoof_visibility": {
+      await ensureAttached(tabId);
+      try { await send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true }); }
+      catch {} // best-effort; experimental CDP method, absence shouldn't fail the whole action
+      const patch = `(() => {
+        const patched = { visibilityState: false, hidden: false };
+        try {
+          Object.defineProperty(Document.prototype, "hidden", { configurable: true, get: () => false });
+          patched.hidden = true;
+        } catch (e) {}
+        try {
+          Object.defineProperty(Document.prototype, "visibilityState", { configurable: true, get: () => "visible" });
+          patched.visibilityState = true;
+        } catch (e) {}
+        document.dispatchEvent(new Event("visibilitychange"));
+        return patched;
+      })()`;
+      const { value } = await runtimeEval(tabId, patch);
+      return { ok: true, result: { spoofed: value, tabId } };
+    }
+
     case "eval_js": {
       if (!params.expression) throw new Error("eval_js requires 'expression'");
       if (sessions.has(tabId)) {
@@ -775,6 +812,7 @@ export const CDP_ACTIONS = [
   "export_har",
   "capture_screenshot",
   "eval_js",
+  "spoof_visibility",
   "coordinate_click",
   "coordinate_drag",
   "insert_text",

@@ -656,8 +656,42 @@
     return out.join(" ");
   }
 
+  // A visible open dialog/modal, if any — picked by longest visible text among
+  // candidates. Sites routinely overlay a lightbox (a comment thread, a cookie banner,
+  // a "sign in to continue" prompt) on top of the still-present underlying page without
+  // removing it from the DOM; confirmed on Facebook, opening a post's comment count link
+  // renders a NEW `role="dialog"` on top while the feed stays mounted underneath. The
+  // main/article candidate loop below never matches role="dialog" at all, so it falls
+  // through to the longest text on the page — which is usually the now-stale underlying
+  // content, not the modal the user/agent actually cares about.
+  //
+  // Longest-VISIBLE-text, not "last in document order": confirmed on the same Facebook
+  // case that TWO role="dialog" elements can be present (a hidden utility dialog +/or a
+  // nested inner dialog) — last-in-DOM only happens to work by append-order luck.
+  // Filtering by rect size + computed visibility, then taking the longest text, handles
+  // both "one is hidden" (contributes ~0 text) and "one nests the other" (the outer's
+  // text is a superset, so longest is still correct) without a fragile z-index read.
+  function visibleDialog() {
+    const dialogs = document.querySelectorAll('[role="dialog"],[role="alertdialog"],dialog[open]');
+    let best = null, bestLen = 0;
+    for (const d of dialogs) {
+      const r = d.getBoundingClientRect();
+      if (r.width < 100 || r.height < 100) continue; // hidden or a trivial stub
+      if (getComputedStyle(d).visibility === "hidden") continue;
+      const len = (d.innerText || "").length;
+      if (len > 200 && len > bestLen) { best = d; bestLen = len; } // 200: skip trivial toasts
+    }
+    return best;
+  }
+
   function get_page_content({ maxChars = 8000 } = {}) {
-    let container = document.querySelector("main") || document.querySelector("article");
+    // Checked as an early-exit BEFORE the main/article logic, not folded into its
+    // length-comparison loop: the underlying page's `main` is usually longer than the
+    // modal's text, so adding the dialog into that same comparison would just recreate
+    // the bug. A modal traps interaction — while one is open it effectively IS the page.
+    let container = visibleDialog();
+    let fromDialog = !!container;
+    if (!container) container = document.querySelector("main") || document.querySelector("article");
     if (!container) {
       const candidates = Array.from(
         document.querySelectorAll("main,article,[role=main],#content,#main,.content")
@@ -671,7 +705,7 @@
     let text = ((container && container.innerText) || "").replace(/\s+/g, " ").trim();
     text = collapseRepeatedRuns(text);
     if (text.length > maxChars) text = text.slice(0, maxChars) + "...[truncated]";
-    return { title: document.title, url: location.href, text };
+    return { title: document.title, url: location.href, text, ...(fromDialog ? { source: "dialog" } : {}) };
   }
 
   // Selector-based actions. Indices are per-snapshot, so replay needs stable
