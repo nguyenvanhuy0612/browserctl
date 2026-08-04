@@ -106,7 +106,7 @@ exposed through MCP, bridged by a native-messaging host with a TCP rendezvous on
    lossless pixel-diff QA.
 3. **Element refs via `WeakRef`** (`content.js:13-37`): `elementMap[ref]=new WeakRef(el)` +
    a reverse `WeakMap`; `resolveRef` deletes and reports the ref when the element was GC'd.
-   Cleaner than our `data-aibc-ref` DOM stamping (doesn't mutate the page under test;
+   Cleaner than our `data-bctl-ref` DOM stamping (doesn't mutate the page under test;
    distinguishes "stale ref" from "element gone"). Consider for `content.js`. **Pending.**
 4. **Tab-group scoping** (`background.js:71-96`, `recoverTabGroupState`): automation runs in
    a dedicated window + tab-group titled "MCP"; every handler guards with `isInGroup(tabId)`
@@ -194,3 +194,116 @@ loop + action DSL + system prompt). Borrowable, roughly by value:
 Also noted (lower priority): `find` = an LLM ranking over the a11y text tree (vs CSS selectors);
 indicator-suppression around each action so the overlay never pollutes the screenshot/click; a
 throttled `Page.startScreencast` (100x100, q10, everyNthFrame 30) liveness preview.
+
+---
+
+## Update 2026-08-04: a correction, a missed class, and a function-level comparison
+
+Two things changed since 2026-06-30: a fact in the table above went stale, and the
+original survey missed an entire class of tools.
+
+### Correction: playwright-mcp is no longer "not an extension"
+
+The landscape table describes playwright-mcp as "MCP server driving Playwright
+(headless/headed), **not** an extension". That is now wrong. playwright-mcp supports
+an **extension mode** that attaches to an already-running Chrome/Edge via the
+Playwright Extension, and its default mode already uses a persistent local profile.
+
+Impact: the "real, logged-in profile and real fingerprint" advantage recorded under
+BrowserMCP — and adopted into our README as the core reason an extension beats
+headless — is **materially narrowed**. It is no longer a structural differentiator,
+only a convenience one. This is the single biggest landscape change since the
+original survey.
+
+What still holds: playwright-mcp's extension mode drives the tab you point it at. It
+has no equivalent of our pinned-target + background-tab + no-focus-steal control
+model, and it goes through CDP, so the "is being debugged" banner is always present.
+
+### The desktop computer-use class (missing from the original survey)
+
+| Project | Shape | Why it loses inside a browser |
+|---|---|---|
+| UI-TARS Desktop (ByteDance) | Desktop app + own model; screenshot -> pixel coords | Browser is opaque pixels |
+| Open Computer Use | Desktop control exposed over MCP (macOS/Linux/Windows) | same |
+| vitalops/opendesk | Computer-use tools across one or more machines | same; but does have multi-machine |
+| remorses/usecomputer | Screenshot/click/type/scroll automation CLI | same |
+| OS-Copilot | Modular perception / planning / action | same |
+| Fazm | Accessibility-tree first, macOS, sub-second actions | OS-level a11y tree is coarser than the DOM |
+
+For work inside a browser these are a tier below any DOM-based tool: no element
+identity beyond pixel coordinates, no network/console/HAR, no concept of shadow DOM
+or iframes, no cookies/storage/eval, `sleep` instead of real wait conditions, one
+screenshot round-trip per action, and they must own the visible screen. The 2026
+consensus is that pure screenshot+vision is too slow and too expensive for real
+workflows — the same conclusion our DOM-first design started from.
+
+Where they beat us: anything **not in the DOM**. The OS file picker, certificate and
+OS-level auth prompts, `chrome://` pages, the Web Store, other extensions' popups.
+Part of that we can close via CDP (see `backlog-capability-gaps.md`); the
+`chrome://` and Web Store cases we structurally cannot.
+
+### Function-level comparison, browser scope only
+
+Us: 64 MCP tools; extension + bridge + MCP; DOM/a11y-first with CDP opt-in.
+playwright-mcp: ~70 tools with all `--caps` enabled. chrome-devtools-mcp: 28 tools.
+hangwin/mcp-chrome: ~20 tools.
+
+**Unique to us** — no equivalent in the other three:
+
+- Pinned target + background-tab operation with no focus steal, plus per-command
+  `tabId` for concurrent agents. No other project treats "do not disturb the human"
+  as a design requirement.
+- `spoof_visibility` — patching `document.hidden` to unstick lazy-load in a
+  backgrounded tab. A direct consequence of the above and not seen anywhere else;
+  our most original contribution.
+- No debugger banner on the default path. playwright-mcp extension mode and
+  chrome-devtools-mcp are both always-CDP.
+- `export_har`. Neither playwright-mcp nor chrome-devtools-mcp exports HAR.
+- `wait_settle` = `readyState === "complete"` AND `getAnimations().length === 0`.
+
+That is roughly 6-8 tools' worth of genuinely differentiated behaviour. The other
+~55 tools have equivalents elsewhere, frequently more mature on edge cases.
+
+**Redundant with the others:** snapshot / read_page (~`browser_snapshot`), find,
+click / type / hover / select_option / press_key / scroll, screenshot and
+element_screenshot, eval_js, cookies and storage, console and network capture,
+coordinate input (~`--caps=vision`), print_pdf (~`--caps=pdf`), wait_for, tab
+management.
+
+**They have, we do not** — ranked by value to us:
+
+1. Network mocking / route interception. playwright-mcp `--caps=network`:
+   `browser_route`, `browser_route_list`, `browser_unroute`,
+   `browser_network_state_set`.
+2. File upload. playwright-mcp `browser_file_upload` + `browser_drop`;
+   chrome-devtools-mcp `upload_file`.
+3. Dialog handling. `browser_handle_dialog` / `handle_dialog`.
+4. `storage_state` export/import — bulk cookie + localStorage snapshot to a file.
+5. Emulate / resize / CPU and network throttling.
+6. Performance trace + insights, Lighthouse, heap snapshot (chrome-devtools-mcp).
+   Deliberately out of scope; see `backlog-chrome-devtools-parity.md`.
+7. Test assertions and locator generation (playwright-mcp `--caps=testing`). Out of
+   scope by positioning; see below.
+8. Persistent injected-script channel, semantic tab search, history and bookmarks
+   (mcp-chrome). Items 1 and 8's script channel were already on the roadmap.
+
+Items 1-5 are tracked in `backlog-capability-gaps.md`.
+
+### Positioning decision (2026-08-04)
+
+This project is a **general-purpose, high-capability browser control surface for
+agents**. It is explicitly **not** a test-automation framework.
+
+Non-goals, and why:
+
+- **Locator generation and test assertions.** playwright-mcp does this better and
+  emits locators that paste straight into real Playwright tests. Competing here
+  means losing on our opponent's home ground.
+- **Performance tracing, insights, Lighthouse.** Needs the DevTools trace engine;
+  cost far exceeds value (see `backlog-chrome-devtools-parity.md`).
+- **Matching playwright-mcp on feature count.** The moat is the control model, not
+  the tool count. Adding tools that already exist elsewhere buys nothing.
+
+What we optimise for instead: driving the user's real, logged-in browser unattended,
+in the background, without stealing focus and without a debugger banner on the
+common path.

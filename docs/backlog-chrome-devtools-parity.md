@@ -1,11 +1,11 @@
-# Backlog: extend ai-browser-control to cover chrome-devtools MCP
+# Backlog: extend browserctl to cover chrome-devtools MCP
 
 Captured 2026-07-03. Deferred — not yet implemented. Goal: fold the useful parts of
-the `chrome-devtools` MCP into `ai-browser-control` so the former can be dropped.
+the `chrome-devtools` MCP into `browserctl` so the former can be dropped.
 
 ## Why
 
-`ai-browser-control` (`browser` MCP) already speaks CDP via `chrome.debugger`
+`browserctl` (`browser` MCP) already speaks CDP via `chrome.debugger`
 (`extension/cdp.js`), and the extension manifest already holds the `debugger` +
 `<all_urls>` permissions. It drives ONE pinned tab in the background (no focus
 steal, no "is being debugged" banner unless CDP is attached). `chrome-devtools`
@@ -15,7 +15,7 @@ consolidating onto it is the right direction.
 
 ## What chrome-devtools has that browser lacks
 
-| chrome-devtools feature | Cover? | How in ai-browser-control |
+| chrome-devtools feature | Cover? | How in browserctl |
 |---|---|---|
 | Network/console/HAR, screenshot, eval, cookies | Already have | `Network.*`, `Runtime.*`, `Log.*`, `Page.captureScreenshot` in cdp.js |
 | Device emulation (`emulate`/`resize`) | Easy | already use `Emulation.setDeviceMetricsOverride`; add width/height/mobile/UA |
@@ -48,6 +48,12 @@ Also worth adding regardless of the perf choice, both cheap + high QA value:
 - `browser_emulate` — device metrics (width/height/mobile/deviceScaleFactor) + UA override.
 - `browser_throttle` — CPU rate + network conditions (offline / slow-3G / 4x CPU) for
   perf-degradation testing.
+
+> **Superseded 2026-08-04.** These two moved to `backlog-capability-gaps.md` item 5,
+> which carries the full CDP surface and a `deviceScaleFactor` trap that breaks
+> `coordinate_click` if `browser_emulate` is implemented naively. Track them there.
+> The performance / Lighthouse / heap-snapshot decisions above still stand, and are
+> now recorded as explicit non-goals in `prior-art.md` (Positioning decision).
 
 ## Implementation pattern (verified against the code)
 

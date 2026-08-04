@@ -1,6 +1,6 @@
 {
-  "name": "ai-browser-control-bridge",
-  "version": "0.4.0",
+  "name": "browserctl-bridge",
+  "version": "0.5.0",
   "description": "Local bridge server relaying AI-agent commands to the Chrome extension",
   "type": "module",
   "main": "server.js",

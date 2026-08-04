@@ -1,8 +1,8 @@
 <!doctype html>
 <html>
-<head><meta charset="utf-8"><title>aibc e2e test page</title></head>
+<head><meta charset="utf-8"><title>bctl e2e test page</title></head>
 <body>
-  <h1 id="title">AIBC Test Page</h1>
+  <h1 id="title">bctl Test Page</h1>
   <a href="/second.html" id="link">go second</a>
 
   <button id="btn" onclick="window.__clicked=(window.__clicked||0)+1">Click Me</button>
@@ -84,7 +84,7 @@
     customElements.define('shadow-widget', ShadowWidget);
 
     // console + network signals for CDP/net tests
-    console.log('aibc-test-page-ready');
+    console.log('bctl-test-page-ready');
     fetch('/ping.json').catch(() => {});
   </script>
 </body>

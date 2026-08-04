@@ -13,11 +13,22 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer } from "ws";
 
-const PORT = Number(process.env.PORT) || 8765;
+// Read a numeric env var, falling back only when it is unset/empty/not-a-number — NOT
+// when it is a legitimate 0. `Number(process.env.PORT) || 8765` silently ignored
+// PORT=0 ("let the OS pick a free port"), so the unit tests, which set exactly that,
+// bound 8765 instead and hung forever on EADDRINUSE whenever a real bridge was running.
+function envNum(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+const PORT = envNum("PORT", 8765);
 const HOST = "127.0.0.1";
 // Overridable via env so tests can exercise real timeout firing without a 30s wait;
 // unset in normal operation, so production behavior is unchanged.
-const COMMAND_TIMEOUT_MS = Number(process.env.COMMAND_TIMEOUT_MS) || 30_000;
+const COMMAND_TIMEOUT_MS = envNum("COMMAND_TIMEOUT_MS", 30_000);
 // A few actions legitimately run longer than the default (multi-step replay chains,
 // each with its own navigation wait; export_har{bodies:true} can be slow to collect).
 // Give them a larger ceiling so the bridge doesn't 504 while the extension is still
@@ -39,7 +50,7 @@ const HEARTBEAT_MS = 20_000;
 // Explicit inbound WS payload cap (matches ws's own default, named here so it's
 // visible/tunable and paired with a friendly error instead of a bare 1009 close).
 // Overridable via env for tests.
-const MAX_WS_PAYLOAD_BYTES = Number(process.env.MAX_WS_PAYLOAD_BYTES) || 100 * 1024 * 1024;
+const MAX_WS_PAYLOAD_BYTES = envNum("MAX_WS_PAYLOAD_BYTES", 100 * 1024 * 1024);
 
 // Per-command timeout, aware of the action being run. See WAIT_ACTIONS/ACTION_TIMEOUT_MS above.
 function computeTimeoutMs(action, params) {
@@ -118,9 +129,9 @@ wss.on("connection", (ws) => {
     // time, so a stale socket's belated close must not clobber requests already
     // in flight against the new one.
     if (wasActive) {
-      const reason = ws.aibcOversized ? "payload too large" : "extension disconnected";
+      const reason = ws.bctlOversized ? "payload too large" : "extension disconnected";
       rejectAllPending(reason);
-      log(ws.aibcOversized ? "extension disconnected (payload too large)" : "extension disconnected");
+      log(ws.bctlOversized ? "extension disconnected (payload too large)" : "extension disconnected");
     } else {
       log("stale extension socket closed");
     }
@@ -131,7 +142,7 @@ wss.on("connection", (ws) => {
     // ws aborts the connection on an oversized inbound frame; remember why so the
     // close handler above can reject pending callers with a friendlier reason than
     // a bare disconnect.
-    if (err.code === "WS_ERR_UNSUPPORTED_MESSAGE_LENGTH") ws.aibcOversized = true;
+    if (err.code === "WS_ERR_UNSUPPORTED_MESSAGE_LENGTH") ws.bctlOversized = true;
   });
 });
 
@@ -182,7 +193,14 @@ function handleCommand(body, res) {
   }
 
   wait
-    .then((reply) => sendJson(res, reply.ok ? 200 : 500, reply))
+    // A command that the extension executed and reported as failed is a CLIENT error
+    // (bad params, wrong state — "tab not found", "not attached", "needs foreground"),
+    // so 400, not 500. This matters for the raw-HTTP integration path the README
+    // documents: a generic client (requests' raise_for_status, axios defaults) turns a
+    // 5xx into a transport exception and usually discards the body, hiding the
+    // actionable `error` message. Transport-level problems keep their own 5xx codes
+    // above (503 no extension, 502 send failed, 504 timeout).
+    .then((reply) => sendJson(res, reply.ok ? 200 : 400, reply))
     .catch((err) => sendJson(res, 504, { ok: false, error: String(err.message || err) }));
 }
 
@@ -238,6 +256,15 @@ server.on("error", (err) => {
 // Last-resort safety nets: log to stderr and keep running instead of dying silently
 // (or crashing the whole process) on a stray/unawaited rejection or thrown error.
 process.on("uncaughtException", (err) => {
+  // A failure to bind the port is fatal, not something to survive: without a socket the
+  // bridge can serve nothing. The previous behaviour (log and keep running) left a silent
+  // hung process that no client could tell apart from a healthy one — and because the
+  // listen error arrives here rather than at server.on("error"), it printed nothing
+  // useful and never exited. Exit loudly instead.
+  if (err && err.code === "EADDRINUSE") {
+    console.error(`bridge: cannot listen on ${HOST}:${PORT} — already in use (another bridge running?). Exiting.`);
+    process.exit(1);
+  }
   console.error("uncaught exception:", err);
 });
 process.on("unhandledRejection", (err) => {

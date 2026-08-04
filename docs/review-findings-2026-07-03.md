@@ -1,6 +1,6 @@
 # Code review findings — 2026-07-03
 
-Multi-agent review of ai-browser-control (extension + bridge + MCP + tests/docs).
+Multi-agent review of browserctl (extension + bridge + MCP + tests/docs).
 This file is the fix backlog. Security-only findings are intentionally **not** fixed
 (documented as accepted risk in `README.md#security` — single-user internal tool, no
 function impact). Everything below is a correctness / robustness / clarity fix.
@@ -68,7 +68,7 @@ Lower / clarity:
 - **`eval_js` MAIN-world `undefined` result throws** (`cdp.js:477-489`). `JSON.parse(JSON.stringify(undefined))` throws for expressions returning undefined (assignments, void, DOM calls), surfacing a misleading error for a successful eval. Handle undefined → return `{result: null}` or `{result: "undefined"}` rather than throwing.
 - **`wait_for {selector}` doesn't pierce shadow DOM** (`content.js:393-395`) while `click_selector`/`fill_selector` do. Use `deepQuery` so `wait_for` sees open-shadow elements.
 - **`isVisible` uses `&&`** (`content.js:31`): a zero-width nonzero-height (or vice versa) element counts visible. Change to `||` so a truly collapsed element is excluded.
-- **Snapshot stamp clearing is light-DOM-only** (`content.js:99-100` vs `:94`): clearing uses `document.querySelectorAll` but stamping uses `deepQueryAll`, so stale `data-aibc-ref` accumulate on shadow elements. Clear with the shadow-piercing query too.
+- **Snapshot stamp clearing is light-DOM-only** (`content.js:99-100` vs `:94`): clearing uses `document.querySelectorAll` but stamping uses `deepQueryAll`, so stale `data-bctl-ref` accumulate on shadow elements. Clear with the shadow-piercing query too.
 - **`select_option` error string / `type` on checkbox** (`content.js:352-368`): error prints "in select undefined" when addressed by `ref`; `type()` on checkbox/radio sets `.value` (no visible effect) and reports success. Fix the message; for checkbox/radio, set `.checked` (or return a clear error).
 - **`chrome.alarms` period below minimum** (`background.js:604`): `periodInMinutes:0.4` (24s) is under Chrome's 30s floor for packed extensions and gets clamped. Set to `0.5` (30s).
 - **Version strings**: `manifest.json:4` and the HAR `creator.version` (`cdp.js:330`) say 0.2.0 while the tool is v0.4 — bump to 0.4.0 for clean HAR triage.

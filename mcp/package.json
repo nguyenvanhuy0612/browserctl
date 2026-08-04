@@ -1,11 +1,11 @@
 {
-  "name": "ai-browser-control-mcp",
-  "version": "0.4.0",
+  "name": "browserctl-mcp",
+  "version": "0.5.0",
   "description": "MCP server exposing the browser-control bridge as tools for Claude Code / Desktop",
   "type": "module",
   "main": "index.js",
   "bin": {
-    "ai-browser-control-mcp": "index.js"
+    "browserctl-mcp": "index.js"
   },
   "engines": {
     "node": ">=18"

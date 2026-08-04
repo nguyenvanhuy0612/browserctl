@@ -74,7 +74,7 @@ function clearBuffer(tabId) {
 // "was capturing, then the service worker recycled and lost the in-memory buffer" — the
 // buffered requests can't be recovered, so the goal is an honest error, not a silent
 // empty/zero read.
-const CAPTURING_KEY = "aibc_net_capturing_tabs";
+const CAPTURING_KEY = "bctl_net_capturing_tabs";
 function persistCapturing() {
   chrome.storage.session.set({ [CAPTURING_KEY]: [...capturing] }).catch(() => {});
 }
@@ -302,7 +302,7 @@ export async function handleNet(action, params, tabId) {
       if (params.urlContains) {
         records = records.filter((r) => (r.url || "").includes(params.urlContains));
       }
-      const limit = params.limit || 200;
+      const limit = params.limit ?? 200;  // ?? so limit:0 returns none rather than 200
       const newest = records.slice(-limit);
       return {
         ok: true,

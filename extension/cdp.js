@@ -34,6 +34,20 @@ const NAMED_VK = {
 };
 function modMask(mods) { let m = 0; for (const x of mods || []) m |= MOD_BITS[String(x).toLowerCase()] || 0; return m; }
 function vkOf(key) { if (!key) return 0; return key.length === 1 ? key.toUpperCase().charCodeAt(0) : (NAMED_VK[key] || 0); }
+// DOM physical-key name ("KeyA", "Digit1", "Enter"). Chromium's key handling is more
+// faithful when `code` is present alongside the virtual key code.
+const NAMED_CODE = { " ": "Space", Escape: "Escape", Enter: "Enter", Tab: "Tab",
+  Backspace: "Backspace", Delete: "Delete", ArrowUp: "ArrowUp", ArrowDown: "ArrowDown",
+  ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight", Home: "Home", End: "End" };
+function codeOf(key) {
+  if (!key) return undefined;
+  if (NAMED_CODE[key]) return NAMED_CODE[key];
+  if (key.length === 1) {
+    if (/[a-z]/i.test(key)) return "Key" + key.toUpperCase();
+    if (/[0-9]/.test(key)) return "Digit" + key;
+  }
+  return undefined;
+}
 // Mac NSResponder editor commands so Cmd+A / Cmd+Z etc. actually perform the edit — a bare
 // synthetic key event does not trigger native editing. No-op off Mac (there the modifier +
 // virtual-key code alone drives the native shortcut, e.g. Ctrl+A). Matches the official
@@ -61,6 +75,37 @@ const captureScale = (tabId) => (lastCapture[tabId] && lastCapture[tabId].scale)
 // of which screenshot path ran last.
 export function setLastCaptureScale(tabId, scale) {
   lastCapture[tabId] = { scale };
+}
+
+// Chrome delivers CDP *synthetic input* only to the foreground tab: on a background tab
+// (or any tab whose window isn't OS-focused) Input.dispatchMouseEvent and
+// Input.dispatchKeyEvent are accepted and return success while doing NOTHING. Verified
+// 2026-08-04 on Chrome/macOS: background -> zero keydown reaches the page and a
+// coordinate_click never fires the handler; foreground -> both work, including the Mac
+// editor commands. Input.insertText is NOT affected (it targets the focused editable
+// directly) and neither is Page.captureScreenshot, which is why screenshots of a
+// background tab do work.
+//
+// Returning success for a no-op is the worst outcome for an agent — it reasons on as if
+// the click landed. Fail loudly instead, and name both remedies.
+async function requireForegroundForInput(tabId, what) {
+  let tab, win;
+  try {
+    tab = await chrome.tabs.get(tabId);
+    win = await chrome.windows.get(tab.windowId);
+  } catch {
+    return; // can't determine state — don't block the command on a lookup failure
+  }
+  if (tab.active && win.focused) return;
+  const why = !tab.active ? "the tab is not the active tab in its window" : "its window is not focused";
+  throw new Error(
+    `${what} needs the target tab in the foreground (${why}). Chrome silently drops CDP ` +
+    `synthetic input for background tabs. Either foreground it first ` +
+    `(switch_tab {id, focus:true} — this steals focus), or use a DOM-level equivalent that ` +
+    `works in the background: click / click_selector / type / fill_selector / hover / ` +
+    `select_option by ref or selector, insert_text for text entry, or press_key with ` +
+    `allowSynthetic:true for a synthetic key event.`
+  );
 }
 
 async function attach(tabId) {
@@ -133,7 +178,7 @@ async function send(tabId, method, params = {}) {
 // Key for persisting which tabs have an active CDP session, so a later read (after a
 // service-worker recycle wiped the in-memory `sessions` Map) can tell "capture was
 // running and got reset" apart from "never attached at all".
-const ATTACHED_KEY = "aibc_cdp_attached_tabs";
+const ATTACHED_KEY = "bctl_cdp_attached_tabs";
 function persistAttached() {
   chrome.storage.session.set({ [ATTACHED_KEY]: [...sessions.keys()] }).catch(() => {});
 }
@@ -375,7 +420,7 @@ function buildHar(entries, bodies) {
   return {
     log: {
       version: "1.2",
-      creator: { name: "ai-browser-control", version: "0.4.0" },
+      creator: { name: "browserctl", version: "0.5.0" },
       entries: harEntries,
     },
   };
@@ -439,7 +484,7 @@ export async function handleCdp(action, params, tabId) {
 
     case "get_console_logs": {
       const s = await requireDomains(tabId);
-      const limit = params.limit || 200;
+      const limit = params.limit ?? 200;  // ?? so limit:0 returns none rather than 200
       const logs = s.console.slice(-limit);
       if (params.clear) s.console.length = 0;
       return { ok: true, result: { count: logs.length, logs } };
@@ -599,6 +644,7 @@ export async function handleCdp(action, params, tabId) {
 
     case "coordinate_click": {
       requireSession(tabId);
+      await requireForegroundForInput(tabId, "coordinate_click");
       const s = captureScale(tabId);
       const x = params.x / s, y = params.y / s;
       const button = params.button || "left";
@@ -616,6 +662,7 @@ export async function handleCdp(action, params, tabId) {
 
     case "coordinate_drag": {
       requireSession(tabId);
+      await requireForegroundForInput(tabId, "coordinate_drag");
       const s = captureScale(tabId);
       const fromX = params.fromX / s, fromY = params.fromY / s;
       const toX = params.toX / s, toY = params.toY / s;
@@ -637,17 +684,50 @@ export async function handleCdp(action, params, tabId) {
       requireSession(tabId);
       const key = params.key;
       if (!key) throw new Error("press_key requires 'key'");
+      await requireForegroundForInput(tabId, "press_key with modifiers");
       const modifiers = modMask(params.modifiers);
       const commands = macCommands(key, params.modifiers);
       const evt = {
         key,
+        code: codeOf(key),
         windowsVirtualKeyCode: vkOf(key),
+        nativeVirtualKeyCode: vkOf(key),
         modifiers,
         ...(commands.length ? { commands } : {}),
       };
       await send(tabId, "Input.dispatchKeyEvent", { type: "keyDown", ...evt });
       await send(tabId, "Input.dispatchKeyEvent", { type: "keyUp", ...evt });
-      return { ok: true, result: { pressed: key, modifiers: params.modifiers || [], commands } };
+      // via:"cdp" = a real OS-level key event (native editor commands apply). The DOM
+      // fallback in content.js reports via:"dom" instead, so a caller can always tell
+      // which semantics it got.
+      return { ok: true, result: { pressed: key, modifiers: params.modifiers || [], commands, via: "cdp" } };
+    }
+
+    case "cdp_send": {
+      // Raw CDP escape hatch: send ANY method in the chrome.debugger domain allowlist to
+      // the target tab and return its result verbatim. This exists so a capability that
+      // has no first-class tool yet (Fetch request interception, DOM.setFileInputFiles,
+      // Page.handleJavaScriptDialog, Emulation.*, Storage.*, Tracing.*) can be used or
+      // prototyped without shipping a tool per method — and so debugging a CDP question
+      // does not require editing this file and reloading the extension.
+      //
+      // Deliberately unguarded beyond requiring an attach: it is a power tool on a
+      // single-user, trusted-machine bridge (see README "Security"). It can wedge a tab
+      // (e.g. Fetch.enable with no handler pauses every request until you disable it) and
+      // it can undo this module's own invariants (Emulation.setDeviceMetricsOverride
+      // changes the screenshot scale that coordinate_click relies on).
+      requireSession(tabId);
+      const method = params.method;
+      if (!method || typeof method !== "string") {
+        throw new Error("cdp_send requires 'method' (e.g. 'Page.getLayoutMetrics')");
+      }
+      if (!method.includes(".")) {
+        throw new Error(`'${method}' is not a CDP method name — expected Domain.method`);
+      }
+      const result = await send(tabId, method, params.params || {});
+      // CDP methods that return nothing resolve to undefined; report null so the caller
+      // can tell "succeeded with no payload" from a transport failure.
+      return { ok: true, result: { method, result: result === undefined ? null : result } };
     }
 
     case "insert_text": {
@@ -661,7 +741,7 @@ export async function handleCdp(action, params, tabId) {
 
     case "a11y_snapshot": {
       requireSession(tabId);
-      const max = params.max || 200;
+      const max = params.max ?? 200;  // ?? so max:0 is honoured
       try { await send(tabId, "Accessibility.enable"); } catch {}
       const { nodes: axNodes } = await send(tabId, "Accessibility.getFullAXTree");
       const nodes = collectAxNodes(axNodes, max);
@@ -672,13 +752,13 @@ export async function handleCdp(action, params, tabId) {
       requireSession(tabId);
       const format = params.format || "png";
       // Prefer a rect resolved by the content script (which owns ref/index resolution,
-      // including shadow-DOM elements). Fall back to the data-aibc-ref index stamp for
+      // including shadow-DOM elements). Fall back to the data-bctl-ref index stamp for
       // callers that still pass a raw index without a resolved rect.
       let r = params.rect;
       if (!r) {
         const index = params.index;
         const rect = await send(tabId, "Runtime.evaluate", {
-          expression: `(()=>{const e=document.querySelector('[data-aibc-ref="${index}"]');if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}})()`,
+          expression: `(()=>{const e=document.querySelector('[data-bctl-ref="${index}"]');if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}})()`,
           returnByValue: true,
         });
         r = rect.result && rect.result.value;
@@ -813,6 +893,7 @@ export const CDP_ACTIONS = [
   "capture_screenshot",
   "eval_js",
   "spoof_visibility",
+  "cdp_send",
   "coordinate_click",
   "coordinate_drag",
   "insert_text",

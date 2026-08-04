@@ -5,7 +5,7 @@
 // (default http://127.0.0.1:8765). The bridge relays to the Chrome extension.
 //
 // Connect from Claude Code:
-//   claude mcp add browser -- node /abs/path/to/ai-browser-control/mcp/index.js
+//   claude mcp add browserctl -- node /abs/path/to/browserctl/mcp/index.js
 // or add to .mcp.json (see README).
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -13,7 +13,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 
-const BRIDGE_URL = process.env.BRIDGE_URL || "http://127.0.0.1:8765";
+// BRIDGE_URL is the legacy name, still honoured so existing configs keep working.
+const BRIDGE_URL =
+  process.env.BROWSERCTL_BRIDGE_URL || process.env.BRIDGE_URL || "http://127.0.0.1:8765";
 
 // Carries the per-call tabId (if the tool was invoked with one) down to callBridge
 // without every build having to thread it through explicitly. AsyncLocalStorage keeps
@@ -78,8 +80,10 @@ const INSTRUCTIONS = `This server drives ONE pinned "target" tab in the backgrou
 - Before reading or screenshotting sensitive content, confirm the target with browser_current_tab.
 - Driving several tabs at once: every tab-scoped tool accepts an optional tabId (from browser_list_tabs). Pass it to run THAT command against THAT tab without changing the pinned target — so parallel agents can each drive a different tab without racing on the single pin. Omit tabId to use the pinned target.`;
 
+const SERVER_VERSION = "0.5.0";
+
 const server = new McpServer(
-  { name: "ai-browser-control", version: "0.4.0" },
+  { name: "browserctl", version: SERVER_VERSION },
   { instructions: INSTRUCTIONS }
 );
 
@@ -101,6 +105,9 @@ const NO_TAB_TOOLS = new Set([
   "browser_list_tabs", "browser_new_tab", "browser_group_tab", "browser_ungroup_tab",
   "browser_switch_tab", "browser_close_tab", "browser_list_windows", "browser_focus_window",
   "browser_reload_extension", "browser_record_get",
+  // Reports bridge/extension health; deliberately never touches a tab (and must work
+  // when no extension is connected at all).
+  "browser_status",
   // Manages its own tab identity (open-or-reuse, like browser_new_tab) — declares its
   // own tabId field below with composite-specific semantics instead of the generic
   // per-command-override one.
@@ -126,6 +133,61 @@ server.registerTool = (name, config, handler) => {
   }
   return _registerTool(name, config, handler);
 };
+
+server.registerTool(
+  "browser_cdp_send",
+  {
+    title: "Send a raw CDP command",
+    description:
+      "POWER TOOL. Send any Chrome DevTools Protocol method to the target tab and get its result verbatim. Requires browser_cdp_attach first. Use it for capabilities that have no dedicated tool yet — Fetch.* (request interception / mocking / HTTP auth), DOM.setFileInputFiles (file upload), Page.handleJavaScriptDialog (alert/confirm), Emulation.* (device metrics, throttling, timezone, locale, geolocation, prefers-color-scheme), Storage.*, Tracing.*. Only domains in Chrome's chrome.debugger allowlist work; notably DOMStorage and IndexedDB are NOT available. Two footguns: enabling an interception domain without handling its events (e.g. Fetch.enable) pauses page traffic until you disable it, and Emulation.setDeviceMetricsOverride changes the screenshot scale that browser_coordinate_click depends on.",
+    inputSchema: {
+      method: z.string().describe("CDP method, e.g. 'Page.getLayoutMetrics' or 'Emulation.setCPUThrottlingRate'"),
+      params: z
+        .record(z.string(), z.any())
+        .optional()
+        .describe("Method parameters as an object, e.g. { rate: 4 }. Omit for methods that take none."),
+    },
+  },
+  tool("cdp_send", async ({ method, params }) => text(await callBridge("cdp_send", { method, params })))
+);
+
+server.registerTool(
+  "browser_status",
+  {
+    title: "Bridge/extension status",
+    description:
+      "Report whether the bridge is reachable and whether the Chrome extension is connected to it, WITHOUT running a browser command. Call this first if a command failed with 'extension not connected', or to check readiness after restarting the bridge or reloading the extension — every other tool needs the extension, so they can only report this by failing.",
+    inputSchema: {},
+  },
+  // Deliberately does NOT go through callBridge: that requires a live extension, which is
+  // exactly what this tool exists to test. Hits the bridge's own GET /status instead.
+  async () => {
+    try {
+      const res = await fetch(`${BRIDGE_URL}/status`, { method: "GET" });
+      const data = await res.json().catch(() => ({}));
+      return text({
+        bridgeUrl: BRIDGE_URL,
+        bridgeReachable: true,
+        extensionConnected: data.extensionConnected === true,
+        mcpServerVersion: SERVER_VERSION,
+        ready: data.extensionConnected === true,
+        hint:
+          data.extensionConnected === true
+            ? "ready"
+            : "bridge is up but no extension is connected — open the extension popup and press Connect",
+      });
+    } catch (err) {
+      return text({
+        bridgeUrl: BRIDGE_URL,
+        bridgeReachable: false,
+        extensionConnected: false,
+        mcpServerVersion: SERVER_VERSION,
+        ready: false,
+        hint: `cannot reach the bridge (${err.message}) — start it with 'npm start' in bridge/`,
+      });
+    }
+  }
+);
 
 server.registerTool(
   "browser_snapshot",
@@ -364,7 +426,7 @@ server.registerTool(
       "Put a tab into a labeled, colored tab group so you (and the user) can see which tab the agent drives. Defaults to the target tab; pass id to group a specific tab. Does NOT activate the tab (no focus steal) and pins the grouped tab as the target.",
     inputSchema: {
       id: z.number().int().optional().describe("Tab id to group (default: target tab)"),
-      title: z.string().optional().describe("Group label, default 'aibc'"),
+      title: z.string().optional().describe("Group label, default 'bctl'"),
       color: z.enum(["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"]).optional().describe("Group color, default 'blue'"),
     },
   },
@@ -542,15 +604,24 @@ server.registerTool(
   "browser_press_key",
   {
     title: "Press a key",
-    description: "Dispatch a keyboard key (e.g. Enter, Escape, ArrowDown) to an element or the focused element. Note: 'Enter' on a form field can submit the form. Pass modifiers (e.g. ['Meta','Shift']) for shortcuts like Cmd+A / Cmd+Z; modifier shortcuts run via CDP and need browser_cdp_attach first (on Mac, Cmd+A/Z/C/V/X map to real editor commands), acting on the focused element.",
+    description:
+      "Dispatch a keyboard key (e.g. Enter, Escape, ArrowDown) to an element or the focused element. Note: 'Enter' on a form field can submit the form. WITHOUT modifiers this is a synthetic DOM event and works on a background tab. WITH modifiers (e.g. ['Meta','Shift'] for Cmd+A / Cmd+Z) it runs via CDP, which needs browser_cdp_attach first AND the tab in the foreground — Chrome silently drops CDP key input for background tabs, so this errors instead of pretending to succeed. On Mac the CDP path drives real editor commands (Cmd+A/Z/C/V/X). Pass allowSynthetic:true to use the DOM path for a modified key on a background tab: the page's own shortcut handler fires, but native editing does not. The result reports via:'cdp' or via:'dom' so you always know which semantics you got.",
     inputSchema: {
       key: z.string().describe("Key name, e.g. 'Enter', 'Escape', 'ArrowDown', or a letter for shortcuts"),
       index: z.number().int().optional().describe("Target element index from browser_snapshot; defaults to the focused element"),
       ref: z.string().optional().describe("Stable ref of the target element (e.g. 'ref_5'); defaults to the focused element"),
       modifiers: z.array(z.enum(["Meta", "Control", "Alt", "Shift"])).optional().describe("Modifier keys held during the press (Meta = Cmd on Mac)"),
+      allowSynthetic: z
+        .boolean()
+        .optional()
+        .describe(
+          "With modifiers on a BACKGROUND tab, dispatch a synthetic DOM event instead of erroring. Page shortcut handlers fire; native editing (real Cmd+A selection) does not. Default false."
+        ),
     },
   },
-  tool("press_key", async ({ key, index, ref, modifiers }) => text(await callBridge("press_key", { key, index, ref, modifiers })))
+  tool("press_key", async ({ key, index, ref, modifiers, allowSynthetic }) =>
+    text(await callBridge("press_key", { key, index, ref, modifiers, allowSynthetic }))
+  )
 );
 
 server.registerTool(
@@ -730,7 +801,7 @@ server.registerTool(
   "browser_coordinate_click",
   {
     title: "Click at coordinates",
-    description: "Click at pixel coordinates measured against the most recent screenshot of the target tab (for canvas/WebGL/maps where DOM clicks fail). Coordinates are auto-mapped from screenshot pixels to the viewport, so pass the x/y you read off the screenshot. Pair with a screenshot first. Requires browser_cdp_attach.",
+    description: "Click at pixel coordinates measured against the most recent screenshot of the target tab (for canvas/WebGL/maps where DOM clicks fail). Coordinates are auto-mapped from screenshot pixels to the viewport, so pass the x/y you read off the screenshot. Pair with a screenshot first. Requires browser_cdp_attach. REQUIRES the target tab in the FOREGROUND: Chrome silently drops CDP synthetic mouse input for background tabs, so this errors rather than pretending to click. For background work use browser_click / browser_click_selector (ref or selector) instead.",
     inputSchema: {
       x: z.number().describe("X in screenshot pixels"),
       y: z.number().describe("Y in screenshot pixels"),
@@ -755,7 +826,7 @@ server.registerTool(
   "browser_coordinate_drag",
   {
     title: "Drag between coordinates",
-    description: "Press at (fromX,fromY), move to (toX,toY), release. Requires browser_cdp_attach.",
+    description: "Press at (fromX,fromY), move to (toX,toY), release. Requires browser_cdp_attach. REQUIRES the target tab in the FOREGROUND: Chrome silently drops CDP synthetic mouse input for background tabs, so this errors rather than pretending to click. For background work use browser_click / browser_click_selector (ref or selector) instead.",
     inputSchema: {
       fromX: z.number(), fromY: z.number(), toX: z.number(), toY: z.number(),
     },
@@ -987,4 +1058,4 @@ server.registerTool(
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error(`ai-browser-control MCP server running (bridge: ${BRIDGE_URL})`);
+console.error(`browserctl MCP server running (bridge: ${BRIDGE_URL})`);

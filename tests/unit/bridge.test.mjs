@@ -24,7 +24,15 @@ process.env.MAX_WS_PAYLOAD_BYTES = String(TEST_MAX_WS_PAYLOAD_BYTES);
 const { server, wss, computeTimeoutMs } = await import("../../bridge/server.js");
 
 if (!server.listening) {
-  await new Promise((resolve) => server.once("listening", resolve));
+  // Race the error against the success: a listen failure (e.g. PORT ignored and 8765
+  // already taken) otherwise never resolves, and `node --test` buffers a file's output
+  // until it finishes — so the whole suite hung with zero output and no clue why.
+  await new Promise((resolve, reject) => {
+    server.once("listening", resolve);
+    server.once("error", (err) =>
+      reject(new Error(`bridge failed to listen (${err.code}): ${err.message}`))
+    );
+  });
 }
 const PORT = server.address().port;
 const BASE = `http://127.0.0.1:${PORT}`;

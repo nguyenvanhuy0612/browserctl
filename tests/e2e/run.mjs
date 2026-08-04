@@ -1,4 +1,4 @@
-// End-to-end test runner for ai-browser-control.
+// End-to-end test runner for browserctl.
 //
 // Drives the LIVE stack (agent -> bridge -> extension -> Chrome) by POSTing real
 // commands to the running bridge, against a controlled test page this script
@@ -19,7 +19,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-const BRIDGE = process.env.BRIDGE_URL || "http://127.0.0.1:8765";
+const BRIDGE =
+  process.env.BROWSERCTL_BRIDGE_URL || process.env.BRIDGE_URL || "http://127.0.0.1:8765";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PAGE_RAW = readFileSync(join(HERE, "testpage.html"), "utf8");
 const SECOND = "<!doctype html><title>second</title><h1 id=sec>Second Page</h1>";
@@ -39,7 +40,7 @@ const ALL_ACTIONS = [
   "get_cookies","set_cookie","delete_cookies","coordinate_click","coordinate_drag","insert_text",
   "get_response_body","net_start","net_stop","net_get","net_clear","wait_network_idle",
   "record_start","record_stop","record_get","replay","reload_extension",
-];
+  "cdp_send",];
 
 const used = new Set();
 async function cmd(action, params = {}) {
@@ -73,7 +74,29 @@ async function test(name, fn) {
   try { await fn(); results.push({ name, ok: true }); console.log(`  PASS  ${name}`); }
   catch (e) { results.push({ name, ok: false, err: e.message }); console.log(`  FAIL  ${name}: ${e.message}`); }
 }
+function skip(name, why) {
+  results.push({ name, ok: true, skipped: true });
+  console.log(`  SKIP  ${name} (${why})`);
+}
 function assert(cond, msg) { if (!cond) throw new Error(msg || "assertion failed"); }
+
+// Run a command expecting it to FAIL, and return the error message. cmd() throws on
+// failure, so this is how a test asserts a guard fires rather than silently succeeding.
+async function cmdFail(action, params = {}) {
+  try {
+    await cmd(action, params);
+  } catch (e) {
+    return e.message;
+  }
+  throw new Error(`${action}: expected failure, but it succeeded`);
+}
+
+// Chrome delivers CDP synthetic input (Input.dispatchMouseEvent / dispatchKeyEvent) only
+// to a foreground tab — see requireForegroundForInput in extension/cdp.js. Exercising the
+// real behaviour therefore requires stealing OS focus, which is exactly what this project
+// exists to avoid, so it is opt-in. The background GUARD is always tested: that is the
+// part that used to fail silently.
+const FOREGROUND_OK = process.env.E2E_FOREGROUND === "1";
 
 // Find a ref for an element by matching snapshot/read_page text.
 function refByText(snap, needle) {
@@ -102,6 +125,8 @@ async function main() {
   console.log(`test page served at ${base} (cross-origin iframe at ${iframeSrc})\nrunning against bridge ${BRIDGE}\n`);
 
   let tabId;
+  // Declared out here (not inside the try) so the finally block can close it.
+  let bgTab;
   try {
     // --- tab setup ---
     await test("new_tab", async () => { const r = await cmd("new_tab", { url: base + "/" }); tabId = r.id; assert(tabId != null, "no tab id"); });
@@ -113,7 +138,7 @@ async function main() {
 
     // --- reads (incl. shadow DOM) ---
     let snap;
-    await test("snapshot", async () => { snap = await cmd("snapshot", {}); assert(snap.text.includes("AIBC Test Page"), "body text missing"); assert(snap.elements.length >= 5, "too few elements"); });
+    await test("snapshot", async () => { snap = await cmd("snapshot", {}); assert(snap.text.includes("bctl Test Page"), "body text missing"); assert(snap.elements.length >= 5, "too few elements"); });
     await test("snapshot pierces shadow DOM", async () => { assert(refByText(snap, "Shadow Button"), "shadow button not in snapshot"); });
     await test("read_page", async () => { const r = await cmd("read_page", { mode: "interactive" }); assert(/Click Me/.test(r.tree) && /ref_/.test(r.tree), "read_page tree missing button/ref"); });
     await test("read_page pierces shadow DOM", async () => { const r = await cmd("read_page", { mode: "interactive" }); assert(/Shadow Button/.test(r.tree), "read_page tree missing shadow button"); });
@@ -146,9 +171,9 @@ async function main() {
       const el = (s.elements || []).find((e) => e.ref === inp.ref);
       assert(el && el.value === "xf", `iframe input value=${el && JSON.stringify(el.value)}`);
     });
-    await test("get_page_content", async () => { const r = await cmd("get_page_content", {}); assert(r.text.includes("AIBC Test Page"), "content missing"); });
+    await test("get_page_content", async () => { const r = await cmd("get_page_content", {}); assert(r.text.includes("bctl Test Page"), "content missing"); });
     await test("wait_for selector", async () => { await cmd("wait_for", { selector: "#title" }); });
-    await test("wait_for text", async () => { await cmd("wait_for", { text: "AIBC Test Page" }); });
+    await test("wait_for text", async () => { await cmd("wait_for", { text: "bctl Test Page" }); });
 
     // --- interactions ---
     await test("click by ref + effect", async () => {
@@ -209,7 +234,7 @@ async function main() {
 
     // --- CDP-backed ---
     await test("cdp_attach", async () => { const r = await cmd("cdp_attach", {}); assert(r.attached, "not attached"); });
-    await test("get_console_logs", async () => { const r = await cmd("get_console_logs", {}); assert(r.logs.some((l) => (l.text || "").includes("aibc-test-page-ready")), "console msg missing"); });
+    await test("get_console_logs", async () => { const r = await cmd("get_console_logs", {}); assert(r.logs.some((l) => (l.text || "").includes("bctl-test-page-ready")), "console msg missing"); });
     await test("get_network_requests + get_response_body (CDP)", async () => {
       await cmd("eval_js", { expression: "fetch('/ping.json?cdp='+Date.now())" });
       await cmd("wait_network_idle", { idleMs: 400, timeoutMs: 5000 });
@@ -219,31 +244,120 @@ async function main() {
       assert((body.body || "").includes("ok"), `no/short response body: ${JSON.stringify(body.body)}`);
     });
     await test("eval_js compute", async () => { const r = await cmd("eval_js", { expression: "6*7" }); assert(r.value === 42, "eval math wrong"); });
-    // coordinate_click BEFORE any screenshot: with no capture yet, captureScale is 1, so
-    // viewport (CSS) pixels map 1:1 to the model's screenshot space. (After a screenshot
-    // on a HiDPI display the scale differs and coords must be given in screenshot space.)
-    await test("coordinate_click maps to viewport", async () => {
-      const before = (await cmd("eval_js", { expression: "window.__clicked||0" })).value;
-      const c = await cmd("eval_js", { expression: "(()=>{const r=document.getElementById('btn').getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()" });
-      await cmd("coordinate_click", { x: c.value.x, y: c.value.y });
-      const after = (await cmd("eval_js", { expression: "window.__clicked||0" })).value;
-      assert(after === before + 1, `coordinate_click missed (${before}->${after})`);
+    // --- CDP synthetic input: guard always, real behaviour only when opted in ---
+    // The guards are asserted against a dedicated tab that is deliberately left in the
+    // BACKGROUND, addressed by explicit tabId. Asserting them against the main test tab
+    // instead would make them order-dependent: any earlier test that foregrounds the tab
+    // (E2E_FOREGROUND=1 below) would silently invalidate them — the exact class of
+    // order-dependence that hid the original bug.
+    await test("set up a background tab for the input guards", async () => {
+      bgTab = (await cmd("new_tab", { url: base + "/" })).id;   // re-pins to bgTab
+      await cmd("switch_tab", { id: tabId });                    // re-activate + re-pin the main tab
+      await cmd("cdp_attach", { tabId: bgTab });                 // guards run after requireSession
+      const cur = await cmd("current_tab", {});
+      assert(cur.id === tabId, `pin not restored to the main tab (got ${cur.id})`);
     });
-    await test("coordinate_drag (no throw)", async () => { const r = await cmd("coordinate_drag", { fromX: 6, fromY: 6, toX: 60, toY: 60 }); assert(r.dragged, "drag failed"); });
+    await test("coordinate_click refuses a background tab", async () => {
+      const err = await cmdFail("coordinate_click", { tabId: bgTab, x: 5, y: 5 });
+      assert(/foreground/i.test(err), `expected a foreground guard error, got: ${err}`);
+    });
+    await test("coordinate_drag refuses a background tab", async () => {
+      const err = await cmdFail("coordinate_drag", { tabId: bgTab, fromX: 6, fromY: 6, toX: 60, toY: 60 });
+      assert(/foreground/i.test(err), `expected a foreground guard error, got: ${err}`);
+    });
+    if (!FOREGROUND_OK) {
+      skip("coordinate_click hits the element (foreground)", "set E2E_FOREGROUND=1 — steals OS focus");
+    } else {
+      await test("coordinate_click hits the element (foreground)", async () => {
+        const win = (await cmd("list_windows", {})).windows.find((w) => (w.tabs || []).some((t) => t.id === tabId));
+        await cmd("switch_tab", { id: tabId, focus: true });
+        await cmd("focus_window", { id: win.id });
+        // Scroll the target into view first: an earlier test scrolled the page, and a
+        // click at a negative/off-screen coordinate legitimately hits nothing. Coordinate
+        // input is a raw pixel escape hatch — it must not silently scroll for the caller.
+        await cmd("eval_js", { expression: "document.getElementById('btn').scrollIntoView({block:'center'})" });
+        const before = (await cmd("eval_js", { expression: "window.__clicked||0" })).value;
+        const c = await cmd("eval_js", { expression: "(()=>{const r=document.getElementById('btn').getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()" });
+        await cmd("coordinate_click", { x: c.value.x, y: c.value.y });
+        const after = (await cmd("eval_js", { expression: "window.__clicked||0" })).value;
+        assert(after === before + 1, `coordinate_click missed (${before}->${after})`);
+      });
+    }
     await test("insert_text into focused field", async () => {
       await cmd("eval_js", { expression: "document.getElementById('area').focus()" });
       await cmd("insert_text", { text: "inserted" });
       const v = await cmd("eval_js", { expression: "document.getElementById('area').value" });
       assert(v.value.includes("inserted"), `insert_text value=${JSON.stringify(v.value)}`);
     });
-    await test("press_key Cmd/Ctrl+A selectAll then replace (editor command)", async () => {
-      const ref = (await cmd("find", { query: "Plain" })).matches[0].ref;
-      await cmd("type", { ref, text: "abcdef" });          // focuses #plain, value=abcdef
-      await cmd("press_key", { key: "a", modifiers: [process.platform === "darwin" ? "Meta" : "Control"] });
-      await cmd("insert_text", { text: "Z" });              // replaces the selection
-      const v = await cmd("eval_js", { expression: "document.getElementById('plain').value" });
-      assert(v.value === "Z", `selectAll+replace did not select all (value=${JSON.stringify(v.value)})`);
+    const MOD = process.platform === "darwin" ? "Meta" : "Control";
+    await test("press_key with modifiers refuses a background tab", async () => {
+      const err = await cmdFail("press_key", { tabId: bgTab, key: "a", modifiers: [MOD] });
+      assert(/foreground/i.test(err), `expected a foreground guard error, got: ${err}`);
     });
+    await test("press_key allowSynthetic works on a background tab", async () => {
+      await cmd("eval_js", { expression: "window.__mods=[];document.addEventListener('keydown',(e)=>window.__mods.push((e.metaKey?'Meta+':'')+(e.ctrlKey?'Ctrl+':'')+e.key),true)" });
+      const r = await cmd("press_key", { key: "a", modifiers: [MOD], allowSynthetic: true });
+      assert(r.via === "dom", `expected via:"dom", got ${JSON.stringify(r)}`);
+      const seen = await cmd("eval_js", { expression: "JSON.stringify(window.__mods)" });
+      assert(/Meta\+a|Ctrl\+a/.test(seen.value), `page did not see the modified key: ${seen.value}`);
+    });
+    if (!FOREGROUND_OK) {
+      skip("press_key Cmd/Ctrl+A selectAll then replace", "set E2E_FOREGROUND=1 — steals OS focus");
+    } else {
+      await test("press_key Cmd/Ctrl+A selectAll then replace (editor command)", async () => {
+        const win = (await cmd("list_windows", {})).windows.find((w) => (w.tabs || []).some((t) => t.id === tabId));
+        await cmd("switch_tab", { id: tabId, focus: true });
+        await cmd("focus_window", { id: win.id });
+        const ref = (await cmd("find", { query: "Plain" })).matches[0].ref;
+        await cmd("type", { ref, text: "abcdef" });          // focuses #plain, value=abcdef
+        const r = await cmd("press_key", { key: "a", modifiers: [MOD] });
+        assert(r.via === "cdp", `expected the CDP path, got ${JSON.stringify(r)}`);
+        await cmd("insert_text", { text: "Z" });              // replaces the selection
+        const v = await cmd("eval_js", { expression: "document.getElementById('plain').value" });
+        assert(v.value === "Z", `selectAll+replace did not select all (value=${JSON.stringify(v.value)})`);
+      });
+    }
+    // --- previously untested commands ---
+    await test("describe_element by ref", async () => {
+      const ref = (await cmd("find", { query: "Click Me" })).matches[0].ref;
+      const r = await cmd("describe_element", { ref });
+      assert(r.tag === "button", `expected tag button, got ${r.tag}`);
+      assert(r.attributes && r.attributes.id === "btn", `missing id attribute: ${JSON.stringify(r.attributes)}`);
+      assert(r.rect && r.rect.width > 0, "no rect");
+      assert(r.visible === true && r.visibilityReason === "visible", `unexpected visibility: ${r.visibilityReason}`);
+    });
+    await test("find_text literal + context", async () => {
+      const r = await cmd("find_text", { query: "Test Page" });
+      assert(r.matches && r.matches.length >= 1, `no matches: ${JSON.stringify(r)}`);
+      assert(/Test Page/i.test(JSON.stringify(r.matches[0])), "match has no context text");
+    });
+    await test("find_text regex mode", async () => {
+      const r = await cmd("find_text", { query: "Cl[ia]ck\\s+Me", regex: true });
+      assert(r.matches && r.matches.length >= 1, `regex found nothing: ${JSON.stringify(r)}`);
+    });
+    await test("find_text miss returns empty, not an error", async () => {
+      const r = await cmd("find_text", { query: "zzz-not-on-this-page-zzz" });
+      assert(Array.isArray(r.matches) && r.matches.length === 0, `expected 0 matches, got ${JSON.stringify(r.matches)}`);
+    });
+    await test("read_pdf reports a non-PDF tab honestly", async () => {
+      // open_and_read depends on this: it probes read_pdf before any DOM read.
+      const r = await cmd("read_pdf", {});
+      assert(r.isPdf === false, `expected isPdf:false on an HTML page, got ${JSON.stringify(r)}`);
+    });
+    await test("spoof_visibility patches the Page Visibility API", async () => {
+      // Contract: { spoofed: { hidden, visibilityState }, tabId }, each flag reporting
+      // whether that Document.prototype getter was successfully overridden.
+      const r = await cmd("spoof_visibility", {});
+      assert(r.spoofed && r.spoofed.hidden === true && r.spoofed.visibilityState === true,
+        `not both getters patched: ${JSON.stringify(r)}`);
+      assert(r.tabId === tabId, `spoofed the wrong tab: ${r.tabId} != ${tabId}`);
+      // Deterministic regardless of the tab's real visibility, because the override is on
+      // the prototype getter — which is the whole point (unstick lazy-load in background).
+      const after = await cmd("eval_js", { expression: "({hidden:document.hidden,state:document.visibilityState})" });
+      assert(after.value.hidden === false && after.value.state === "visible",
+        `getters not in force after spoof: ${JSON.stringify(after.value)}`);
+    });
+
     await test("a11y_snapshot", async () => { const r = await cmd("a11y_snapshot", {}); assert(r.count > 0, "empty a11y"); });
     await test("screenshot (viewport)", async () => { const r = await cmd("screenshot", {}); assert(/^data:image\/(jpeg|png);base64,/.test(r.dataUrl), "no image"); });
     await test("capture_screenshot (full page)", async () => { const r = await cmd("capture_screenshot", { fullPage: true, format: "jpeg" }); assert(/^data:image\/(jpeg|png);base64,/.test(r.dataUrl), "no image"); });
@@ -303,7 +417,66 @@ async function main() {
     // --- teardown of CDP ---
     await test("cdp_detach", async () => { const r = await cmd("cdp_detach", {}); assert(r.attached === false, "still attached"); });
     await test("ungroup_tab", async () => { await cmd("ungroup_tab", {}); });
+
+    // --- v0.5 additions ---
+    await test("cdp_send requires an attach", async () => {
+      await cmd("cdp_detach", {});
+      const err = await cmdFail("cdp_send", { method: "Page.getLayoutMetrics" });
+      assert(/not attached/i.test(err), `expected an attach error, got: ${err}`);
+    });
+    await test("cdp_send relays a raw CDP call", async () => {
+      await cmd("cdp_attach", {});
+      const r = await cmd("cdp_send", { method: "Page.getLayoutMetrics" });
+      assert(r.method === "Page.getLayoutMetrics", `wrong echo: ${JSON.stringify(r)}`);
+      assert(r.result && r.result.cssLayoutViewport, `no layout metrics: ${JSON.stringify(r.result).slice(0, 120)}`);
+    });
+    await test("cdp_send rejects a non-method", async () => {
+      const err = await cmdFail("cdp_send", { method: "notamethod" });
+      assert(/not a CDP method name/i.test(err), `unexpected: ${err}`);
+    });
+    await test("cdp_send surfaces Chrome's own error for a blocked domain", async () => {
+      // DOMStorage is absent from chrome.debugger's allowlist — the raw CDP error is the
+      // honest answer, and proves cdp_send is not silently swallowing failures.
+      const err = await cmdFail("cdp_send", { method: "DOMStorage.enable" });
+      assert(/wasn't found|not found/i.test(err), `unexpected: ${err}`);
+    });
+
+    await test("actionability: disabled element is refused, not silently 'clicked'", async () => {
+      await cmd("eval_js", { expression: "(()=>{const o=document.getElementById('__dis');if(o)o.remove();const b=document.createElement('button');b.id='__dis';b.textContent='nope';b.disabled=true;b.onclick=()=>{window.__disHit=1};document.body.prepend(b);})()" });
+      const err = await cmdFail("click_selector", { selector: "#__dis" });
+      assert(/disabled/i.test(err), `expected a disabled error, got: ${err}`);
+      const hit = await cmd("eval_js", { expression: "window.__disHit||0" });
+      assert(hit.value === 0, "the handler fired even though the click was refused");
+    });
+    await test("actionability: hidden element still acts but warns", async () => {
+      await cmd("eval_js", { expression: "(()=>{const o=document.getElementById('__hid');if(o)o.remove();const b=document.createElement('button');b.id='__hid';b.textContent='hidden';b.style.display='none';b.onclick=()=>{window.__hidHit=(window.__hidHit||0)+1};document.body.prepend(b);})()" });
+      const r = await cmd("click_selector", { selector: "#__hid" });
+      assert(/display:none/.test(r.warning || ""), `expected a display:none warning, got: ${JSON.stringify(r)}`);
+      const hit = await cmd("eval_js", { expression: "window.__hidHit||0" });
+      assert(hit.value === 1, "capability lost: the handler did not fire");
+    });
+
+    await test("fresh-pin guard refuses a content read after the pin is lost", async () => {
+      // Pin a throwaway tab, then close it so the pin is genuinely gone.
+      const tmp = (await cmd("new_tab", { url: base + "/" })).id;   // re-pins to tmp
+      await cmd("close_tab", { id: tmp });                          // unpins
+      const err = await cmdFail("snapshot", {});
+      assert(/no target tab was pinned/i.test(err), `expected the fresh-pin guard, got: ${err}`);
+      // Re-issuing proceeds, because the guard pinned the now-active tab as a side effect.
+      await cmd("snapshot", { maxText: 1 });
+      // Restore the pin to the main test tab for teardown.
+      await cmd("switch_tab", { id: tabId });
+      const cur = await cmd("current_tab", {});
+      assert(cur.id === tabId, `pin not restored (got ${cur.id})`);
+    });
+    await test("fresh-pin guard does not fire for non-content commands", async () => {
+      const tmp = (await cmd("new_tab", { url: base + "/" })).id;
+      await cmd("close_tab", { id: tmp });
+      await cmd("list_tabs", {});      // must not be guarded
+      await cmd("switch_tab", { id: tabId });
+    });
   } finally {
+    if (bgTab != null) { try { await cmd("close_tab", { id: bgTab }); } catch {} }
     if (tabId != null) { try { await cmd("close_tab", { id: tabId }); } catch {} }
     server.close();
     originB.close();

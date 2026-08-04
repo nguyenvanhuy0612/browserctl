@@ -1,6 +1,6 @@
-# ai-browser-control: "claude-for-chrome, open + extras" — design
+# browserctl: "claude-for-chrome, open + extras" — design
 
-Captured 2026-06-30. Design for ai-browser-control. Approved direction, implementing in
+Captured 2026-06-30. Design for browserctl. Approved direction, implementing in
 4 phases.
 
 ## North-star
@@ -64,7 +64,7 @@ with dispatch/tool wiring in `background.js`, `mcp/index.js`, and docs in `PROTO
 ### 2. read_page + refs + find (content.js)
 - WeakRef ref map: `elementMap[ref] = new WeakRef(el)` + reverse `WeakMap`;
   `getOrAssignRef` reuses a live ref, `resolveRef` sweeps dead ones and reports staleness.
-  Augments the existing `data-aibc-ref` index identity (refs survive re-snapshots, don't
+  Augments the existing `data-bctl-ref` index identity (refs survive re-snapshots, don't
   mutate the page).
 - `read_page { mode?: "interactive"|"all", depth?, ref_id?, maxChars? }`: walk the DOM,
   role inference fallback (tag+type → ARIA role), accessible-name cascade

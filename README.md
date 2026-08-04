@@ -1,4 +1,4 @@
-# ai-browser-control
+# browserctl
 
 A Chrome extension + local bridge server that lets any AI agent (Claude, GPT, or a
 plain script) drive a real Chrome browser through a neutral HTTP/WebSocket API.
@@ -29,12 +29,18 @@ no "is being debugged" banner. It **drops to CDP** (`chrome.debugger`) only wher
 can't reach: pixel-coordinate clicks on canvas/WebGL/maps, screenshotting a background
 tab, console/network/HAR capture, and CSP-bypass JS eval.
 
-The agent **pins one target tab on first use** and keeps acting on it — including
-screenshots and clicks while that tab sits in the **background** — so you can keep using
-your other tabs without the agent following you or stealing focus. `group_tab` puts the
-controlled tab in a labelled tab group so you can see which one it is. This mirrors the
+The agent **pins one target tab on first use** and keeps acting on it — including DOM
+interaction and screenshots while that tab sits in the **background** — so you can keep
+using your other tabs without the agent following you or stealing focus. `group_tab` puts
+the controlled tab in a labelled tab group so you can see which one it is. This mirrors the
 official "Claude in Chrome" control model, kept **open** (no blocklist / org-lock /
 per-action gating) with the agent driven externally over MCP/HTTP.
+
+**One exception to background operation:** Chrome delivers CDP *synthetic input* only to a
+foreground tab, so `coordinate_click`, `coordinate_drag`, and `press_key` **with
+modifiers** cannot work on a hidden tab — they now fail with an actionable error instead of
+silently doing nothing. Everything else, including every DOM action and every screenshot,
+genuinely works in the background. See `docs/REFERENCE.md` for the full matrix.
 
 ## Setup
 
@@ -91,9 +97,9 @@ cd mcp
 npm install
 # Register with Claude Code (run from anywhere; use the absolute path to mcp/index.js on this machine):
 # Windows:
-claude mcp add browser -- node "C:/Users/HUYNGUYEN/Documents/my_notes/claude/ai-browser-control/mcp/index.js"
+claude mcp add browserctl -- node "C:/Users/HUYNGUYEN/Documents/my_notes/claude/browserctl/mcp/index.js"
 # macOS:
-claude mcp add browser -- node "/Users/admin/Documents/my_notes/claude/ai-browser-control/mcp/index.js"
+claude mcp add browserctl -- node "/Users/admin/Documents/my_notes/claude/browserctl/mcp/index.js"
 ```
 
 Or add it to a project's `.mcp.json`:
@@ -101,10 +107,10 @@ Or add it to a project's `.mcp.json`:
 ```jsonc
 {
   "mcpServers": {
-    "browser": {
+    "browserctl": {
       "command": "node",
-      "args": ["/absolute/path/to/my_notes/claude/ai-browser-control/mcp/index.js"],
-      "env": { "BRIDGE_URL": "http://127.0.0.1:8765" }
+      "args": ["/absolute/path/to/my_notes/claude/browserctl/mcp/index.js"],
+      "env": { "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765" }
     }
   }
 }
@@ -141,12 +147,25 @@ issue `click` / `type` / `scroll` / `navigate` -> `snapshot` again.
 
 ## Status
 
-Working. Control parity with the official "Claude in Chrome" surface (open): DOM-index +
-accessibility-tree (`read_page`) reads with stable refs, ref/coordinate interaction,
-background-tab control, screenshots (incl. background tabs), console/network/HAR capture,
-record/replay, and tab grouping. Reads and interaction pierce open shadow DOM and cover
-iframes (including cross-origin) via all_frames injection with frame-qualified refs. See `PROTOCOL.md` for the full command list + roadmap,
-and `docs/prior-art.md` for how this compares to similar projects.
+Working, **v0.5**, 65 MCP tools over 64 bridge actions. Control parity with the official
+"Claude in Chrome" surface (open): DOM-index + accessibility-tree (`read_page`) reads with
+stable refs, ref/coordinate interaction, background-tab control, screenshots (incl.
+background tabs), console/network/HAR capture, record/replay, and tab grouping. Reads and
+interaction pierce open shadow DOM and cover iframes (including cross-origin) via
+all_frames injection with frame-qualified refs.
+
+Tests: 18/18 unit, 62/62 e2e, 58 of 60 commands exercised.
+
+Docs:
+
+- **`docs/REFERENCE.md`** — the operator's guide: install, control model, every tool
+  grouped with its params, recipes, failure modes, the foreground-input matrix. Start here.
+- `PROTOCOL.md` — wire-level command spec and per-version changelog.
+- `docs/prior-art.md` — how this compares to similar projects, and the positioning
+  decision (general-purpose browser control, explicitly not test automation).
+- `docs/backlog-capability-gaps.md` — the five tracked gaps, with verified CDP surfaces.
+- `docs/debugger-policy.md` — which commands need `chrome.debugger` (45 of 65 never do),
+  what a per-site denial would cost, and the single chokepoint to enforce it at.
 
 ## Testing
 
@@ -155,7 +174,11 @@ real commands against a controlled page the runner serves over http:
 
 ```bash
 # bridge must be running and the extension connected
-node tests/e2e/run.mjs
+node tests/e2e/run.mjs                    # 62 checks; never steals focus
+E2E_FOREGROUND=1 node tests/e2e/run.mjs   # + the 2 synthetic-input tests (steals focus)
+
+# bridge relay only, no Chrome needed (~0.5s, safe alongside a live bridge)
+node --test tests/unit/bridge.test.mjs
 ```
 
 It creates a dedicated tab, exercises nearly all commands (all but `focus_window` and

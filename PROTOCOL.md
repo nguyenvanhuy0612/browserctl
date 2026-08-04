@@ -1,6 +1,6 @@
 # Command protocol
 
-Current version: **0.4** (extension, bridge, and MCP server are versioned together).
+Current version: **0.5** (extension, bridge, and MCP server are versioned together).
 
 Agents send commands to the bridge:
 
@@ -18,6 +18,21 @@ The response is always JSON:
 { "ok": false, "error": "message" }  // failure
 ```
 
+HTTP status codes (they distinguish *your* problem from *the transport's*):
+
+| Status | Meaning |
+|---|---|
+| 200 | `ok:true` — command ran |
+| 400 | The command ran and failed, or the request was malformed. Read `error`: bad params, wrong state ("not attached", "tab not found", "needs foreground"). |
+| 503 | No extension connected — start Chrome / press Connect in the popup. |
+| 502 | The bridge could not hand the command to the extension. |
+| 504 | The extension never replied within the command's timeout. |
+
+A failed command is a **400, not a 500** — so a generic HTTP client (`requests` with
+`raise_for_status`, axios defaults) surfaces the actionable `error` instead of turning it
+into a transport exception and discarding the body. Only 5xx means "the bridge/extension
+link itself is the problem".
+
 All actions operate on the **target tab** unless noted. The target is **pinned on
 first touch**: the agent's first command pins the focused active tab, and it stays
 pinned even if the user switches or opens other tabs — so the agent keeps acting on
@@ -25,9 +40,11 @@ its tab while the user works elsewhere, and a snapshot can't silently land on an
 (possibly sensitive) tab. `navigate` / `new_tab` / `switch_tab` re-pin explicitly;
 `switch_tab` is the way to retarget onto a different (e.g. user) tab. Closing the
 target tab unpins it (the next command re-pins the active tab). Use `current_tab` to
-check. Because control of a background tab uses CDP (`Page.captureScreenshot`,
-`Input.*`), DOM actions and screenshots act on the target even when it is NOT the
-visible tab — no activation, no focus steal.
+check. DOM actions and screenshots act on the target even when it is NOT the visible
+tab — no activation, no focus steal. **Exception:** CDP *synthetic input*
+(`coordinate_click`, `coordinate_drag`, `press_key` with modifiers) requires the tab to be
+in the foreground; Chrome silently drops it otherwise, so those commands error instead.
+See "Synthetic input requires a FOREGROUND tab" under v0.5 below.
 
 **Per-command tab override (`params.tabId`).** Any tab-scoped action may carry a
 `tabId` (from `list_tabs`) to run *that one command* against *that specific tab*,
@@ -127,7 +144,7 @@ Result: `{ tabs: [ { id, url, title, active } ] }`.
 
 ### `group_tab`
 `params: { id?, title?, color? }` - put a tab into a labeled tab group (defaults
-to the target tab, `title:"aibc"`, `color:"blue"`) so the user can see which tab
+to the target tab, `title:"bctl"`, `color:"blue"`) so the user can see which tab
 the agent drives. Does not activate the tab; also pins it as the target. Result:
 `{ groupId, tabId, title, color }` (or a `titled:false` note if the `tabGroups`
 permission is unavailable and only the grouping succeeded).
@@ -195,7 +212,7 @@ CSP); otherwise in the page MAIN world (subject to CSP).
 - `wait_for { selector?, text?, gone?, timeoutMs? }` - wait until a selector/text appears (or disappears with `gone:true`); with neither, waits `timeoutMs` (default 1000). Selector/text waits poll in the page up to `timeoutMs` (default 8000).
 - `get_page_content { maxChars? }` - extract the main readable text: `{ title, url, text }` (default 8000 chars).
 
-Element robustness: `snapshot` now stamps `data-aibc-ref="<index>"` on each indexed
+Element robustness: `snapshot` now stamps `data-bctl-ref="<index>"` on each indexed
 element, so `click`/`type`/etc. still resolve after minor DOM churn.
 
 ### Navigation history & windows
@@ -348,3 +365,134 @@ Deferred (low marginal value for the external-agent model): mid-action domain re
   tab without changing the pinned target, so multiple agents can drive different tabs
   concurrently. (Multi-*browser* sessions — separate cookie jars — still open.)
 - [ ] Optional API token on the bridge (only needed if it leaves a trusted machine).
+
+---
+
+## Added in v0.5
+
+### Synthetic input requires a FOREGROUND tab (important constraint)
+
+Verified 2026-08-04 on Chrome/macOS. Chrome delivers CDP **synthetic input** only to the
+tab that is active in a focused window. On a background tab, `Input.dispatchMouseEvent`
+and `Input.dispatchKeyEvent` are accepted and report success **while doing nothing at
+all** — no keydown reaches the page, no click handler fires.
+
+Affected commands, which now **fail loudly** instead of silently no-op'ing:
+
+- `coordinate_click`
+- `coordinate_drag`
+- `press_key` **with** `modifiers` (the CDP path, incl. the Mac editor commands)
+
+Not affected — these work on a background tab:
+
+- `insert_text` (`Input.insertText` targets the focused editable directly)
+- `screenshot` / `capture_screenshot` / `element_screenshot` (`Page.captureScreenshot`)
+- every DOM-level action: `click`, `click_selector`, `type`, `fill_selector`, `hover`,
+  `select_option`, `scroll`, `press_key` **without** modifiers
+- console / network / HAR capture, `eval_js`, cookies, storage
+
+The error names both remedies: foreground the tab (`switch_tab { id, focus: true }` —
+steals focus), or use a DOM-level equivalent.
+
+This is the single most important limitation of the background-control model. Everything
+else in the project genuinely works on a hidden tab; **pixel-level input does not**.
+
+### `press_key { allowSynthetic? }`
+
+With `modifiers` on a background tab, `allowSynthetic: true` dispatches a synthetic DOM
+`KeyboardEvent` (with `metaKey`/`ctrlKey`/`shiftKey`/`altKey` set) via the content script
+instead of erroring. A page's own shortcut handler fires; **native editing does not** —
+`Cmd+A` will not select text this way.
+
+The result always reports which path ran:
+
+```jsonc
+{ "pressed": "a", "modifiers": ["Meta"], "commands": ["selectAll"], "via": "cdp" }
+{ "pressed": "a", "modifiers": ["Meta"], "via": "dom" }
+```
+
+The content-script path previously **dropped modifiers silently**; it now reflects them
+on the event.
+
+### Zero is honoured on numeric params
+
+`snapshot { maxText: 0 }` (elements only, no page text — useful for saving context),
+`get_console_logs { limit: 0 }`, `net_get { limit: 0 }`, `a11y_snapshot { max: 0 }` and
+`wait_for { timeoutMs: 0 }` now mean what they say. They were previously coerced to their
+defaults by `||`.
+
+### Previously undocumented commands
+
+- `describe_element { index? | ref? }` — full detail on one element:
+  `{ tag, text, attributes, rect: {x,y,width,height}, visible, visibilityReason }`.
+  `visibilityReason` is one of `visible`, `zero-size rect`, `visibility:hidden`,
+  `display:none`, `opacity:0`, `disabled` — use it to explain *why* a click did nothing.
+- `find_text { query, regex?, max?, contextChars? }` — search the page's visible **text**
+  (not elements) and return matches with surrounding context. `regex: true` treats
+  `query` as a JS regex; literal mode is whitespace-tolerant so a phrase matches across
+  the raw HTML's newlines. A miss returns `{ matches: [] }`, not an error.
+- `read_pdf` — `{ isPdf, url?, note? }`. Chrome's built-in PDF viewer has no readable
+  DOM, so every content action fast-fails on such a tab; call this to confirm and get the
+  URL. `open_and_read` probes it before attempting any DOM read.
+
+### `cdp_send { method, params? }` — raw CDP escape hatch
+
+Requires `cdp_attach`. Sends any method in Chrome's `chrome.debugger` domain allowlist to
+the target tab and returns `{ method, result }` verbatim (`result: null` for methods that
+return nothing). Exists so a capability with no first-class command yet can be used or
+prototyped without shipping a command per method — and so answering a CDP question does
+not require editing the extension and reloading it.
+
+Reachable this way today, with no new code: `Fetch.*` (request interception, mocking,
+`continueWithAuth` for HTTP basic-auth), `DOM.setFileInputFiles` (file upload),
+`Page.setInterceptFileChooserDialog` / `Page.handleJavaScriptDialog` (dialogs),
+`Emulation.*` (device metrics, CPU/network throttling, timezone, locale, geolocation,
+`prefers-color-scheme`), `Storage.*`, `Tracing.*`.
+
+`DOMStorage` and `IndexedDB` are **not** in the allowlist — those calls come back with
+Chrome's own `wasn't found` error, which `cdp_send` surfaces rather than swallowing.
+
+Two footguns, both deliberate (power tool, single-user bridge): enabling an interception
+domain without handling its events (e.g. `Fetch.enable`) pauses page traffic until you
+disable it, and `Emulation.setDeviceMetricsOverride` changes the screenshot scale that
+`coordinate_click` remaps against.
+
+### Actionability warnings on DOM actions
+
+`click`, `type`, `hover`, `select_option`, `click_selector`, `fill_selector` now check the
+target before acting:
+
+- **`disabled` → hard error.** Browsers suppress input to a disabled control, so acting and
+  reporting success would be a lie. Verified: the handler does not fire.
+- **Any other non-visible reason** (`display:none`, `visibility:hidden`, `opacity:0`,
+  `zero-size rect`) → the action still runs and the result carries
+  `warning: "element is not visible (<reason>) — ..."`. These handlers act via `el.click()`
+  and the native value setter, which *do* fire handlers on a hidden element, so refusing
+  would remove working capability (a 0-size input behind a styled label is a real case).
+
+`visibilityReason` now reports the most specific cause first, so a `display:none` element
+says `display:none` rather than the symptom `zero-size rect`.
+
+### Fresh-pin guard on content-returning commands
+
+If the pin has been lost — the target tab was closed, the browser session ended, or the
+extension was reloaded — the pin-on-first-touch rule would adopt whatever tab the user is
+looking at *and hand back its content*. That is how a read once landed on a personal chat
+tab.
+
+A content-returning command in that state now **refuses once**, naming the tab it would
+have read, and pins it as a side effect. Re-issue the same command to proceed, or retarget
+first with `switch_tab` / `navigate` / `new_tab` / an explicit `tabId`. Guarded commands:
+`snapshot`, `read_page`, `find`, `find_text`, `get_page_content`, `describe_element`,
+`a11y_snapshot`, `screenshot`, `capture_screenshot`, `element_screenshot`, `print_pdf`,
+`eval_js`, `read_pdf`, `get_cookies`, `storage_get`, `export_har`, `get_console_logs`,
+`get_network_requests`, `get_response_body`, `net_get`, `audit`.
+
+Not guarded: navigation and tab/window management (they leak nothing), and any command
+carrying an explicit `tabId` (that is a deliberate choice).
+
+### `GET /status`, exposed as `browser_status`
+
+`browser_status` reports `{ bridgeReachable, extensionConnected, ready, hint }` **without
+running a browser command** — every other tool needs the extension, so they could only
+report its absence by failing. Deliberately does not go through `/command`.

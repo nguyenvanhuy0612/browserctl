@@ -34,7 +34,7 @@ function render(state) {
 
 async function refresh() {
   try {
-    const state = await chrome.runtime.sendMessage({ __aibc_getState: true });
+    const state = await chrome.runtime.sendMessage({ __bctl_getState: true });
     render(state);
   } catch {
     // Service worker not reachable yet; leave the last rendered state.
@@ -45,8 +45,8 @@ btn.addEventListener("click", async () => {
   const act = btn.dataset.act;
   btn.disabled = true;
   try {
-    if (act === "disconnect") await chrome.runtime.sendMessage({ __aibc_disconnect: true });
-    else await chrome.runtime.sendMessage({ __aibc_connect: true });
+    if (act === "disconnect") await chrome.runtime.sendMessage({ __bctl_disconnect: true });
+    else await chrome.runtime.sendMessage({ __bctl_connect: true });
   } catch {}
   setTimeout(refresh, 200);
 });

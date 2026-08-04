@@ -7,8 +7,8 @@
 
 (() => {
   // Guard against double-injection (manifest content_script + programmatic inject).
-  if (window.__aiBrowserControlLoaded) return;
-  window.__aiBrowserControlLoaded = true;
+  if (window.__browserctlLoaded) return;
+  window.__browserctlLoaded = true;
 
   let indexedElements = []; // index -> Element
 
@@ -29,18 +29,43 @@
   // Single source of truth for why an element is/isn't visible — isVisible() and
   // describe_element() both read this so the two never drift apart.
   function visibilityReason(el) {
+    // Ordered most-specific cause first. A display:none element also has a zero-size
+    // rect, so checking the rect first would report the symptom ("zero-size rect")
+    // instead of the cause ("display:none") — and this string is what describe_element
+    // and the action warnings show the caller, so the cause is what matters.
+    const style = getComputedStyle(el);
+    if (style.display === "none") return "display:none";
+    if (style.visibility === "hidden") return "visibility:hidden";
+    if (el.disabled) return "disabled";
+    if (style.opacity === "0") return "opacity:0";
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return "zero-size rect";
-    const style = getComputedStyle(el);
-    if (style.visibility === "hidden") return "visibility:hidden";
-    if (style.display === "none") return "display:none";
-    if (style.opacity === "0") return "opacity:0";
-    if (el.disabled) return "disabled";
     return null; // visible
   }
 
   function isVisible(el) {
     return visibilityReason(el) === null;
+  }
+
+  // Actionability check, in the spirit of Playwright's: say why an action probably won't
+  // do what the caller expects, instead of reporting a bare success. Deliberately NOT a
+  // blanket block — these handlers act via el.click() / the native value setter, which DO
+  // fire handlers on a display:none or zero-size element, so refusing would remove
+  // capability that currently works (custom checkboxes are a real example: a 0-size input
+  // behind a styled label).
+  //
+  // The one hard stop is `disabled`: browsers suppress click events on a disabled form
+  // control and ignore user input to it, so acting and reporting success would be a lie.
+  function actionability(el) {
+    const reason = visibilityReason(el);
+    if (reason === null) return null;
+    if (reason === "disabled") {
+      throw new Error(
+        "element is disabled — a click/type on it cannot take effect (browsers suppress " +
+        "input to disabled controls). Enable it first, or act on the control that enables it."
+      );
+    }
+    return reason; // caller surfaces this as a warning alongside its normal result
   }
 
   function elementText(el) {
@@ -96,7 +121,7 @@
   }
 
   function snapshot(params = {}) {
-    const maxText = params.maxText || 4000;
+    const maxText = params.maxText ?? 4000;  // ?? so maxText:0 (elements only, no page text) is honoured
     const nodes = deepQueryAll(INTERACTIVE_SELECTOR).filter(isVisible);
 
     indexedElements = nodes;
@@ -104,8 +129,8 @@
     // element, then re-stamp so resolve() can recover a node after the cache goes stale.
     // Use the shadow-piercing query (matching the stamping below) so stale stamps on
     // shadow-DOM elements don't accumulate across snapshots.
-    for (const el of deepQueryAll("[data-aibc-ref]")) el.removeAttribute("data-aibc-ref");
-    nodes.forEach((el, index) => el.setAttribute("data-aibc-ref", String(index)));
+    for (const el of deepQueryAll("[data-bctl-ref]")) el.removeAttribute("data-bctl-ref");
+    nodes.forEach((el, index) => el.setAttribute("data-bctl-ref", String(index)));
     const elements = nodes.map((el, index) => {
       const item = { index, ref: getOrAssignRef(el), tag: el.tagName.toLowerCase(), text: elementText(el) };
       if (el.tagName === "A" && el.href) item.href = el.getAttribute("href");
@@ -131,7 +156,7 @@
     const cached = indexedElements[index];
     if (cached && cached.isConnected) return cached;
     // 2) Fall back to the stamped attribute, which survives minor DOM churn.
-    const stamped = document.querySelector(`[data-aibc-ref="${index}"]`);
+    const stamped = document.querySelector(`[data-bctl-ref="${index}"]`);
     if (stamped) return stamped;
     // 3) Nothing resolvable.
     if (!cached) throw new Error(`no element at index ${index} (snapshot first?)`);
@@ -139,7 +164,7 @@
   }
 
   // --- Stable element refs (WeakRef) ---
-  // Refs survive re-snapshots and don't mutate the DOM (unlike data-aibc-ref stamping).
+  // Refs survive re-snapshots and don't mutate the DOM (unlike data-bctl-ref stamping).
   // read_page / find / snapshot hand out ref ids; click/type/etc. also accept them.
   let refCounter = 0;
   const refMap = {};                   // refId -> WeakRef<Element>
@@ -442,13 +467,17 @@
 
   function click({ index, ref }) {
     const el = resolveTarget({ index, ref });
+    const warning = actionability(el);
     el.scrollIntoView({ block: "center", inline: "center" });
     el.click();
-    return { clicked: ref != null ? ref : index };
+    const out = { clicked: ref != null ? ref : index };
+    if (warning) out.warning = `element is not visible (${warning}) — the handler was still invoked, but verify the effect`;
+    return out;
   }
 
   function type({ index, ref, text, submit }) {
     const el = resolveTarget({ index, ref });
+    const warning = actionability(el);
     el.scrollIntoView({ block: "center", inline: "center" });
     el.focus();
     const inputType = el.tagName === "INPUT" ? (el.type || "").toLowerCase() : "";
@@ -475,7 +504,9 @@
       el.dispatchEvent(new KeyboardEvent("keyup", opts));
       if (el.form) el.form.requestSubmit?.();
     }
-    return { typed: ref != null ? ref : index };
+    const out = { typed: ref != null ? ref : index };
+    if (warning) out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
+    return out;
   }
 
   function scroll({ direction = "down", amount = 600 }) {
@@ -486,16 +517,20 @@
 
   function hover({ index, ref }) {
     const el = resolveTarget({ index, ref });
+    const warning = actionability(el);
     el.scrollIntoView({ block: "center", inline: "center" });
     const opts = { bubbles: true, cancelable: true };
     el.dispatchEvent(new MouseEvent("mouseover", opts));
     el.dispatchEvent(new MouseEvent("mouseenter", opts));
     el.dispatchEvent(new MouseEvent("mousemove", opts));
-    return { hovered: ref != null ? ref : index };
+    const out = { hovered: ref != null ? ref : index };
+    if (warning) out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
+    return out;
   }
 
   function select_option({ index, ref, value, label }) {
     const el = resolveTarget({ index, ref });
+    const warning = actionability(el);
     if (el.tagName !== "SELECT") throw new Error("target element is not a select");
     const which = ref != null ? `ref ${ref}` : `index ${index}`;
     let matched = null;
@@ -512,21 +547,37 @@
     matched.selected = true;
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
-    return { selected: value !== undefined ? value : label };
+    const out = { selected: value !== undefined ? value : label };
+    if (warning) out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
+    return out;
   }
 
-  function press_key({ key, index, ref }) {
+  function press_key({ key, index, ref, modifiers }) {
     const target =
       index !== undefined || ref !== undefined
         ? resolveTarget({ index, ref })
         : document.activeElement || document.body;
     if (target.focus) target.focus();
-    const opts = { key, code: key, bubbles: true, cancelable: true };
+    // Reflect modifiers on the synthetic event so a page's own shortcut handler (which
+    // reads e.metaKey / e.ctrlKey / e.shiftKey / e.altKey) still fires. This is a
+    // synthetic DOM event, so it does NOT drive native editing — Cmd+A will not select
+    // text here. Native editing needs the CDP path, which requires a foreground tab.
+    const set = new Set((modifiers || []).map((m) => String(m).toLowerCase()));
+    const opts = {
+      key,
+      code: key,
+      bubbles: true,
+      cancelable: true,
+      altKey: set.has("alt"),
+      ctrlKey: set.has("control") || set.has("ctrl"),
+      metaKey: set.has("meta") || set.has("command") || set.has("cmd"),
+      shiftKey: set.has("shift"),
+    };
     target.dispatchEvent(new KeyboardEvent("keydown", opts));
     target.dispatchEvent(new KeyboardEvent("keypress", opts));
     target.dispatchEvent(new KeyboardEvent("keyup", opts));
     if (key === "Enter" && target.form) target.form.requestSubmit?.();
-    return { pressed: key };
+    return { pressed: key, modifiers: modifiers || [], via: "dom" };
   }
 
   function wait_for({ selector, text, gone = false, timeoutMs = 8000 }) {
@@ -577,7 +628,7 @@
 
   // Resolve an element by ref/index and return its viewport rect. Used by
   // element_screenshot so it can capture ref-addressed (and shadow-DOM) elements,
-  // not just the data-aibc-ref index stamp that only snapshot sets.
+  // not just the data-bctl-ref index stamp that only snapshot sets.
   function element_rect({ index, ref } = {}) {
     const el = resolveTarget({ index, ref });
     el.scrollIntoView({ block: "center", inline: "center" });
@@ -713,14 +764,18 @@
   function click_selector({ selector }) {
     const el = deepQuery(selector);
     if (!el) throw new Error("no element matches " + selector);
+    const warning = actionability(el);
     el.scrollIntoView({ block: "center", inline: "center" });
     el.click();
-    return { clicked: selector };
+    const out = { clicked: selector };
+    if (warning) out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
+    return out;
   }
 
   function fill_selector({ selector, value }) {
     const el = deepQuery(selector);
     if (!el) throw new Error("no element matches " + selector);
+    const warning = actionability(el);
     el.focus();
     if ("value" in el) {
       setNativeValue(el, value);
@@ -732,7 +787,9 @@
     } else {
       throw new Error(selector + " is not editable");
     }
-    return { filled: selector };
+    const out = { filled: selector };
+    if (warning) out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
+    return out;
   }
 
   // Web Storage actions. `area` selects localStorage (default) or sessionStorage.
@@ -814,7 +871,7 @@
   function emitStep(step) {
     if (!recording) return;
     try {
-      chrome.runtime.sendMessage({ __aibc_record_step: step });
+      chrome.runtime.sendMessage({ __bctl_record_step: step });
     } catch (err) {
       // Ignore: background may not be listening; recording is best-effort.
     }

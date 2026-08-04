@@ -39,7 +39,7 @@ const MAX_RECORD_STEPS = 5000; // cap so a long/runaway recording can't grow unb
 // was on, steps are now gone) apart from "never started" — the in-memory steps can't be
 // recovered, so the goal is an honest error instead of a silent empty count.
 let isRecording = false;
-const RECORDING_KEY = "aibc_recording";
+const RECORDING_KEY = "bctl_recording";
 function persistRecording(on) {
   chrome.storage.session.set({ [RECORDING_KEY]: on }).catch(() => {});
 }
@@ -47,12 +47,12 @@ function persistRecording(on) {
 // The content recorder pushes each captured step here via chrome.runtime.sendMessage.
 // The popup also talks to the worker here: read connection state, Connect, Disconnect.
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg && msg.__aibc_record_step) {
-    recordingSteps.push(msg.__aibc_record_step);
+  if (msg && msg.__bctl_record_step) {
+    recordingSteps.push(msg.__bctl_record_step);
     if (recordingSteps.length > MAX_RECORD_STEPS) recordingSteps.shift();
     return;
   }
-  if (msg && msg.__aibc_getState) {
+  if (msg && msg.__bctl_getState) {
     chrome.storage.local.get(["bridgeHost", "bridgePort"]).then((cfg) => {
       sendResponse({
         connState,
@@ -62,8 +62,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     });
     return true; // async sendResponse
   }
-  if (msg && msg.__aibc_connect) { startConnecting(); sendResponse({ ok: true }); return; }
-  if (msg && msg.__aibc_disconnect) { stopConnecting(); sendResponse({ ok: true }); return; }
+  if (msg && msg.__bctl_connect) { startConnecting(); sendResponse({ ok: true }); return; }
+  if (msg && msg.__bctl_disconnect) { stopConnecting(); sendResponse({ ok: true }); return; }
 });
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -145,7 +145,7 @@ async function connect() {
     if (ws !== socket) return;
     attempts = 0;
     connState = "connected";
-    console.log("[ai-browser] bridge connected:", url);
+    console.log("[browserctl] bridge connected:", url);
     // First successful connect: enable bounded auto-retry on future startups.
     chrome.storage.local.set({ autoConnect: true, giveUp: false });
   });
@@ -201,6 +201,11 @@ async function init() {
 
 // Route a command to the right handler. Returns { ok, result } or throws.
 async function dispatch({ action, params = {} }) {
+  // Before anything resolves a target: refuse a content-returning command that would
+  // ride a fresh auto-pin onto whatever tab the user is looking at. See freshPinGuard.
+  const guard = await freshPinGuard(action, params);
+  if (guard) return guard;
+
   // element_screenshot needs a rect the content script resolves (by ref/index, incl.
   // shadow DOM), then CDP clips to it. Resolve the rect first, then hand it to the CDP
   // handler so a read_page/find ref works, not just a snapshot index.
@@ -218,10 +223,22 @@ async function dispatch({ action, params = {} }) {
   // route there when the debugger is attached. The content-script key dispatch ignores
   // modifiers entirely, so falling through to it would silently drop them and report
   // success — return a clear error instead so the caller knows to cdp_attach first.
-  if (action === "press_key" && Array.isArray(params.modifiers) && params.modifiers.length) {
+  // allowSynthetic:true opts out of CDP and uses the content-script path, which now
+  // reflects the modifiers on a synthetic KeyboardEvent. That works on a BACKGROUND tab
+  // (CDP key input does not — see requireForegroundForInput in cdp.js) and is enough for a
+  // page's own shortcut handler, but it never drives native editing (no real Cmd+A select).
+  if (action === "press_key" && Array.isArray(params.modifiers) && params.modifiers.length
+      && !params.allowSynthetic) {
     const tab = await targetTab(params);
     if (isAttached(tab.id)) return await handleCdp("press_key_cdp", params, tab.id);
-    return { ok: false, error: "modifiers require cdp_attach" };
+    return {
+      ok: false,
+      error:
+        "press_key with modifiers needs cdp_attach first (the CDP path delivers a real key " +
+        "event, incl. Mac editor commands like Cmd+A, but requires the tab to be in the " +
+        "foreground). For a background tab, pass allowSynthetic:true to dispatch a synthetic " +
+        "DOM event instead — page shortcut handlers fire, native editing does not.",
+    };
   }
 
   // CDP-backed commands (console/network/HAR/eval) operate on the target tab.
@@ -376,7 +393,7 @@ async function replay({ steps, startUrl, tabId } = {}) {
 // Time-only waits resolve here; selector/text waits poll in the content script.
 async function waitFor(params) {
   if (params.selector || params.text) return await toContent("wait_for", params);
-  const ms = params.timeoutMs || 1000;
+  const ms = params.timeoutMs ?? 1000;  // ?? so timeoutMs:0 means 'do not wait'
   await new Promise((r) => setTimeout(r, ms));
   return { ok: true, result: { waitedMs: ms } };
 }
@@ -472,6 +489,46 @@ async function readPdf(params) {
 // Per-command override: any command may carry params.tabId to act on THAT specific tab
 // for this one command WITHOUT touching the global pin. This lets several agents drive
 // different tabs concurrently (each passes its own tabId) instead of racing on one pin.
+// Commands that return page content or user state. If the pin has been lost (the target
+// tab was closed, the browser session ended, or the extension was reloaded), the
+// pin-on-first-touch rule would silently adopt whatever tab the user happens to be
+// looking at and hand its CONTENT back — which is how a read once landed on a personal
+// chat tab. Navigation/tab-management commands are excluded: they don't leak anything,
+// and requiring confirmation for them would break the "first command just works" model.
+const CONTENT_RETURNING = new Set([
+  "snapshot", "read_page", "find", "find_text", "get_page_content", "describe_element",
+  "a11y_snapshot", "screenshot", "capture_screenshot", "element_screenshot", "print_pdf",
+  "eval_js", "read_pdf", "get_cookies", "storage_get", "export_har", "get_console_logs",
+  "get_network_requests", "get_response_body", "net_get", "audit",
+]);
+
+// Refuse exactly once when a content-returning command would ride a FRESH auto-pin.
+// The tab is pinned as a side effect, so simply re-issuing the same command proceeds —
+// one extra round trip, and only on the first command after the pin was lost. Returns
+// null when there is nothing to guard.
+async function freshPinGuard(action, params) {
+  if (!CONTENT_RETURNING.has(action)) return null;
+  if (params && params.tabId != null) return null; // explicit target = a deliberate choice
+  if (targetTabId == null) {
+    const { targetTabId: saved } = await chrome.storage.session.get("targetTabId");
+    if (saved != null) targetTabId = saved;
+  }
+  if (targetTabId != null) {
+    try { await chrome.tabs.get(targetTabId); return null; } catch { unpinTarget(); }
+  }
+  const tab = await activeTab();
+  pinTarget(tab.id);
+  return {
+    ok: false,
+    error:
+      `no target tab was pinned, so '${action}' would have read whatever tab is focused ` +
+      `right now: ${tab.title || "(untitled)"} — ${tab.url}. That tab is NOW pinned, so ` +
+      `re-issue the same command to read it, or retarget first with switch_tab / navigate / ` +
+      `new_tab (or pass an explicit tabId). This guard fires only on the first ` +
+      `content-returning command after the pin was lost.`,
+  };
+}
+
 async function targetTab(params) {
   if (params && params.tabId != null) {
     const id = Number(params.tabId);
@@ -652,7 +709,7 @@ async function newTab({ url }) {
 // Put a tab into a labeled tab group so the user can see which tab the agent drives.
 // Defaults to the target tab. Grouping does NOT activate the tab, so this never steals
 // the user's focus. Also pins the grouped tab as the target.
-async function groupTab({ id, title = "aibc", color = "blue" } = {}) {
+async function groupTab({ id, title = "bctl", color = "blue" } = {}) {
   const tabId = id != null ? id : (await targetTab()).id;
   const groupId = await chrome.tabs.group({ tabIds: [tabId] });
   pinTarget(tabId); // pin (no activation) — before the title step so a titling failure can't skip it
