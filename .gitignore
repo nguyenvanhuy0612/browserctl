@@ -1,0 +1,13 @@
+node_modules/
+npm-debug.log*
+*.tgz
+
+# Local runtime artefacts
+.env
+*.log
+tests/**/artifacts/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/

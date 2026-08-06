@@ -73,5 +73,5 @@ Each new capability is three edits, no new architecture:
 
 ## When resumed
 
-Re-enter via `superpowers:brainstorming` to lock the scope (answer the perf-scope
-question above), then `superpowers:writing-plans`. Spec dir: `docs/superpowers/specs/`.
+Lock the scope first (answer the perf-scope question above), then write the plan.
+Design docs live in `docs/design/`.

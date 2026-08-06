@@ -280,7 +280,7 @@ tool. Add a redaction pass in `util.js` if pointing it at a shared/untrusted con
 Direction: match the official extension's control model, openly (no blocklist / org-lock /
 gating), agent stays external. Principle: **DOM-first, CDP-fallback** — structured work via
 the content script (no banner), CDP only for pixel input, background-tab capture, protocol
-capture, and CSP-bypass eval. See `docs/superpowers/specs/2026-06-30-claude-for-chrome-open-design.md`.
+capture, and CSP-bypass eval. See `docs/design/claude-for-chrome-open-design.md`.
 
 ### Background tab control
 - Target is **pinned on first touch** and held across user tab switches (see the target-tab

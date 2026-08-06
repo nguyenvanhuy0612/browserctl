@@ -97,9 +97,9 @@ cd mcp
 npm install
 # Register with Claude Code (run from anywhere; use the absolute path to mcp/index.js on this machine):
 # Windows:
-claude mcp add browserctl -- node "C:/Users/HUYNGUYEN/Documents/my_notes/claude/browserctl/mcp/index.js"
+claude mcp add browserctl -- node "C:/path/to/browserctl/mcp/index.js"
 # macOS:
-claude mcp add browserctl -- node "/Users/admin/Documents/my_notes/claude/browserctl/mcp/index.js"
+claude mcp add browserctl -- node "/path/to/browserctl/mcp/index.js"
 ```
 
 Or add it to a project's `.mcp.json`:
@@ -109,7 +109,7 @@ Or add it to a project's `.mcp.json`:
   "mcpServers": {
     "browserctl": {
       "command": "node",
-      "args": ["/absolute/path/to/my_notes/claude/browserctl/mcp/index.js"],
+      "args": ["/absolute/path/to/browserctl/mcp/index.js"],
       "env": { "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765" }
     }
   }

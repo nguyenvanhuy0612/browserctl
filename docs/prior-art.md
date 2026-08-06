@@ -124,77 +124,19 @@ Not an independent project: a decompiled, minified repackage of Anthropic's offi
 Web Store extension plus a `request.js` patch that reroutes the Anthropic API and OAuth
 through a third-party proxy (`openclaude.111724.xyz` / a Cloudflare worker). Copyright-
 infringing redistribution; routes API keys / OAuth / all model traffic through an unknown
-intermediary. Never run against any SecureAge or otherwise sensitive account. Reference
+intermediary. Never run it against a work or otherwise sensitive account. Reference
 value is only indirect (it reflects the official extension's hybrid design: CDP coordinate
 input + accessibility tree, side-panel agent loop, per-action permission gating with
 once/always/deny + a `highRisk` class, and an enterprise managed-policy URL blocklist) —
 and even that is filtered through minified bundles, so treat it as approximate.
 
-### Official extension internals (decompiled v1.0.66, git 2bdae70)
-Reverse-engineered from the `claude-for-chrome` bundles (beautified). **Provenance:** the
-*logic* is genuine Anthropic code; only the connection allowlist was swapped to third-party
-domains (`*.111724.xyz`, `cfc.aroic.workers.dev`) — the stock agent bridge is
-`wss://bridge.claudeusercontent.com/chrome/<token>`. File-name gotcha: the real code lives in
-`assets/mcpPermissions-*.js` (CDP transport + tool schema + screenshot pipeline + policy),
-`assets/accessibility-tree.js-*.js` (a11y tree, ~188 lines), `assets/sidepanel-*.js` (agent
-loop + action DSL + system prompt). Borrowable, roughly by value:
+### Official extension internals — analysis withheld
 
-1. **Token-budget screenshot sizing** (`mcpPermissions`). Instead of a fixed quality, they size
-   to the Anthropic vision tiling budget: `pxPerToken=28`, `maxTargetTokens=1568`, binary-search
-   the largest aspect-preserving size under budget, and do the downscale *inside* CDP via
-   `Page.captureScreenshot { clip.scale }` (JPEG q75, `captureBeyondViewport:false`,
-   `fromSurface:true`); re-encode stepping quality down by .05 to floor .1 if base64 > ~1.4MB.
-   **Refines our just-shipped #2** (we use flat q55→q30). Upgrade path if screenshot tokens matter.
-2. **`eval_js` / JS-result secret scrubber** (`mcpPermissions` ~3878). Before returning eval
-   results to the model, recursively sanitize: block keys matching
-   `password|token|secret|api[_-]?key|auth|credential|private[_-]?key|access[_-]?key|bearer|oauth|session`,
-   and block string *values* shaped like JWTs (`x.y.z`), base64 (`^[A-Za-z0-9+/]{20,}={0,2}$`),
-   hex creds (`^[a-f0-9]{32,}$`), or cookie/query strings. Caps depth 5 / array 100 / string 1000.
-   Keeps secrets out of context even when the model runs arbitrary JS. **We strip network/HAR
-   headers but `eval_js` returns raw values unfiltered — real gap. Strong candidate. Pending.**
-3. **Settle detection** (`mcpPermissions`): poll every 50ms on
-   `document.readyState === 'complete' && document.getAnimations().length === 0`. The
-   `getAnimations()` check catches CSS/JS animations that load/networkidle miss. Cheap upgrade for
-   `wait_for` / pre-screenshot settle. **Pending.**
-4. **Mid-action domain re-check** (`A()`): before each action, compare current hostname to the
-   expected one; abort with "Domain changed from X to Y" on mismatch. Cheap guard against
-   navigation races / mid-action redirects. Complements our target-tab pinning. **Pending.**
-5. **CDP click/type correctness** (`mcpPermissions`): click = `mouseMoved`→100ms→`mousePressed`
-   (12ms)→`mouseReleased` (button bitmask left=1/right=2/middle=4); type char-by-char with
-   `Input.insertText` fallback for emoji/IME/multibyte; on Mac, inject native editor `commands`
-   (`selectAll`/`undo`) on `dispatchKeyEvent` so `Cmd+A`/`Cmd+Z` actually fire. Our
-   `coordinate_click` is a bare press/release — borrow the move+sleep and the Mac-commands detail.
-6. **Live `ref` resolution** (`mcpPermissions`): ref clicks do `scrollIntoView({block:'center'})`,
-   force layout (`el.offsetHeight`), then click the bounding-rect center — never trust stale model
-   coordinates. Pairs with the WeakRef ref map (#3 above).
-7. **a11y tree as compact indented TEXT, not JSON** (`accessibility-tree.js`):
-   `textbox "Email" [ref_5] type="email"`; filter modes `all`/`interactive`; viewport-cull
-   (aria-hidden + visibility + off-screen via getBoundingClientRect); role inference fallback;
-   accessible-name cascade (`aria-label`→`placeholder`→`title`→`alt`→`<label for>`→value→text,
-   cap 100); depth cap 15, output cap 50000 chars with an *actionable* over-limit error telling
-   the model to reduce depth / pass `ref_id`. Cheaper than our JSON snapshot. Note: it does NOT
-   pierce shadow DOM / iframes (relies on `all_frames:true` per-frame injection) — if we pierce
-   in-process we're ahead.
-8. **Safety model is layered, not keyword-scored** (correcting the earlier guess): (a) coarse
-   permission grid keyed on **origin × tool-category** (`READ_PAGE_CONTENT`/`CLICK`/`TYPE`/
-   `EXECUTE_JAVASCRIPT`) with once/always/deny remembered per pair; (b) **remote** domain
-   categorization (`api.anthropic.com/.../domain_info`, 5-min cache) for org block decisions —
-   `highRisk` gates the *autonomous mode*, not individual clicks; (c) a verbatim `<security_rules>`
-   block in the system prompt (instructions only from user / never enter passwords-SSN-cards /
-   never bypass CAPTCHAs / confirm before downloads/messages). Reusable architecture if we add gating.
-9. **Enterprise `blockedUrlPatterns`** (`managed_schema.json` + matcher): normalize both sides
-   (strip scheme + `www.`, lowercase, bare domain → `<domain>/*`, glob `*`→`.*`), regex-test against
-   `hostname+pathname`; loaded from `chrome.storage.managed`, **hot-reloaded** via
-   `chrome.storage.onChanged`. Clean copyable spec + `forceLoginOrgUUID` org lock.
-10. **Compact line-DSL fast path** (`sidepanel`): one-token-per-action commands (`C x y`, `T text`,
-    `S dir amt x y`, `N url`, ...) terminated by `<<END>>`, so the model batches several actions per
-    turn against a single screenshot, with `{{platformModifier}}` templated per-OS. Bigger change,
-    but a strong latency/cost win over one JSON tool-call per step.
-
-Also noted (lower priority): `find` = an LLM ranking over the a11y text tree (vs CSS selectors);
-indicator-suppression around each action so the overlay never pollutes the screenshot/click; a
-throttled `Page.startScreencast` (100x100, q10, everyNthFrame 30) liveness preview.
-
+An earlier revision of this file summarised the internals of Anthropic's official
+Claude-in-Chrome extension, reconstructed from its shipped bundles. That analysis is not
+published here: it was derived from a commercial product's compiled code, and nothing in
+browserctl depends on it. Every design decision it touched is argued on its own merits
+elsewhere in this file.
 ---
 
 ## Update 2026-08-04: a correction, a missed class, and a function-level comparison

@@ -71,9 +71,9 @@ reconnects on change. Keep the host at the `127.0.0.1` default.
 ```bash
 cd mcp && npm install
 # macOS
-claude mcp add browserctl -- node "/Users/admin/Documents/my_notes/claude/browserctl/mcp/index.js"
+claude mcp add browserctl -- node "/path/to/browserctl/mcp/index.js"
 # Windows
-claude mcp add browserctl -- node "C:/Users/HUYNGUYEN/Documents/my_notes/claude/browserctl/mcp/index.js"
+claude mcp add browserctl -- node "C:/path/to/browserctl/mcp/index.js"
 ```
 
 Or in a project's `.mcp.json`:
