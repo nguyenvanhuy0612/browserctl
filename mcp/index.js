@@ -292,6 +292,8 @@ const CORE_TOOLS = new Set([
   "browser_navigate",
   "browser_click",
   "browser_type",
+  "browser_fill",
+  "browser_paste",
   "browser_scroll",
   "browser_hover",
   "browser_select_option",
@@ -499,23 +501,24 @@ server.registerTool(
       ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5', '@e1')"),
       selector: z.string().optional().describe("CSS selector (e.g. '#submit-btn')"),
       text: z.string().optional().describe("Match interactive element by visible text (e.g. 'Sign In')"),
+      waitFor: z.string().optional().describe("CSS selector to wait for after click (e.g. modal or textarea to appear)"),
       autoSettle: z.boolean().optional().describe("Wait for DOM mutations to settle after click (default true)"),
       settleMs: z.number().int().optional().describe("Settle timeout in ms (default 150)"),
     }).refine((v) => v.index !== undefined || v.ref !== undefined || v.selector !== undefined || v.text !== undefined, {
       message: "Provide at least one of 'ref', 'index', 'selector', or 'text'.",
     }),
   },
-  tool("click", async ({ index, ref, selector, text: t, autoSettle, settleMs }) =>
-    text(await callBridge("click", { index, ref, selector, text: t, autoSettle, settleMs }))
+  tool("click", async ({ index, ref, selector, text: t, waitFor, autoSettle, settleMs }) =>
+    text(await callBridge("click", { index, ref, selector, text: t, waitFor, autoSettle, settleMs }))
   )
 );
 
 server.registerTool(
   "browser_type",
   {
-    title: "Type into element",
+    title: "Type / Fill text into element",
     description:
-      "Focus an element (by 'ref', 'index', 'selector', or 'placeholder') and set its text. Set submit=true to press Enter afterward.",
+      "Instantly focus an element (by 'ref', 'index', 'selector', or 'placeholder') and set its text via native prototype setters (compatible with React/Vue v-model and rich-text contenteditable editors like ProseMirror/Tiptap), NOT slow keystroke simulation. Set submit=true to press Enter afterward.",
     inputSchema: z.object({
       index: z.number().int().optional().describe("Element index from browser_snapshot"),
       ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5', '@e1')"),
@@ -523,14 +526,65 @@ server.registerTool(
       placeholder: z.string().optional().describe("Match input by placeholder attribute"),
       text: z.string().describe("Text to enter"),
       submit: z.boolean().optional().describe("Press Enter after typing"),
+      waitFor: z.string().optional().describe("CSS selector to wait for after typing"),
       autoSettle: z.boolean().optional().describe("Wait for DOM mutations to settle after typing (default true)"),
       settleMs: z.number().int().optional().describe("Settle timeout in ms (default 100)"),
     }).refine((v) => v.index !== undefined || v.ref !== undefined || v.selector !== undefined || v.placeholder !== undefined, {
       message: "Provide at least one of 'ref', 'index', 'selector', or 'placeholder'.",
     }),
   },
-  tool("type", async ({ index, ref, selector, placeholder, text: t, submit, autoSettle, settleMs }) =>
-    text(await callBridge("type", { index, ref, selector, placeholder, text: t, submit, autoSettle, settleMs }))
+  tool("type", async ({ index, ref, selector, placeholder, text: t, submit, waitFor, autoSettle, settleMs }) =>
+    text(await callBridge("type", { index, ref, selector, placeholder, text: t, submit, waitFor, autoSettle, settleMs }))
+  )
+);
+
+server.registerTool(
+  "browser_fill",
+  {
+    title: "Fill text into input or rich-text editor",
+    description:
+      "High-level fill primitive: clears existing value and sets text instantly via native prototype setters and bubbling events. Fully compatible with Vue/React v-model and rich-text ProseMirror/Tiptap contenteditable editors.",
+    inputSchema: z.object({
+      index: z.number().int().optional().describe("Element index from browser_snapshot"),
+      ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5', '@e1')"),
+      selector: z.string().optional().describe("CSS selector (e.g. 'textarea.comment-box')"),
+      placeholder: z.string().optional().describe("Match input by placeholder attribute"),
+      text: z.string().describe("Text to enter"),
+      submit: z.boolean().optional().describe("Press Enter after filling"),
+      waitFor: z.string().optional().describe("CSS selector to wait for after filling"),
+      autoSettle: z.boolean().optional().describe("Wait for DOM mutations to settle (default true)"),
+      settleMs: z.number().int().optional().describe("Settle timeout in ms (default 100)"),
+    }).refine((v) => v.index !== undefined || v.ref !== undefined || v.selector !== undefined || v.placeholder !== undefined, {
+      message: "Provide at least one of 'ref', 'index', 'selector', or 'placeholder'.",
+    }),
+  },
+  tool("fill", async ({ index, ref, selector, placeholder, text: t, submit, waitFor, autoSettle, settleMs }) =>
+    text(await callBridge("fill", { index, ref, selector, placeholder, text: t, submit, waitFor, autoSettle, settleMs }))
+  )
+);
+
+server.registerTool(
+  "browser_paste",
+  {
+    title: "Paste text / Markdown into element",
+    description:
+      "Paste text or multi-line Markdown into a target element or rich-text editor (Tiptap/ProseMirror/Quill) by simulating native Clipboard events. Ideal for inserting large payloads without keystroke lag or breaking editor AST.",
+    inputSchema: z.object({
+      index: z.number().int().optional().describe("Element index from browser_snapshot"),
+      ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5', '@e1')"),
+      selector: z.string().optional().describe("CSS selector"),
+      placeholder: z.string().optional().describe("Match input by placeholder attribute"),
+      text: z.string().describe("Text or Markdown content to paste"),
+      submit: z.boolean().optional().describe("Press Enter after pasting"),
+      waitFor: z.string().optional().describe("CSS selector to wait for after pasting"),
+      autoSettle: z.boolean().optional().describe("Wait for DOM mutations to settle (default true)"),
+      settleMs: z.number().int().optional().describe("Settle timeout in ms (default 150)"),
+    }).refine((v) => v.index !== undefined || v.ref !== undefined || v.selector !== undefined || v.placeholder !== undefined, {
+      message: "Provide at least one of 'ref', 'index', 'selector', or 'placeholder'.",
+    }),
+  },
+  tool("paste", async ({ index, ref, selector, placeholder, text: t, submit, waitFor, autoSettle, settleMs }) =>
+    text(await callBridge("paste", { index, ref, selector, placeholder, text: t, submit, waitFor, autoSettle, settleMs }))
   )
 );
 

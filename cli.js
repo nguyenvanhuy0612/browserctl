@@ -70,6 +70,7 @@ Interaction:
   browserctl click <target>             Click element (@e1, ref_1, 0, --text "...", --selector "...")
   browserctl dblclick <target>          Double-click element
   browserctl fill <target> <text>       Clear input and fill text (@e1, ref_1, --placeholder "...")
+  browserctl paste <target> <text>      Paste text/markdown into field or rich-text editor
   browserctl type <target> <text>       Type into input field (appends/types text)
   browserctl clear <target>             Clear input/textarea field
   browserctl check <target>             Check checkbox or radio button
@@ -562,6 +563,8 @@ async function main() {
             params.text = args[++i];
           } else if (args[i] === "--selector" && args[i + 1]) {
             params.selector = args[++i];
+          } else if (args[i] === "--wait-for" && args[i + 1]) {
+            params.waitFor = args[++i];
           } else {
             parseTarget(args[i], params);
           }
@@ -570,6 +573,7 @@ async function main() {
         break;
       }
 
+      case "paste":
       case "type": {
         let i = 0;
         let textArg = null;
@@ -578,6 +582,8 @@ async function main() {
             params.placeholder = args[++i];
           } else if (args[i] === "--selector" && args[i + 1]) {
             params.selector = args[++i];
+          } else if (args[i] === "--wait-for" && args[i + 1]) {
+            params.waitFor = args[++i];
           } else if (args[i] === "--submit") {
             params.submit = true;
           } else if (!params.ref && !params.index && !params.selector && !params.placeholder) {
@@ -816,6 +822,10 @@ async function main() {
     }
     if (result?.typed) {
       console.log(`Typed into ${result.typed}`);
+      return;
+    }
+    if (result?.pasted) {
+      console.log(`Pasted into ${result.pasted} (${result.length || 0} chars)`);
       return;
     }
     if (result?.cleared) {

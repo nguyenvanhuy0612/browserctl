@@ -29,6 +29,8 @@ const CONTENT_ACTIONS = [
   "storage_remove",
   "storage_clear",
   "get_property",
+  "fill",
+  "paste",
   "clear",
   "check",
   "uncheck",

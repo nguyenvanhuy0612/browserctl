@@ -87,6 +87,7 @@ test("CLI: prints full subcommands in help output", async () => {
   const { stdout } = await execFileAsync(process.execPath, [cliPath, "--help"]);
   assert.ok(stdout.includes("browserctl get"));
   assert.ok(stdout.includes("browserctl fill"));
+  assert.ok(stdout.includes("browserctl paste"));
   assert.ok(stdout.includes("browserctl clear"));
   assert.ok(stdout.includes("browserctl check"));
   assert.ok(stdout.includes("browserctl select"));

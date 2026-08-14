@@ -128,7 +128,8 @@ browserctl get attr @e1 href              # Get element attribute
 # Interaction & Form Utilities
 browserctl click @e1                      # Click by ref (@e1, ref_1, 0)
 browserctl click --text "Sign In"         # Click by visible text
-browserctl fill @e1 "my query"            # Clear input and fill text
+browserctl fill @e1 "my query"            # Clear input and fill text (React/Vue v-model compatible)
+browserctl paste @e1 "markdown content"   # Paste multi-line text into inputs or rich-text editors (ProseMirror/Tiptap)
 browserctl type @e2 "appended text"       # Type into input field
 browserctl clear @e1                      # Clear input field
 browserctl check @e3                      # Check checkbox / radio button
@@ -137,6 +138,8 @@ browserctl select @e4 "value"             # Select dropdown option
 browserctl hover @e1                      # Hover element
 browserctl focus @e1                      # Focus element
 browserctl scroll down 400                # Scroll page
+
+> **Form & Rich-Text Compatibility**: `fill`, `type`, and `paste` inject values instantly via native prototype setters (fully compatible with React/Vue `v-model`) and seamlessly handle rich-text `contenteditable` editors (ProseMirror, Tiptap, Quill, Lexical). When multiple forms coexist on a page, always target elements by their stable `@ref` from `snapshot` to avoid selector ambiguity.
 
 # Synchronization & Timing
 browserctl wait 2000                      # Sleep for 2000 ms
@@ -186,12 +189,16 @@ If the daemon was explicitly stopped (via `browser_stop` tool or `browserctl sto
 auto-start is suppressed until the agent calls `browser_start`.
 
 ### Token Optimization & Profiles
-By default, `browserctl` runs with `BROWSERCTL_MCP_PROFILE="core"` which exposes ~22 core tools plus `browser_action` (a universal dispatcher tool), saving ~10,000 system prompt tokens. To register all 70+ granular tools, set `BROWSERCTL_MCP_PROFILE="all"`.
+By default, `browserctl` runs with `BROWSERCTL_MCP_PROFILE="core"` which exposes ~24 core tools plus `browser_action` (a universal dispatcher tool), saving ~10,000 system prompt tokens. To register all 70+ granular tools, set `BROWSERCTL_MCP_PROFILE="all"`.
 
-### MCP Lifecycle Tools
+### MCP Core Interaction Tools
 
 | Tool | Description |
 |---|---|
+| `browser_click` | Click element by ref/index/selector/text (supports `waitFor` selector) |
+| `browser_fill` | Fill input or rich-text editor (ProseMirror/Tiptap/Vue/React) |
+| `browser_paste` | Paste large text/Markdown via Clipboard events without AST corruption |
+| `browser_type` | Focus element and set text (React/Vue `v-model` compatible) |
 | `browser_start` | Start bridge daemon in background if stopped |
 | `browser_stop` | Stop bridge daemon (records explicit stopped state) |
 | `browser_status` | Check bridge health, daemon state, extension connection |

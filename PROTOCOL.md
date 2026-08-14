@@ -117,7 +117,13 @@ Returns `{ url }` once loaded.
 
 ### `type`
 `params: { ref?, index?, selector?, placeholder?, text, submit?, autoSettle?: true, settleMs?: 100 }` - focus the element, set its value to `text`
-(firing input/change events). If `submit: true`, presses Enter afterward. Automatically waits for DOM mutations to settle.
+(firing input/change events). If `submit: true`, presses Enter afterward. Automatically waits for DOM mutations to settle. Supports `waitFor` to await a selector after typing.
+
+### `paste`
+`params: { ref?, index?, selector?, text, placeholder?, submit?, waitFor?, autoSettle?: true, settleMs?: 150 }` - paste multi-line text or Markdown into input or rich-text editor (ProseMirror, Tiptap, Quill, Lexical) via simulated Clipboard events without breaking editor AST structure.
+
+### `fill`
+Alias for `type` — clears existing value and sets new text via native prototype setters (compatible with React/Vue `v-model` and rich-text editors).
 
 ### `hover`
 `params: { ref?, index?, selector?, text?, autoSettle?: true, settleMs?: 50 }` - hover over target element.

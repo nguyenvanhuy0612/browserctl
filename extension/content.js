@@ -585,39 +585,106 @@
     return out;
   }
 
-  async function type({ index, ref, selector, text, placeholder, submit, autoSettle = true, settleMs = 100 } = {}) {
-    const el = resolveTarget({ index, ref, selector, placeholder });
-    const warning = actionability(el);
-    el.scrollIntoView({ block: "center", inline: "center" });
+  function insertIntoEditable(el, text, { paste = false } = {}) {
     el.focus();
     const inputType = el.tagName === "INPUT" ? (el.type || "").toLowerCase() : "";
     if (inputType === "checkbox" || inputType === "radio") {
-      // Setting .value on a checkbox/radio has no visible effect (it just changes the
-      // submitted value, not the checked state) and reporting success would be
-      // misleading — set .checked instead, interpreting text as a truthy string.
       el.checked = /^(true|1|yes|on|checked)$/i.test(String(text).trim());
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
-    } else if ("value" in el) {
+      return;
+    }
+
+    if (el.isContentEditable) {
+      // For rich-text editors (ProseMirror, Tiptap, Quill, Lexical, Draft.js):
+      // 1. Select all existing content so insertion acts cleanly
+      try {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      } catch {}
+
+      // 2. Try native insertText command (which triggers editor AST transactions natively)
+      let inserted = false;
+      try {
+        inserted = document.execCommand("insertText", false, text);
+      } catch {}
+
+      // 3. If insertText was unsupported or if paste was explicitly requested, dispatch ClipboardEvent
+      if (!inserted || paste) {
+        try {
+          const dt = new DataTransfer();
+          dt.setData("text/plain", text);
+          const pasteEvent = new ClipboardEvent("paste", {
+            clipboardData: dt,
+            bubbles: true,
+            cancelable: true,
+          });
+          el.dispatchEvent(pasteEvent);
+        } catch {}
+      }
+
+      // 4. Fallback: if element is still empty after commands, assign textContent
+      if (!el.textContent && text) {
+        el.textContent = text;
+      }
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return;
+    }
+
+    if ("value" in el) {
       setNativeValue(el, text);
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
-    } else if (el.isContentEditable) {
-      el.textContent = text;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    } else {
-      throw new Error("target element is not editable");
+      return;
     }
+
+    throw new Error("target element is not editable");
+  }
+
+  async function type({ index, ref, selector, text = "", placeholder, submit, waitFor, autoSettle = true, settleMs = 100 } = {}) {
+    const el = resolveTarget({ index, ref, selector, placeholder });
+    const warning = actionability(el);
+    el.scrollIntoView({ block: "center", inline: "center" });
+    insertIntoEditable(el, text, { paste: false });
     if (submit) {
       const opts = { bubbles: true, cancelable: true, key: "Enter", code: "Enter", keyCode: 13 };
       el.dispatchEvent(new KeyboardEvent("keydown", opts));
       el.dispatchEvent(new KeyboardEvent("keyup", opts));
       if (el.form) el.form.requestSubmit?.();
     }
+    if (waitFor) {
+      await wait_for({ selector: waitFor, timeoutMs: 5000 }).catch(() => {});
+    }
     if (autoSettle && settleMs > 0) {
       await wait_settle({ timeoutMs: settleMs });
     }
     const out = { typed: ref != null ? ref : (selector || placeholder || index) };
+    if (warning) out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
+    return out;
+  }
+
+  async function paste({ index, ref, selector, text = "", placeholder, submit, waitFor, autoSettle = true, settleMs = 150 } = {}) {
+    const el = resolveTarget({ index, ref, selector, placeholder });
+    const warning = actionability(el);
+    el.scrollIntoView({ block: "center", inline: "center" });
+    insertIntoEditable(el, text, { paste: true });
+    if (submit) {
+      const opts = { bubbles: true, cancelable: true, key: "Enter", code: "Enter", keyCode: 13 };
+      el.dispatchEvent(new KeyboardEvent("keydown", opts));
+      el.dispatchEvent(new KeyboardEvent("keyup", opts));
+      if (el.form) el.form.requestSubmit?.();
+    }
+    if (waitFor) {
+      await wait_for({ selector: waitFor, timeoutMs: 5000 }).catch(() => {});
+    }
+    if (autoSettle && settleMs > 0) {
+      await wait_settle({ timeoutMs: settleMs });
+    }
+    const out = { pasted: ref != null ? ref : (selector || placeholder || index), length: text.length };
     if (warning) out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
     return out;
   }
@@ -876,17 +943,7 @@
     const el = deepQuery(selector);
     if (!el) throw new Error("no element matches " + selector);
     const warning = actionability(el);
-    el.focus();
-    if ("value" in el) {
-      setNativeValue(el, value);
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-    } else if (el.isContentEditable) {
-      el.textContent = value;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    } else {
-      throw new Error(selector + " is not editable");
-    }
+    insertIntoEditable(el, value, { paste: false });
     const out = { filled: selector };
     if (warning) out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
     return out;
@@ -1125,6 +1182,8 @@
     record_start,
     record_stop,
     get_property,
+    paste,
+    fill: type,
     clear: clear_input,
     check: (params) => set_checked({ ...params, checked: true }),
     uncheck: (params) => set_checked({ ...params, checked: false }),
