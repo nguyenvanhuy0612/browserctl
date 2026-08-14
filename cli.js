@@ -125,6 +125,7 @@ async function startBridgeDaemon() {
   const child = spawn(process.execPath, [serverPath], {
     detached: true,
     stdio: "ignore",
+    windowsHide: true,
     env: { ...process.env, PORT: "8765" },
   });
   child.unref();
@@ -142,14 +143,27 @@ async function startBridgeDaemon() {
 
 function stopBridgeDaemon() {
   try {
-    const pids = execSync("lsof -ti :8765 -sTCP:LISTEN", { encoding: "utf8" })
-      .trim()
-      .split("\n")
-      .filter(Boolean);
-    for (const pid of pids) {
-      process.kill(parseInt(pid, 10), "SIGTERM");
+    if (process.platform === "win32") {
+      const out = execSync("netstat -ano | findstr :8765", { encoding: "utf8" });
+      const lines = out.trim().split("\n");
+      for (const line of lines) {
+        const parts = line.trim().split(/\s+/);
+        const pid = parts[parts.length - 1];
+        if (/^\d+$/.test(pid) && pid !== "0") {
+          try { execSync(`taskkill /F /PID ${pid}`); } catch {}
+        }
+      }
+      return true;
+    } else {
+      const pids = execSync("lsof -ti :8765 -sTCP:LISTEN", { encoding: "utf8" })
+        .trim()
+        .split("\n")
+        .filter(Boolean);
+      for (const pid of pids) {
+        process.kill(parseInt(pid, 10), "SIGTERM");
+      }
+      return pids.length > 0;
     }
-    return pids.length > 0;
   } catch {
     return false;
   }

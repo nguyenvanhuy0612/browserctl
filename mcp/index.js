@@ -8,10 +8,17 @@
 //   claude mcp add browserctl -- node /abs/path/to/browserctl/mcp/index.js
 // or add to .mcp.json (see README).
 
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import fs from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 function envStr(name, fallback) {
   const raw = process.env[name];
@@ -21,6 +28,46 @@ function envStr(name, fallback) {
 // BRIDGE_URL is the legacy name, still honoured so existing configs keep working.
 const BRIDGE_URL = envStr("BROWSERCTL_BRIDGE_URL", envStr("BRIDGE_URL", "http://127.0.0.1:8765"));
 
+async function isBridgeRunning() {
+  try {
+    const res = await fetch(`${BRIDGE_URL}/status`, { signal: AbortSignal.timeout(600) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function startBridgeDaemon() {
+  const serverPath = join(__dirname, "..", "bridge", "server.js");
+  if (!fs.existsSync(serverPath)) return false;
+
+  const child = spawn(process.execPath, [serverPath], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    env: { ...process.env, PORT: "8765" },
+  });
+  child.unref();
+
+  const start = Date.now();
+  while (Date.now() - start < 2500) {
+    await new Promise((r) => setTimeout(r, 100));
+    if (await isBridgeRunning()) return true;
+  }
+  return false;
+}
+
+let bridgeEnsured = false;
+async function ensureBridge() {
+  if (bridgeEnsured) return;
+  if (await isBridgeRunning()) {
+    bridgeEnsured = true;
+    return;
+  }
+  await startBridgeDaemon();
+  bridgeEnsured = true;
+}
+
 // Carries the per-call tabId (if the tool was invoked with one) down to callBridge
 // without every build having to thread it through explicitly. AsyncLocalStorage keeps
 // this isolated per async call chain, so concurrent tool invocations (e.g. several
@@ -29,6 +76,7 @@ const tabStore = new AsyncLocalStorage();
 
 // POST a command to the bridge and return its result, throwing on failure.
 async function callBridge(action, params = {}) {
+  await ensureBridge();
   const tabId = tabStore.getStore();
   if (tabId != null && params.tabId == null) params = { ...params, tabId };
   let res;
@@ -39,9 +87,18 @@ async function callBridge(action, params = {}) {
       body: JSON.stringify({ action, params }),
     });
   } catch (err) {
-    throw new Error(
-      `cannot reach bridge at ${BRIDGE_URL} (is 'npm start' running in bridge/?): ${err.message}`
-    );
+    await ensureBridge();
+    try {
+      res = await fetch(`${BRIDGE_URL}/command`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action, params }),
+      });
+    } catch (retryErr) {
+      throw new Error(
+        `cannot reach bridge at ${BRIDGE_URL}: ${retryErr.message}`
+      );
+    }
   }
   const data = await res.json().catch(() => ({}));
   if (!data.ok) throw new Error(data.error || `command '${action}' failed (HTTP ${res.status})`);
@@ -1141,4 +1198,5 @@ server.registerTool(
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+ensureBridge().catch(() => {});
 console.error(`browserctl MCP server running (bridge: ${BRIDGE_URL})`);
