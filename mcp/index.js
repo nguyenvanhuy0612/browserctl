@@ -25,47 +25,76 @@ function envStr(name, fallback) {
   return raw !== undefined && raw !== "" ? raw : fallback;
 }
 
-// BRIDGE_URL is the legacy name, still honoured so existing configs keep working.
 const BRIDGE_URL = envStr("BROWSERCTL_BRIDGE_URL", envStr("BRIDGE_URL", "http://127.0.0.1:8765"));
+
+let isStartingDaemon = null;
+let lastSpawnAttempt = 0;
+let spawnFailCount = 0;
+const SPAWN_COOLDOWN_MS = 5000; // 5s cooldown after repeated failures
 
 async function isBridgeRunning() {
   try {
     const res = await fetch(`${BRIDGE_URL}/status`, { signal: AbortSignal.timeout(600) });
-    return res.ok;
+    if (res.ok) {
+      spawnFailCount = 0;
+      return true;
+    }
+    return false;
   } catch {
     return false;
   }
 }
 
 async function startBridgeDaemon() {
-  const serverPath = join(__dirname, "..", "bridge", "server.js");
-  if (!fs.existsSync(serverPath)) return false;
+  if (isStartingDaemon) return isStartingDaemon;
 
-  const child = spawn(process.execPath, [serverPath], {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true,
-    env: { ...process.env, PORT: "8765" },
-  });
-  child.unref();
-
-  const start = Date.now();
-  while (Date.now() - start < 2500) {
-    await new Promise((r) => setTimeout(r, 100));
-    if (await isBridgeRunning()) return true;
+  const now = Date.now();
+  if (spawnFailCount >= 3 && now - lastSpawnAttempt < SPAWN_COOLDOWN_MS) {
+    return false;
   }
-  return false;
+
+  isStartingDaemon = (async () => {
+    lastSpawnAttempt = Date.now();
+    const serverPath = join(__dirname, "..", "bridge", "server.js");
+    if (!fs.existsSync(serverPath)) {
+      spawnFailCount++;
+      return false;
+    }
+
+    try {
+      const child = spawn(process.execPath, [serverPath], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+        env: { ...process.env, PORT: "8765" },
+      });
+      child.unref();
+
+      // Poll up to 2.5s (max 25 iterations of 100ms) with hard bounded loop
+      const start = Date.now();
+      while (Date.now() - start < 2500) {
+        await new Promise((r) => setTimeout(r, 100));
+        if (await isBridgeRunning()) {
+          spawnFailCount = 0;
+          return true;
+        }
+      }
+      spawnFailCount++;
+      return false;
+    } catch {
+      spawnFailCount++;
+      return false;
+    } finally {
+      isStartingDaemon = null;
+    }
+  })();
+
+  return isStartingDaemon;
 }
 
-let bridgeEnsured = false;
 async function ensureBridge() {
-  if (bridgeEnsured) return;
-  if (await isBridgeRunning()) {
-    bridgeEnsured = true;
-    return;
-  }
-  await startBridgeDaemon();
-  bridgeEnsured = true;
+  if (await isBridgeRunning()) return true;
+  return await startBridgeDaemon();
 }
 
 // Carries the per-call tabId (if the tool was invoked with one) down to callBridge
@@ -74,35 +103,39 @@ async function ensureBridge() {
 // agents each driving a different tab) never see each other's tabId.
 const tabStore = new AsyncLocalStorage();
 
-// POST a command to the bridge and return its result, throwing on failure.
+// POST a command to the bridge with strict 1-retry bound and per-request timeout.
 async function callBridge(action, params = {}) {
-  await ensureBridge();
   const tabId = tabStore.getStore();
   if (tabId != null && params.tabId == null) params = { ...params, tabId };
-  let res;
-  try {
-    res = await fetch(`${BRIDGE_URL}/command`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action, params }),
-    });
-  } catch (err) {
-    await ensureBridge();
+
+  const maxAttempts = 2; // Strict bound: at most 2 attempts (1 initial + 1 auto-restart retry)
+  let lastErr = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (attempt > 1) {
+      await ensureBridge();
+    }
     try {
-      res = await fetch(`${BRIDGE_URL}/command`, {
+      const timeoutMs = (params.timeoutMs ? params.timeoutMs + 5000 : 65000);
+      const res = await fetch(`${BRIDGE_URL}/command`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ action, params }),
+        signal: AbortSignal.timeout(timeoutMs),
       });
-    } catch (retryErr) {
-      throw new Error(
-        `cannot reach bridge at ${BRIDGE_URL}: ${retryErr.message}`
-      );
+      const data = await res.json().catch(() => ({}));
+      if (!data.ok) throw new Error(data.error || `command '${action}' failed (HTTP ${res.status})`);
+      return data.result;
+    } catch (err) {
+      lastErr = err;
+      if (attempt === 1) {
+        // First failure: ensure daemon is running and retry exactly once
+        await ensureBridge();
+      }
     }
   }
-  const data = await res.json().catch(() => ({}));
-  if (!data.ok) throw new Error(data.error || `command '${action}' failed (HTTP ${res.status})`);
-  return data.result;
+
+  throw new Error(`cannot reach bridge at ${BRIDGE_URL}: ${lastErr?.message || "connection failed"}`);
 }
 
 function text(obj) {

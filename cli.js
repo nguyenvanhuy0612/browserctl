@@ -107,6 +107,8 @@ Environment:
 `);
 }
 
+let isStartingDaemon = null;
+
 async function isBridgeRunning() {
   try {
     const res = await fetch(`${BRIDGE_URL}/status`, { signal: AbortSignal.timeout(600) });
@@ -117,28 +119,36 @@ async function isBridgeRunning() {
 }
 
 async function startBridgeDaemon() {
-  const serverPath = join(__dirname, "bridge", "server.js");
-  if (!fs.existsSync(serverPath)) {
-    throw new Error(`Bridge server not found at: ${serverPath}`);
-  }
+  if (isStartingDaemon) return isStartingDaemon;
 
-  const child = spawn(process.execPath, [serverPath], {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true,
-    env: { ...process.env, PORT: "8765" },
-  });
-  child.unref();
+  isStartingDaemon = (async () => {
+    const serverPath = join(__dirname, "bridge", "server.js");
+    if (!fs.existsSync(serverPath)) return false;
 
-  // Poll up to 2.5s for bridge to become ready
-  const start = Date.now();
-  while (Date.now() - start < 2500) {
-    await new Promise((r) => setTimeout(r, 100));
-    if (await isBridgeRunning()) {
-      return true;
+    try {
+      const child = spawn(process.execPath, [serverPath], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+        env: { ...process.env, PORT: "8765" },
+      });
+      child.unref();
+
+      // Poll up to 2.5s (bounded 25 x 100ms)
+      const start = Date.now();
+      while (Date.now() - start < 2500) {
+        await new Promise((r) => setTimeout(r, 100));
+        if (await isBridgeRunning()) return true;
+      }
+      return false;
+    } catch {
+      return false;
+    } finally {
+      isStartingDaemon = null;
     }
-  }
-  return false;
+  })();
+
+  return isStartingDaemon;
 }
 
 function stopBridgeDaemon() {
