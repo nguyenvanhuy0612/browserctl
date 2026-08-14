@@ -786,10 +786,17 @@ export async function handleCdp(action, params, tabId) {
 
     case "print_pdf": {
       // printToPDF is normally headless-only, but Edge/Chrome support it via CDP
-      // for the active page. If it errors, the send() rejection propagates.
-      requireSession(tabId);
-      const res = await send(tabId, "Page.printToPDF", { printBackground: true });
-      return { ok: true, result: { base64: res.data } };
+      // for the active page. Auto-attach if not already attached.
+      const needAttach = !sessions[tabId];
+      if (needAttach) await attach(tabId);
+      try {
+        const res = await send(tabId, "Page.printToPDF", { printBackground: true });
+        return { ok: true, result: { base64: res.data } };
+      } finally {
+        if (needAttach) {
+          try { await detach(tabId); } catch {}
+        }
+      }
     }
 
     case "audit": {

@@ -36,3 +36,24 @@ test("MCP: core profile filters tools and registers browser_action", async () =>
   const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]);
   assert.ok(stdout.includes("MCP_OK"));
 });
+
+test("CLI: wait ms sleeps locally and returns waitedMs", async () => {
+  const start = Date.now();
+  const { stdout } = await execFileAsync(process.execPath, [cliPath, "wait", "100"]);
+  const elapsed = Date.now() - start;
+  const data = JSON.parse(stdout);
+  assert.ok(data.ok);
+  assert.equal(data.waitedMs, 100);
+  assert.ok(elapsed >= 90);
+});
+
+test("CLI: prints full subcommands in help output", async () => {
+  const { stdout } = await execFileAsync(process.execPath, [cliPath, "--help"]);
+  assert.ok(stdout.includes("browserctl get"));
+  assert.ok(stdout.includes("browserctl fill"));
+  assert.ok(stdout.includes("browserctl clear"));
+  assert.ok(stdout.includes("browserctl check"));
+  assert.ok(stdout.includes("browserctl select"));
+  assert.ok(stdout.includes("browserctl wait"));
+  assert.ok(stdout.includes("browserctl pdf"));
+});

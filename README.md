@@ -93,18 +93,46 @@ or the Extensions page -> Details -> Extension options) and stored in
 browserctl status                         # Check bridge and extension connectivity
 browserctl start                          # Start bridge daemon in background
 browserctl stop                           # Stop bridge daemon
+browserctl restart                        # Restart bridge daemon
 
-# Navigation & Inspection
+# Navigation & History
 browserctl open https://github.com        # Navigate target tab (alias: navigate)
+browserctl back | forward | reload        # History navigation
+
+# Inspection & Fast Property Queries (get)
 browserctl snapshot --compact             # Token-efficient DOM snapshot (saves 75% tokens)
 browserctl read_page                      # Read accessibility tree with refs
+browserctl get title                      # Get page title
+browserctl get url                        # Get page URL
+browserctl get text @e1                   # Get visible text of element
+browserctl get value @e1                  # Get input/textarea value
+browserctl get attr @e1 href              # Get element attribute
 
-# Interaction
+# Interaction & Form Utilities
 browserctl click @e1                      # Click by ref (@e1, ref_1, 0)
-browserctl click --text "Sign In"         # Click by visible button/link text
-browserctl type @e2 "my search query"     # Type into input field
-browserctl type --placeholder "Search" "q" --submit
-browserctl eval "document.title"          # Run JavaScript
+browserctl click --text "Sign In"         # Click by visible text
+browserctl fill @e1 "my query"            # Clear input and fill text
+browserctl type @e2 "appended text"       # Type into input field
+browserctl clear @e1                      # Clear input field
+browserctl check @e3                      # Check checkbox / radio button
+browserctl uncheck @e3                    # Uncheck checkbox
+browserctl select @e4 "value"             # Select dropdown option
+browserctl hover @e1                      # Hover element
+browserctl focus @e1                      # Focus element
+browserctl scroll down 400                # Scroll page
+
+# Synchronization & Timing
+browserctl wait 2000                      # Sleep for 2000 ms
+browserctl wait @e1                       # Wait for element to appear
+browserctl wait --text "Welcome"          # Wait for text to appear
+browserctl wait --network-idle            # Wait for network idle
+browserctl wait --settle                  # Wait for DOM mutations to settle
+
+# Capture, Export & JavaScript
+browserctl screenshot page.png [-f]       # Capture viewport or fullpage screenshot to file
+browserctl pdf document.pdf               # Print page to PDF file directly
+browserctl eval -r "document.title"       # Run JS and output raw value to stdout
+browserctl tab [list|new|switch|close]    # Manage browser tabs
 ```
 
 ## Using it via Model Context Protocol (MCP)

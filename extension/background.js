@@ -28,6 +28,13 @@ const CONTENT_ACTIONS = [
   "storage_set",
   "storage_remove",
   "storage_clear",
+  "get_property",
+  "clear",
+  "check",
+  "uncheck",
+  "dblclick",
+  "focus",
+  "scrollintoview",
 ];
 
 // Recorded interaction steps, accumulated from the content recorder (record_start).

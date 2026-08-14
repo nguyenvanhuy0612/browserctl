@@ -1018,6 +1018,88 @@
     return { recording: false };
   }
 
+  function get_property({ property, ref, index, selector, text, placeholder, attr } = {}) {
+    if (property === "title") return { property: "title", value: document.title };
+    if (property === "url") return { property: "url", value: location.href };
+
+    const hasTarget = ref !== undefined || index !== undefined || selector !== undefined || text !== undefined || placeholder !== undefined;
+    const el = hasTarget ? resolveTarget({ ref, index, selector, text, placeholder }) : document.documentElement;
+
+    switch (property) {
+      case "text":
+        return { property: "text", value: (el.innerText || el.textContent || "").trim() };
+      case "value":
+        return { property: "value", value: el.value !== undefined ? el.value : (el.innerText || "") };
+      case "html":
+        return { property: "html", value: el.outerHTML || "" };
+      case "attr":
+        return { property: "attr", name: attr, value: attr ? el.getAttribute(attr) : null };
+      case "box": {
+        const r = el.getBoundingClientRect();
+        return { property: "box", x: r.x, y: r.y, width: r.width, height: r.height };
+      }
+      case "count":
+        return { property: "count", value: selector ? deepQueryAll(selector).length : 1 };
+      default:
+        throw new Error(`unknown property "${property}"`);
+    }
+  }
+
+  function clear_input({ index, ref, selector, placeholder, autoSettle = true, settleMs = 100 } = {}) {
+    const el = resolveTarget({ index, ref, selector, placeholder });
+    const warning = actionability(el);
+    el.scrollIntoView({ block: "center", inline: "center" });
+    el.focus();
+    if ("value" in el) {
+      setNativeValue(el, "");
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    } else if (el.isContentEditable) {
+      el.textContent = "";
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    } else {
+      throw new Error("target element is not editable");
+    }
+    const out = { cleared: ref != null ? ref : (selector || placeholder || index) };
+    if (warning) out.warning = `element is not visible (${warning})`;
+    return out;
+  }
+
+  function set_checked({ index, ref, selector, text, checked = true, autoSettle = true, settleMs = 100 } = {}) {
+    const el = resolveTarget({ index, ref, selector, text });
+    const warning = actionability(el);
+    el.scrollIntoView({ block: "center", inline: "center" });
+    el.checked = !!checked;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    const out = { [checked ? "checked" : "unchecked"]: ref != null ? ref : (selector || text || index) };
+    if (warning) out.warning = `element is not visible (${warning})`;
+    return out;
+  }
+
+  function dblclick_element({ index, ref, selector, text } = {}) {
+    const el = resolveTarget({ index, ref, selector, text });
+    const warning = actionability(el);
+    el.scrollIntoView({ block: "center", inline: "center" });
+    el.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+    const out = { dblclicked: ref != null ? ref : (selector || text || index) };
+    if (warning) out.warning = `element is not visible (${warning})`;
+    return out;
+  }
+
+  function focus_element({ index, ref, selector, text, placeholder } = {}) {
+    const el = resolveTarget({ index, ref, selector, text, placeholder });
+    el.scrollIntoView({ block: "center", inline: "center" });
+    el.focus();
+    return { focused: ref != null ? ref : (selector || placeholder || text || index) };
+  }
+
+  function scroll_into_view({ index, ref, selector, text, placeholder } = {}) {
+    const el = resolveTarget({ index, ref, selector, text, placeholder });
+    el.scrollIntoView({ block: "center", inline: "center" });
+    return { scrolledIntoView: ref != null ? ref : (selector || placeholder || text || index) };
+  }
+
   const handlers = {
     snapshot,
     read_page,
@@ -1042,6 +1124,13 @@
     storage_clear,
     record_start,
     record_stop,
+    get_property,
+    clear: clear_input,
+    check: (params) => set_checked({ ...params, checked: true }),
+    uncheck: (params) => set_checked({ ...params, checked: false }),
+    dblclick: dblclick_element,
+    focus: focus_element,
+    scrollintoview: scroll_into_view,
   };
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
