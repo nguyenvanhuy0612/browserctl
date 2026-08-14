@@ -49,7 +49,12 @@ genuinely works in the background. See `docs/REFERENCE.md` for the full matrix.
 ```bash
 cd bridge
 npm install
-npm start          # listens on http://localhost:8765
+npm start          # runs bridge server in foreground (http://0.0.0.0:8765)
+
+# Manage Bridge commands:
+npm run status     # Check bridge health & extension connection status
+npm run stop       # Stop any running bridge server instances
+npm run restart    # Stop and start bridge server
 ```
 
 ### 2. Load the extension
@@ -79,38 +84,46 @@ is configurable on the extension's **options page** (popup -> "Open settings",
 or the Extensions page -> Details -> Extension options) and stored in
 `chrome.storage`; the service worker reconnects automatically on change.
 
-## Using it from Claude Code (MCP)
+### CLI Helper (`browserctl`)
 
-The `mcp/` server exposes the browser as native tools (`browser_snapshot`,
-`browser_navigate`, `browser_click`, ...) for any MCP client. This is the
-recommended path for Claude Code / Claude Desktop.
-
-On connect, the server sends a set of **operating instructions** (surfaced to the
-model by the MCP client) that make every agent follow the same control model:
-pin one target tab, group it, and act on it **in the background** — never switch
-or foreground the user's current tab unless a step genuinely can't run in the
-background or the user asks. So while you keep working in your own tab (say
-GitLab), the agent drives its tab (say LinkedIn) without disturbing you.
+`browserctl` is executable globally and can be invoked directly from anywhere in the terminal:
 
 ```bash
-cd mcp
-npm install
-# Register with Claude Code (run from anywhere; use the absolute path to mcp/index.js on this machine):
-# Windows:
-claude mcp add browserctl -- node "C:/path/to/browserctl/mcp/index.js"
-# macOS:
-claude mcp add browserctl -- node "/path/to/browserctl/mcp/index.js"
+# Daemon management
+browserctl status                         # Check bridge and extension connectivity
+browserctl start                          # Start bridge daemon in background
+browserctl stop                           # Stop bridge daemon
+
+# Navigation & Inspection
+browserctl open https://github.com        # Navigate target tab (alias: navigate)
+browserctl snapshot --compact             # Token-efficient DOM snapshot (saves 75% tokens)
+browserctl read_page                      # Read accessibility tree with refs
+
+# Interaction
+browserctl click @e1                      # Click by ref (@e1, ref_1, 0)
+browserctl click --text "Sign In"         # Click by visible button/link text
+browserctl type @e2 "my search query"     # Type into input field
+browserctl type --placeholder "Search" "q" --submit
+browserctl eval "document.title"          # Run JavaScript
 ```
 
-Or add it to a project's `.mcp.json`:
+## Using it via Model Context Protocol (MCP)
+
+The `mcp/` server exposes browser automation tools for MCP clients (Antigravity, Claude Code, Cursor, Windsurf).
+
+### Token Optimization & Profiles
+By default, `browserctl` runs with `BROWSERCTL_MCP_PROFILE="core"` which exposes ~20 core tools plus `browser_action` (a universal dispatcher tool), saving ~10,000 system prompt tokens. To register all 68+ granular tools, set `BROWSERCTL_MCP_PROFILE="all"`.
 
 ```jsonc
 {
   "mcpServers": {
     "browserctl": {
       "command": "node",
-      "args": ["/absolute/path/to/browserctl/mcp/index.js"],
-      "env": { "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765" }
+      "args": ["/Users/admin/Documents/my_notes/claude/browserctl/mcp/index.js"],
+      "env": {
+        "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765",
+        "BROWSERCTL_MCP_PROFILE": "core"
+      }
     }
   }
 }
@@ -208,7 +221,8 @@ Known, accepted risks (single-user only):
   allowlist + shared token would, and neither is implemented.
 - **The extension↔bridge link is unauthenticated cleartext ws**, and the bridge host is
   user-configurable on the options page. Whatever answers on that socket gets full browser
-  control. Keep the host at the `127.0.0.1` default.
+  control. Keep the extension host set to `127.0.0.1` so Chrome talks to the local bridge.
+- **Listening on `0.0.0.0` by default** allows HTTP requests (e.g. from an MCP client on another LAN machine) to reach the bridge. If running on an untrusted network, override via `HOST=127.0.0.1 npm start` or firewall port 8765 accordingly.
 - **`get_cookies` reads cookies for the whole browser profile** (all sites), not just the
   target tab. There is no redaction on network/HAR/cookie output — headers (incl.
   `Cookie` / `Authorization`) come back verbatim, which is the point for a local debug tool.

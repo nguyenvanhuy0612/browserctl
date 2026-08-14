@@ -5,7 +5,7 @@ together; `PROTOCOL.md` is the wire-level spec and this document is the operator
 
 ## What it is
 
-**browserctl** (v0.5, 67 tools) gives an AI agent DOM-level control of a *real*, already-logged-in Chrome
+**browserctl** (v0.5, 68 tools) gives an AI agent DOM-level control of a *real*, already-logged-in Chrome
 or Edge, through a neutral HTTP/WebSocket API and an MCP server. It drives one pinned tab
 **in the background**, without stealing focus and without a debugger banner on the common
 path, so you can keep working in your own tab while the agent works in its own.
@@ -13,14 +13,27 @@ path, so you can keep working in your own tab while the agent works in its own.
 It is a general-purpose browser control surface — deliberately **not** a test-automation
 framework. See `prior-art.md` § Positioning decision for what that rules out and why.
 
+### CLI Helper (`cli.js`)
+
+A quick CLI helper script is available at `cli.js` for standalone command execution (or from shell agents):
+
+```bash
+node cli.js status
+node cli.js navigate https://www.linkedin.com
+node cli.js snapshot
+node cli.js click ref_1
+node cli.js type ref_2 "hello"
+node cli.js exec_system_cmd "echo hello"
+```
+
 ## Architecture
 
 ```
 Agent (Claude Code / any MCP client / any HTTP client)
       |  MCP stdio            |  HTTP POST /command
       v                       v
-mcp/index.js  ------------>  bridge/server.js        (Node, localhost:8765)
- 65 tools, thin wrapper       relay + correlation + heartbeat
+mcp/index.js  ------------>  bridge/server.js        (Node, 0.0.0.0:8765, configurable via HOST/PORT)
+ 66 tools, thin wrapper       relay + correlation + heartbeat
                                       |  WebSocket /extension
                                       v
                               extension/ (Manifest V3)
@@ -44,7 +57,7 @@ Four dispatch layers, and every action belongs to exactly one:
 ### 1. Bridge
 
 ```bash
-cd bridge && npm install && npm start      # listens on 127.0.0.1:8765
+cd bridge && npm install && npm start      # listens on 0.0.0.0:8765 by default (HOST/PORT overridable via env)
 ```
 
 ### 2. Extension
@@ -64,29 +77,36 @@ on a transient outage — only an explicit **Disconnect** stops it.
 > press Connect once more). See `rename-plan.md`.
 
 Host/port are configurable on the options page and stored in `chrome.storage`; the worker
-reconnects on change. Keep the host at the `127.0.0.1` default.
+reconnects on change. Keep the extension host at `127.0.0.1` so Chrome connects to the local bridge.
 
 ### 3. MCP server
 
 ```bash
 cd mcp && npm install
 # macOS
-claude mcp add browserctl -- node "/path/to/browserctl/mcp/index.js"
+claude mcp add browserctl -- node "/Users/admin/Documents/my_notes/claude/browserctl/mcp/index.js"
 # Windows
-claude mcp add browserctl -- node "C:/path/to/browserctl/mcp/index.js"
+claude mcp add browserctl -- node "C:/Users/HUYNGUYEN/Documents/my_notes/claude/browserctl/mcp/index.js"
 ```
 
 Or in a project's `.mcp.json`:
 
 ```jsonc
-{ "mcpServers": { "browserctl": {
-    "command": "node",
-    "args": ["/absolute/path/to/claude/browserctl/mcp/index.js"],
-    "env": { "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765" } } } }
+{
+  "mcpServers": {
+    "browserctl": {
+      "command": "node",
+      "args": ["/absolute/path/to/claude/browserctl/mcp/index.js"],
+      "env": {
+        "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765",
+        "BROWSERCTL_MCP_PROFILE": "core" // default: 'core' (~20 tools + browser_action); set 'all' for full 68 schemas
+      }
+    }
+  }
+}
 ```
 
-Tools appear as `mcp__browserctl__browser_*`. `BRIDGE_URL` is still honoured as a legacy
-alias for `BROWSERCTL_BRIDGE_URL`.
+Tools appear as `mcp__browserctl__browser_*`. In `core` mode, `browser_action` is always available to dynamically invoke any protocol action (CDP, cookies, storage, HAR export, recordings, etc.). `BRIDGE_URL` is still honoured as a legacy alias for `BROWSERCTL_BRIDGE_URL`.
 
 ## The control model
 
@@ -265,6 +285,7 @@ Every tab-scoped tool also accepts `tabId`.
 
 | Tool | Purpose | Params |
 |---|---|---|
+| `browser_exec_system_cmd` | Execute system shell command on bridge host | `command`, `cwd`, `env`, `timeoutMs` |
 | `browser_cdp_send` | Send a raw CDP command (power tool) | `method`, `params` |
 | `browser_eval_js` | Evaluate JavaScript | — |
 | `browser_audit` | Audit page | — |

@@ -9,9 +9,16 @@
   },
   "scripts": {
     "start": "node server.js",
+    "stop": "pkill -f 'node server.js' || true",
+    "status": "curl -s http://127.0.0.1:8765/status || echo 'Bridge is down'",
+    "restart": "npm run stop && npm run start",
     "test": "node --test ../tests/unit/*.test.mjs"
   },
+  "bin": {
+    "bctl": "../cli.js"
+  },
   "dependencies": {
+    "execa": "^10.0.1",
     "ws": "^8.18.0"
   }
 }

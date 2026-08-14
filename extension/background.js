@@ -841,12 +841,12 @@ async function crossFrame(action, params) {
       return reply && reply.ok ? { fr, result: reply.result } : null;
     } catch { return null; }
   }));
-  return mergeFrameResults(action, per.filter(Boolean));
+  return mergeFrameResults(action, per.filter(Boolean), params);
 }
 
 const qualifyRef = (frameId, ref) => (frameId === 0 || !ref ? ref : `f${frameId}:${ref}`);
 
-function mergeFrameResults(action, parts) {
+function mergeFrameResults(action, parts, params = {}) {
   // Every frame errored (restricted page, or a ref/ref_id that no frame could resolve) —
   // return an honest error rather than a fabricated empty snapshot-shaped success, which
   // would look to the caller like "the page really is empty".
@@ -865,7 +865,20 @@ function mergeFrameResults(action, parts) {
           : { ...el, index: undefined, ref: qualifyRef(fr.frameId, el.ref), frame: fr.url });
       }
     }
-    return { ok: true, result: { url: top.result.url, title: top.result.title, elements, text: top.result.text } };
+    const res = { url: top.result.url, title: top.result.title, elements, text: top.result.text };
+    if (params.compact || top.result.compactView) {
+      const compactLines = elements.map((e) => {
+        let desc = `[@${e.ref || e.index}] <${e.tag}>`;
+        if (e.type) desc += `[type=${e.type}]`;
+        if (e.text) desc += ` "${e.text}"`;
+        if (e.placeholder) desc += ` (placeholder: "${e.placeholder}")`;
+        if (e.value) desc += ` (value: "${e.value}")`;
+        if (e.href) desc += ` -> ${e.href}`;
+        return desc;
+      });
+      res.compactView = compactLines.join("\n");
+    }
+    return { ok: true, result: res };
   }
   if (action === "find") {
     const matches = [];

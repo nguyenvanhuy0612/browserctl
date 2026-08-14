@@ -13,9 +13,13 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 
+function envStr(name, fallback) {
+  const raw = process.env[name];
+  return raw !== undefined && raw !== "" ? raw : fallback;
+}
+
 // BRIDGE_URL is the legacy name, still honoured so existing configs keep working.
-const BRIDGE_URL =
-  process.env.BROWSERCTL_BRIDGE_URL || process.env.BRIDGE_URL || "http://127.0.0.1:8765";
+const BRIDGE_URL = envStr("BROWSERCTL_BRIDGE_URL", envStr("BRIDGE_URL", "http://127.0.0.1:8765"));
 
 // Carries the per-call tabId (if the tool was invoked with one) down to callBridge
 // without every build having to thread it through explicitly. AsyncLocalStorage keeps
@@ -78,7 +82,8 @@ const INSTRUCTIONS = `This server drives ONE pinned "target" tab in the backgrou
 - To act on a different page, use browser_new_tab or browser_navigate — both re-pin the target. Only use browser_switch_tab / browser_focus_window when the user explicitly asks to bring a tab forward, or when a step genuinely cannot run in the background.
 - Screenshots capture the background target without activating it (an "is being debugged" bar may appear on that tab only). Never foreground a tab just to screenshot it.
 - Before reading or screenshotting sensitive content, confirm the target with browser_current_tab.
-- Driving several tabs at once: every tab-scoped tool accepts an optional tabId (from browser_list_tabs). Pass it to run THAT command against THAT tab without changing the pinned target — so parallel agents can each drive a different tab without racing on the single pin. Omit tabId to use the pinned target.`;
+- Driving several tabs at once: every tab-scoped tool accepts an optional tabId (from browser_list_tabs). Pass it to run THAT command against THAT tab without changing the pinned target — so parallel agents can each drive a different tab without racing on the single pin. Omit tabId to use the pinned target.
+- Full protocol capability & browser_action tool: In default (core) mode, dedicated tools are registered for primary operations. ALL other protocol capabilities (including cdp_send, cdp_attach, get_console_logs, get_network_requests, export_har, get_cookies, set_cookie, delete_cookies, storage_get, storage_set, read_pdf, record_start, record_stop, replay, describe_element, etc.) are 100% available by calling the 'browser_action' tool with { action: "<action_name>", params: { ... } } or via the host CLI 'browserctl <action>'.`;
 
 const SERVER_VERSION = "0.5.0";
 
@@ -108,6 +113,8 @@ const NO_TAB_TOOLS = new Set([
   // Reports bridge/extension health; deliberately never touches a tab (and must work
   // when no extension is connected at all).
   "browser_status",
+  // Runs system shell command on bridge host; doesn't touch browser tabs.
+  "browser_exec_system_cmd",
   // Manages its own tab identity (open-or-reuse, like browser_new_tab) — declares its
   // own tabId field below with composite-specific semantics instead of the generic
   // per-command-override one.
@@ -126,13 +133,60 @@ function withTabId(schema) {
   return { ...schema, tabId: TAB_ID_FIELD }; // raw shape (plain object of fields), incl. {}
 }
 
+// Tool Profiles: 'core' (default, ~20 essential tools + browser_action) or 'all' (all 68 tools).
+// Core mode saves ~10k tokens in system prompts while still allowing any action via browser_action.
+const MCP_PROFILE = envStr("BROWSERCTL_MCP_PROFILE", "core").toLowerCase();
+const CORE_TOOLS = new Set([
+  "browser_status",
+  "browser_exec_system_cmd",
+  "browser_snapshot",
+  "browser_read_page",
+  "browser_find",
+  "browser_find_text",
+  "browser_navigate",
+  "browser_click",
+  "browser_type",
+  "browser_scroll",
+  "browser_hover",
+  "browser_select_option",
+  "browser_press_key",
+  "browser_wait_for",
+  "browser_wait_settle",
+  "browser_get_page_content",
+  "browser_screenshot",
+  "browser_screenshot_fullpage",
+  "browser_list_tabs",
+  "browser_new_tab",
+  "browser_switch_tab",
+  "browser_close_tab",
+  "browser_eval_js",
+  "browser_action",
+]);
+
 const _registerTool = server.registerTool.bind(server);
 server.registerTool = (name, config, handler) => {
+  if (MCP_PROFILE !== "all" && MCP_PROFILE !== "full" && !CORE_TOOLS.has(name)) {
+    return;
+  }
   if (!NO_TAB_TOOLS.has(name) && config && "inputSchema" in config) {
     config = { ...config, inputSchema: withTabId(config.inputSchema) };
   }
   return _registerTool(name, config, handler);
 };
+
+server.registerTool(
+  "browser_action",
+  {
+    title: "Universal Browser Action Dispatcher",
+    description:
+      "Execute any browserctl protocol action directly by name (e.g. 'click', 'type', 'navigate', 'cdp_send', 'snapshot', 'storage_get', 'export_har', 'record_start', etc.) with custom parameters. Use this to execute specialized actions without needing individual MCP tool schemas.",
+    inputSchema: {
+      action: z.string().describe("The action name (e.g. 'click', 'type', 'navigate', 'cdp_send', 'snapshot', 'storage_get', etc.)"),
+      params: z.record(z.string(), z.any()).optional().describe("Parameters for the action as a key-value object"),
+    },
+  },
+  tool("action", async ({ action, params = {} }) => text(await callBridge(action, params)))
+);
 
 server.registerTool(
   "browser_cdp_send",
@@ -190,16 +244,35 @@ server.registerTool(
 );
 
 server.registerTool(
+  "browser_exec_system_cmd",
+  {
+    title: "Execute System Command",
+    description:
+      "Execute a shell/system command on the host running the bridge server. Returns exitCode, stdout, stderr, all (combined output), failed, timedOut, and signal.",
+    inputSchema: {
+      command: z.string().describe("Shell command line to execute on the bridge host"),
+      cwd: z.string().optional().describe("Working directory for command execution"),
+      env: z.record(z.string(), z.string()).optional().describe("Custom environment variables object"),
+      timeoutMs: z.number().int().optional().describe("Timeout in milliseconds (default: 30000, max: 300000)"),
+    },
+  },
+  tool("exec_system_cmd", async ({ command, cwd, env, timeoutMs }) =>
+    text(await callBridge("exec_system_cmd", { command, cwd, env, timeoutMs }))
+  )
+);
+
+server.registerTool(
   "browser_snapshot",
   {
     title: "Snapshot page",
     description:
       "Return the TARGET tab's interactive elements (each with an 'index' and a stable 'ref'), the page URL/title, and visible text. On your first command the focused tab is pinned as the target and stays pinned even if the user switches tabs (use browser_switch_tab to retarget). Check the returned url/title (or call browser_current_tab) before reading sensitive pages. Call this first, then act by ref/index. Re-call after any action that changes the page. Covers elements inside iframes (including cross-origin): a sub-frame element carries a 'frame' url and a frame-qualified ref like 'f3:ref_5' — pass that ref back verbatim to click/type it (index is top-frame only).",
     inputSchema: {
+      compact: z.boolean().optional().describe("Return a compact token-efficient representation (saves ~75% tokens)"),
       maxText: z.number().int().optional().describe("Max characters of page body text to include (default 4000)"),
     },
   },
-  tool("snapshot", async ({ maxText }) => text(await callBridge("snapshot", { maxText })))
+  tool("snapshot", async ({ compact, maxText }) => text(await callBridge("snapshot", { compact, maxText })))
 );
 
 server.registerTool(
@@ -266,15 +339,21 @@ server.registerTool(
   "browser_click",
   {
     title: "Click element",
-    description: "Click an element identified by 'ref' (stable, from browser_read_page/browser_find/browser_snapshot) or 'index' (from the latest browser_snapshot). Prefer ref.",
+    description: "Click an element identified by 'ref' (e.g. '@e1', 'ref_5'), 'index', CSS 'selector', or visible 'text'. Automatically waits for DOM mutations to settle.",
     inputSchema: z.object({
       index: z.number().int().optional().describe("Element index from browser_snapshot"),
-      ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5')"),
-    }).refine((v) => v.index !== undefined || v.ref !== undefined, {
-      message: "Provide at least one of 'ref' or 'index'.",
+      ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5', '@e1')"),
+      selector: z.string().optional().describe("CSS selector (e.g. '#submit-btn')"),
+      text: z.string().optional().describe("Match interactive element by visible text (e.g. 'Sign In')"),
+      autoSettle: z.boolean().optional().describe("Wait for DOM mutations to settle after click (default true)"),
+      settleMs: z.number().int().optional().describe("Settle timeout in ms (default 150)"),
+    }).refine((v) => v.index !== undefined || v.ref !== undefined || v.selector !== undefined || v.text !== undefined, {
+      message: "Provide at least one of 'ref', 'index', 'selector', or 'text'.",
     }),
   },
-  tool("click", async ({ index, ref }) => text(await callBridge("click", { index, ref })))
+  tool("click", async ({ index, ref, selector, text: t, autoSettle, settleMs }) =>
+    text(await callBridge("click", { index, ref, selector, text: t, autoSettle, settleMs }))
+  )
 );
 
 server.registerTool(
@@ -282,18 +361,22 @@ server.registerTool(
   {
     title: "Type into element",
     description:
-      "Focus an element (by 'ref' or 'index') and set its text. Set submit=true to press Enter afterward.",
+      "Focus an element (by 'ref', 'index', 'selector', or 'placeholder') and set its text. Set submit=true to press Enter afterward.",
     inputSchema: z.object({
       index: z.number().int().optional().describe("Element index from browser_snapshot"),
-      ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5')"),
+      ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5', '@e1')"),
+      selector: z.string().optional().describe("CSS selector (e.g. 'input.username')"),
+      placeholder: z.string().optional().describe("Match input by placeholder attribute"),
       text: z.string().describe("Text to enter"),
       submit: z.boolean().optional().describe("Press Enter after typing"),
-    }).refine((v) => v.index !== undefined || v.ref !== undefined, {
-      message: "Provide at least one of 'ref' or 'index'.",
+      autoSettle: z.boolean().optional().describe("Wait for DOM mutations to settle after typing (default true)"),
+      settleMs: z.number().int().optional().describe("Settle timeout in ms (default 100)"),
+    }).refine((v) => v.index !== undefined || v.ref !== undefined || v.selector !== undefined || v.placeholder !== undefined, {
+      message: "Provide at least one of 'ref', 'index', 'selector', or 'placeholder'.",
     }),
   },
-  tool("type", async ({ index, ref, text: t, submit }) =>
-    text(await callBridge("type", { index, ref, text: t, submit }))
+  tool("type", async ({ index, ref, selector, placeholder, text: t, submit, autoSettle, settleMs }) =>
+    text(await callBridge("type", { index, ref, selector, placeholder, text: t, submit, autoSettle, settleMs }))
   )
 );
 

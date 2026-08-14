@@ -1,0 +1,23 @@
+{
+  "name": "browserctl",
+  "version": "0.5.1",
+  "description": "Universal Browser Control Protocol for AI Agents and Developers",
+  "type": "module",
+  "main": "cli.js",
+  "bin": {
+    "browserctl": "./cli.js"
+  },
+  "scripts": {
+    "test": "node --test tests/unit/bridge.test.mjs",
+    "start": "node bridge/server.js"
+  },
+  "keywords": [
+    "mcp",
+    "browser",
+    "automation",
+    "ai-agent",
+    "chrome"
+  ],
+  "author": "Nguyen Van Huy",
+  "license": "MIT"
+}

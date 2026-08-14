@@ -11,6 +11,7 @@
 
 import http from "node:http";
 import { randomUUID } from "node:crypto";
+import { execa } from "execa";
 import { WebSocketServer } from "ws";
 
 // Read a numeric env var, falling back only when it is unset/empty/not-a-number — NOT
@@ -24,8 +25,13 @@ function envNum(name, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function envStr(name, fallback) {
+  const raw = process.env[name];
+  return raw !== undefined && raw !== "" ? raw : fallback;
+}
+
 const PORT = envNum("PORT", 8765);
-const HOST = "127.0.0.1";
+const HOST = envStr("HOST", "0.0.0.0");
 // Overridable via env so tests can exercise real timeout firing without a 30s wait;
 // unset in normal operation, so production behavior is unchanged.
 const COMMAND_TIMEOUT_MS = envNum("COMMAND_TIMEOUT_MS", 30_000);
@@ -168,6 +174,53 @@ function handleCommand(body, res) {
   if (!action || typeof action !== "string") {
     return sendJson(res, 400, { ok: false, error: "missing 'action'" });
   }
+
+  // Handle local system execution command directly on the bridge host
+  if (action === "exec_system_cmd") {
+    const { command, cwd, env, timeoutMs } = params || {};
+    if (!command || typeof command !== "string") {
+      return sendJson(res, 400, { ok: false, error: "missing 'command' parameter" });
+    }
+    const timeout = Math.min(Number(timeoutMs) || 30000, 300000);
+
+    // Merge custom env with process.env if provided
+    const mergedEnv = env && typeof env === "object" ? { ...process.env, ...env } : process.env;
+
+    execa(command, {
+      cwd: cwd || undefined,
+      env: mergedEnv,
+      timeout,
+      reject: false,
+      shell: true,
+      maxBuffer: 20 * 1024 * 1024,
+      all: true,
+    })
+      .then((result) => {
+        return sendJson(res, 200, {
+          ok: true,
+          result: {
+            exitCode: result.exitCode ?? (result.failed ? 1 : 0),
+            stdout: result.stdout || "",
+            stderr: result.stderr || "",
+            all: result.all || "",
+            failed: Boolean(result.failed),
+            timedOut: Boolean(result.timedOut),
+            isCanceled: Boolean(result.isCanceled),
+            signal: result.signal || null,
+            error: result.failed ? (result.shortMessage || result.message || null) : null,
+          },
+        });
+      })
+      .catch((err) => {
+        return sendJson(res, 500, {
+          ok: false,
+          error: String(err.shortMessage || err.message || err),
+        });
+      });
+
+    return;
+  }
+
   if (!extensionSocket) {
     return sendJson(res, 503, { ok: false, error: "extension not connected" });
   }

@@ -122,6 +122,7 @@
 
   function snapshot(params = {}) {
     const maxText = params.maxText ?? 4000;  // ?? so maxText:0 (elements only, no page text) is honoured
+    const compact = !!params.compact;
     const nodes = deepQueryAll(INTERACTIVE_SELECTOR).filter(isVisible);
 
     indexedElements = nodes;
@@ -132,7 +133,10 @@
     for (const el of deepQueryAll("[data-bctl-ref]")) el.removeAttribute("data-bctl-ref");
     nodes.forEach((el, index) => el.setAttribute("data-bctl-ref", String(index)));
     const elements = nodes.map((el, index) => {
-      const item = { index, ref: getOrAssignRef(el), tag: el.tagName.toLowerCase(), text: elementText(el) };
+      const ref = getOrAssignRef(el);
+      const tag = el.tagName.toLowerCase();
+      const text = elementText(el);
+      const item = { index, ref, tag, text };
       if (el.tagName === "A" && el.href) item.href = el.getAttribute("href");
       if (el.tagName === "INPUT") {
         item.type = el.type || "text";
@@ -140,15 +144,31 @@
         if (el.placeholder) item.placeholder = el.placeholder;
       }
       if (el.tagName === "TEXTAREA") item.value = el.value || "";
+      if (el.tagName === "SELECT") item.value = el.value || "";
       return item;
     });
 
-    return {
+    const res = {
       url: location.href,
       title: document.title,
       elements,
       text: (document.body ? document.body.innerText : "").trim().replace(/\s+/g, " ").slice(0, maxText),
     };
+
+    if (compact) {
+      const compactLines = elements.map((e) => {
+        let desc = `[@${e.ref}] <${e.tag}>`;
+        if (e.type) desc += `[type=${e.type}]`;
+        if (e.text) desc += ` "${e.text}"`;
+        if (e.placeholder) desc += ` (placeholder: "${e.placeholder}")`;
+        if (e.value) desc += ` (value: "${e.value}")`;
+        if (e.href) desc += ` -> ${e.href}`;
+        return desc;
+      });
+      res.compactView = compactLines.join("\n");
+    }
+
+    return res;
   }
 
   function resolve(index) {
@@ -187,15 +207,65 @@
     return el;
   }
 
-  // Resolve a target from either a stable ref or a per-snapshot index.
-  function resolveTarget({ index, ref } = {}) {
-    if (ref !== undefined && ref !== null) {
-      const el = resolveRef(ref);
-      if (!el) throw new Error(`ref "${ref}" not found or stale (re-run read_page / snapshot)`);
+  // Resolve a target from stable ref, per-snapshot index, CSS selector, visible text, or placeholder.
+  function resolveTarget({ index, ref, selector, text, placeholder } = {}) {
+    if (selector) {
+      const el = deepQuery(selector);
+      if (!el) throw new Error(`no element matching selector "${selector}"`);
       return el;
     }
-    if (index !== undefined && index !== null) return resolve(index);
-    throw new Error("action requires an 'index' or 'ref'");
+    if (text) {
+      const match = deepQueryAll(INTERACTIVE_SELECTOR).find((el) => {
+        if (!isVisible(el)) return false;
+        const t = elementText(el);
+        return t.toLowerCase().includes(text.toLowerCase());
+      });
+      if (!match) throw new Error(`no interactive element found with text matching "${text}"`);
+      return match;
+    }
+    if (placeholder) {
+      const match = deepQueryAll("input, textarea").find((el) => {
+        if (!isVisible(el)) return false;
+        const p = el.getAttribute("placeholder") || "";
+        return p.toLowerCase().includes(placeholder.toLowerCase());
+      });
+      if (!match) throw new Error(`no input found with placeholder matching "${placeholder}"`);
+      return match;
+    }
+
+    if (ref !== undefined && ref !== null) {
+      const el = resolveRef(ref);
+      if (el) return el;
+
+      const trimmed = String(ref).trim();
+      const atMatch = trimmed.match(/^@?(?:e|ref_?)?(\d+)$/i);
+      if (atMatch) {
+        const num = parseInt(atMatch[1], 10);
+        const refCandidate = resolveRef(`ref_${num}`);
+        if (refCandidate) return refCandidate;
+
+        // Check stamped attribute
+        const stamped = deepQuery(`[data-bctl-ref="${num}"]`) || (num > 0 ? deepQuery(`[data-bctl-ref="${num - 1}"]`) : null);
+        if (stamped) return stamped;
+
+        try { return resolve(num); } catch {}
+        if (num > 0) {
+          try { return resolve(num - 1); } catch {}
+        }
+
+        // Resilient fallback to visible interactive elements
+        const interactives = deepQueryAll(INTERACTIVE_SELECTOR).filter(isVisible);
+        if (interactives[num]) return interactives[num];
+        if (num > 0 && interactives[num - 1]) return interactives[num - 1];
+      }
+      throw new Error(`ref "${ref}" not found or stale (re-run read_page / snapshot)`);
+    }
+
+    if (index !== undefined && index !== null) {
+      return resolve(index);
+    }
+
+    throw new Error("action requires an 'index', 'ref', 'selector', 'text', or 'placeholder'");
   }
 
   // --- Accessibility-tree read (compact indented text) ---
@@ -465,18 +535,58 @@
     return { count: matches.length, matches };
   }
 
-  function click({ index, ref }) {
-    const el = resolveTarget({ index, ref });
+  // Wait until DOM mutations stop, page is complete, and no CSS/JS animations are running.
+  function wait_settle({ timeoutMs = 150 } = {}) {
+    const start = Date.now();
+    return new Promise((resolve) => {
+      let timer = null;
+      let observer = null;
+      const done = () => {
+        if (observer) {
+          try { observer.disconnect(); } catch {}
+          observer = null;
+        }
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        const ready = document.readyState === "complete";
+        const anims = document.getAnimations ? document.getAnimations().length === 0 : true;
+        resolve({ settled: ready && anims, readyState: document.readyState, waitedMs: Date.now() - start });
+      };
+
+      try {
+        observer = new MutationObserver(() => {
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(done, 50);
+        });
+        observer.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          characterData: true,
+        });
+      } catch {}
+
+      setTimeout(done, timeoutMs);
+    });
+  }
+
+  async function click({ index, ref, selector, text, autoSettle = true, settleMs = 150 } = {}) {
+    const el = resolveTarget({ index, ref, selector, text });
     const warning = actionability(el);
     el.scrollIntoView({ block: "center", inline: "center" });
     el.click();
-    const out = { clicked: ref != null ? ref : index };
+    if (autoSettle && settleMs > 0) {
+      await wait_settle({ timeoutMs: settleMs });
+    }
+    const out = { clicked: ref != null ? ref : (selector || text || index) };
     if (warning) out.warning = `element is not visible (${warning}) — the handler was still invoked, but verify the effect`;
     return out;
   }
 
-  function type({ index, ref, text, submit }) {
-    const el = resolveTarget({ index, ref });
+  async function type({ index, ref, selector, text, placeholder, submit, autoSettle = true, settleMs = 100 } = {}) {
+    const el = resolveTarget({ index, ref, selector, placeholder });
     const warning = actionability(el);
     el.scrollIntoView({ block: "center", inline: "center" });
     el.focus();
@@ -504,26 +614,32 @@
       el.dispatchEvent(new KeyboardEvent("keyup", opts));
       if (el.form) el.form.requestSubmit?.();
     }
-    const out = { typed: ref != null ? ref : index };
+    if (autoSettle && settleMs > 0) {
+      await wait_settle({ timeoutMs: settleMs });
+    }
+    const out = { typed: ref != null ? ref : (selector || placeholder || index) };
     if (warning) out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
     return out;
   }
 
-  function scroll({ direction = "down", amount = 600 }) {
+  function scroll({ direction = "down", amount = 600 } = {}) {
     const delta = direction === "up" ? -amount : amount;
     window.scrollBy({ top: delta, behavior: "instant" in window ? "instant" : "auto" });
     return { scrolledY: window.scrollY };
   }
 
-  function hover({ index, ref }) {
-    const el = resolveTarget({ index, ref });
+  async function hover({ index, ref, selector, text, autoSettle = true, settleMs = 50 } = {}) {
+    const el = resolveTarget({ index, ref, selector, text });
     const warning = actionability(el);
     el.scrollIntoView({ block: "center", inline: "center" });
     const opts = { bubbles: true, cancelable: true };
     el.dispatchEvent(new MouseEvent("mouseover", opts));
     el.dispatchEvent(new MouseEvent("mouseenter", opts));
     el.dispatchEvent(new MouseEvent("mousemove", opts));
-    const out = { hovered: ref != null ? ref : index };
+    if (autoSettle && settleMs > 0) {
+      await wait_settle({ timeoutMs: settleMs });
+    }
+    const out = { hovered: ref != null ? ref : (selector || text || index) };
     if (warning) out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
     return out;
   }
@@ -608,23 +724,7 @@
     });
   }
 
-  // Wait until the page is loaded AND no CSS/JS animations are running. getAnimations()
-  // catches transitions/animations that a load- or network-idle wait misses.
-  function wait_settle({ timeoutMs = 10000 } = {}) {
-    const start = Date.now();
-    return new Promise((resolve) => {
-      const check = () => {
-        const ready = document.readyState === "complete";
-        const anims = document.getAnimations ? document.getAnimations().length === 0 : true;
-        if ((ready && anims) || Date.now() - start >= timeoutMs) {
-          resolve({ settled: ready && anims, readyState: document.readyState, waitedMs: Date.now() - start });
-          return;
-        }
-        setTimeout(check, 50);
-      };
-      check();
-    });
-  }
+
 
   // Resolve an element by ref/index and return its viewport rect. Used by
   // element_screenshot so it can capture ref-addressed (and shadow-DOM) elements,

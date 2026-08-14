@@ -6,7 +6,7 @@ All three are now one.
 
 | Layer | Value |
 |---|---|
-| Repo directory | `browserctl` |
+| Repo directory | `claude/browserctl` |
 | MCP server key in `~/.claude.json` | `browserctl` |
 | Internal identifier prefix | `bctl` |
 | Package names | `browserctl-bridge`, `browserctl-mcp` |

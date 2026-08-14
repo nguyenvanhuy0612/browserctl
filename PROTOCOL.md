@@ -82,11 +82,11 @@ using its own small frame protocol:
 ## Page inspection
 
 ### `snapshot`
-Returns the page's interactive elements (each with a stable `index` for this page
+Returns the page's interactive elements (each with a stable `index` and stable `ref` for this page
 load), plus page metadata and visible text. This is the agent's main "what's on
 screen" call.
 
-Params: none (optional `{ "maxText": 4000 }` to cap returned text length).
+Params: optional `{ "compact": true, "maxText": 4000 }` (`compact: true` returns dense single-line representation saving ~75% tokens).
 
 Result:
 ```jsonc
@@ -94,15 +94,16 @@ Result:
   "url": "https://example.com/",
   "title": "Example",
   "elements": [
-    { "index": 0, "tag": "a",      "text": "Home",        "href": "/" },
-    { "index": 1, "tag": "input",  "type": "search",      "placeholder": "Search", "value": "" },
-    { "index": 2, "tag": "button", "text": "Submit" }
+    { "index": 0, "ref": "ref_1", "tag": "a",      "text": "Home",        "href": "/" },
+    { "index": 1, "ref": "ref_2", "tag": "input",  "type": "search",      "placeholder": "Search", "value": "" },
+    { "index": 2, "ref": "ref_3", "tag": "button", "text": "Submit" }
   ],
+  "compactView": "[@ref_1] <a> \"Home\" -> /\n[@ref_2] <input>[type=search] (placeholder: \"Search\")\n[@ref_3] <button> \"Submit\"",
   "text": "Visible page text, truncated..."
 }
 ```
 
-Indices are valid until the page navigates or is re-rendered. Re-`snapshot` after
+Indices and refs are valid until the page navigates or is re-rendered. Re-`snapshot` after
 any action that changes the page.
 
 ## Actions
@@ -112,11 +113,14 @@ any action that changes the page.
 Returns `{ url }` once loaded.
 
 ### `click`
-`params: { index }` - click the element with that snapshot index.
+`params: { ref?, index?, selector?, text?, autoSettle?: true, settleMs?: 150 }` - click target element (by ref e.g. `@e1`/`ref_1`, numeric index, CSS selector `#id`, or visible text matching). Automatically waits for DOM mutations to settle (default 150ms).
 
 ### `type`
-`params: { index, text, submit? }` - focus the element, set its value to `text`
-(firing input/change events). If `submit: true`, presses Enter afterward.
+`params: { ref?, index?, selector?, placeholder?, text, submit?, autoSettle?: true, settleMs?: 100 }` - focus the element, set its value to `text`
+(firing input/change events). If `submit: true`, presses Enter afterward. Automatically waits for DOM mutations to settle.
+
+### `hover`
+`params: { ref?, index?, selector?, text?, autoSettle?: true, settleMs?: 50 }` - hover over target element.
 
 ### `scroll`
 `params: { direction: "up"|"down", amount? }` - scroll by `amount` px
@@ -280,7 +284,7 @@ tool. Add a redaction pass in `util.js` if pointing it at a shared/untrusted con
 Direction: match the official extension's control model, openly (no blocklist / org-lock /
 gating), agent stays external. Principle: **DOM-first, CDP-fallback** — structured work via
 the content script (no banner), CDP only for pixel input, background-tab capture, protocol
-capture, and CSP-bypass eval. See `docs/design/claude-for-chrome-open-design.md`.
+capture, and CSP-bypass eval. See `docs/superpowers/specs/2026-06-30-claude-for-chrome-open-design.md`.
 
 ### Background tab control
 - Target is **pinned on first touch** and held across user tab switches (see the target-tab
@@ -490,6 +494,24 @@ first with `switch_tab` / `navigate` / `new_tab` / an explicit `tabId`. Guarded 
 
 Not guarded: navigation and tab/window management (they leak nothing), and any command
 carrying an explicit `tabId` (that is a deliberate choice).
+
+### `exec_system_cmd`
+
+Executes a shell command on the host running the bridge server. Deliberately does NOT require Chrome extension to be connected.
+
+```jsonc
+{
+  "action": "exec_system_cmd",
+  "params": {
+    "command": "echo hello",
+    "cwd": "/path/to/dir", // optional
+    "env": { "FOO": "bar" }, // optional custom environment variables
+    "timeoutMs": 30000 // optional, default 30000, max 300000
+  }
+}
+```
+
+Result: `{ exitCode, stdout, stderr, all, failed, timedOut, isCanceled, signal, error }`.
 
 ### `GET /status`, exposed as `browser_status`
 

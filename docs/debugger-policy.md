@@ -152,9 +152,9 @@ You keep everything needed to read and drive the page.
    never be able to widen its own permissions, and the bridge has no auth (see README
    "Security").
 2. **Matching.** Normalise both sides (lowercase, strip `www.`, bare domain → `<domain>/*`,
-   glob `*` → `.*`), then test against `hostname + pathname`. A blocklist matcher of this shape is
-   standard; hot-reloading it via `chrome.storage.onChanged` keeps policy changes live
-   without a reinstall.
+   glob `*` → `.*`), then test against `hostname + pathname`. The official extension's
+   `blockedUrlPatterns` matcher is a clean copyable spec — see `prior-art.md` #9, which also
+   notes it hot-reloads via `chrome.storage.onChanged`.
 3. **Enforcement point 1 — `attach(tabId)`.** Look up the tab's URL, and if forbidden throw
    a message that names the tier-A/B alternative rather than a bare denial, e.g.
    *"chrome.debugger is not permitted on example.com by policy. DOM reads and interaction

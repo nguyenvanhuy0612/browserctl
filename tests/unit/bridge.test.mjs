@@ -124,6 +124,35 @@ test("POST /command with an oversized HTTP body -> 400 too large", async () => {
   assert.match(data.error, /too large/);
 });
 
+test("POST /command with action exec_system_cmd executes command on host", async () => {
+  const res = await fetch(`${BASE}/command`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "exec_system_cmd", params: { command: "echo hello_world" } }),
+  });
+  assert.equal(res.status, 200);
+  const data = await res.json();
+  assert.equal(data.ok, true);
+  assert.equal(data.result.exitCode, 0);
+  assert.equal(data.result.stdout.trim(), "hello_world");
+});
+
+test("POST /command with action exec_system_cmd handles timeouts and errors gracefully", async () => {
+  const res = await fetch(`${BASE}/command`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      action: "exec_system_cmd",
+      params: { command: "node -e 'setTimeout(() => {}, 5000)'", timeoutMs: 100 },
+    }),
+  });
+  assert.equal(res.status, 200);
+  const data = await res.json();
+  assert.equal(data.ok, true);
+  assert.equal(data.result.timedOut, true);
+  assert.equal(data.result.failed, true);
+});
+
 test("no extension connected -> 503 'extension not connected'", async () => {
   const { status, data } = await post("click", {});
   assert.equal(status, 503);

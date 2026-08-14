@@ -17,10 +17,12 @@
 import http from "node:http";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+function envStr(name, fallback) {
+  const raw = process.env[name];
+  return raw !== undefined && raw !== "" ? raw : fallback;
+}
 
-const BRIDGE =
-  process.env.BROWSERCTL_BRIDGE_URL || process.env.BRIDGE_URL || "http://127.0.0.1:8765";
+const BRIDGE = envStr("BROWSERCTL_BRIDGE_URL", envStr("BRIDGE_URL", "http://127.0.0.1:8765"));
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PAGE_RAW = readFileSync(join(HERE, "testpage.html"), "utf8");
 const SECOND = "<!doctype html><title>second</title><h1 id=sec>Second Page</h1>";
