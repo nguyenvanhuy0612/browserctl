@@ -232,6 +232,12 @@ async function ensureBridge(autoDaemon = true, forceAuto = false) {
   return false;
 }
 
+const HTML_TAGS = new Set([
+  "h1", "h2", "h3", "h4", "h5", "h6", "p", "a", "button", "input", "textarea", "select",
+  "div", "span", "img", "form", "header", "footer", "article", "section", "nav", "main",
+  "ul", "ol", "li", "table", "tr", "td", "th", "label", "meta", "link", "body", "svg"
+]);
+
 // Parse target element identifier (@e1, @1, ref_1, 1, 0, selector, text, placeholder)
 function parseTarget(arg, params) {
   if (!arg) return;
@@ -250,14 +256,28 @@ function parseTarget(arg, params) {
     return;
   }
 
-  // Matches @e1, @1, e1, ref_1, ref1, 1, 0
-  const m = trimmed.match(/^@?(?:e|ref_?)?(\d+)$/i);
+  // Matches @e1, @1, e1, ref_1, ref1
+  const m = trimmed.match(/^@(?:e|ref_?)?(\d+)$/i) || trimmed.match(/^(?:ref_?)(\d+)$/i);
   if (m) {
     params.ref = trimmed;
     return;
   }
 
-  if (trimmed.startsWith("#") || trimmed.startsWith(".") || trimmed.includes(">") || trimmed.includes("[")) {
+  // Matches single digit index if pure number
+  if (/^\d+$/.test(trimmed)) {
+    params.index = parseInt(trimmed, 10);
+    return;
+  }
+
+  if (
+    trimmed.startsWith("#") ||
+    trimmed.startsWith(".") ||
+    trimmed.includes(">") ||
+    trimmed.includes("[") ||
+    trimmed.includes(":") ||
+    trimmed.includes(" ") ||
+    HTML_TAGS.has(trimmed.toLowerCase())
+  ) {
     params.selector = trimmed;
   } else {
     params.ref = trimmed;
@@ -494,12 +514,33 @@ async function main() {
         if (prop === "title" || prop === "url") {
           // No target needed
         } else if (prop === "attr") {
-          if (args[1]) parseTarget(args[1], params);
-          if (args[2]) params.attr = args[2];
+          let i = 1;
+          while (i < args.length) {
+            if (args[i] === "--selector" && args[i + 1]) {
+              params.selector = args[++i];
+            } else if (args[i] === "--attr" && args[i + 1]) {
+              params.attr = args[++i];
+            } else if (!params.ref && !params.index && !params.selector) {
+              parseTarget(args[i], params);
+            } else if (!params.attr) {
+              params.attr = args[i];
+            }
+            i++;
+          }
         } else if (prop === "count") {
           if (args[1]) params.selector = args[1];
         } else {
-          if (args[1]) parseTarget(args[1], params);
+          let i = 1;
+          while (i < args.length) {
+            if (args[i] === "--selector" && args[i + 1]) {
+              params.selector = args[++i];
+            } else if (args[i] === "--text" && args[i + 1]) {
+              params.text = args[++i];
+            } else if (!params.ref && !params.index && !params.selector) {
+              parseTarget(args[i], params);
+            }
+            i++;
+          }
         }
         action = "get_property";
         break;

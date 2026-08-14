@@ -787,8 +787,13 @@ export async function handleCdp(action, params, tabId) {
     case "print_pdf": {
       // printToPDF is normally headless-only, but Edge/Chrome support it via CDP
       // for the active page. Auto-attach if not already attached.
-      const needAttach = !sessions[tabId];
-      if (needAttach) await attach(tabId);
+      const needAttach = !sessions.has(tabId);
+      if (needAttach) {
+        try { await attach(tabId); } catch (err) {
+          // If debugger is already attached externally, proceed with send
+          if (!err.message.includes("already attached")) throw err;
+        }
+      }
       try {
         const res = await send(tabId, "Page.printToPDF", { printBackground: true });
         return { ok: true, result: { base64: res.data } };
