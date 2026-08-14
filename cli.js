@@ -479,11 +479,8 @@ async function main() {
 
       case "screenshot":
       case "screenshot_fullpage": {
-        if (fullpageMode || action === "screenshot_fullpage") {
-          action = "screenshot_fullpage";
-        } else {
-          action = "screenshot";
-        }
+        action = "screenshot";
+        if (fullpageMode) params.format = "png";
         if (args[0] && !args[0].startsWith("-")) {
           saveFilePath = args[0];
         }

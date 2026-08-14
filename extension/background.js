@@ -745,8 +745,12 @@ async function switchTab({ id, focus = false }) {
   return { id: tab.id };
 }
 
-async function closeTab({ id }) {
-  if (id == null) throw new Error("close_tab requires 'id'");
+async function closeTab(params = {}) {
+  let id = params.id;
+  if (id == null) {
+    const tab = await targetTab(params);
+    id = tab.id;
+  }
   await chrome.tabs.remove(id);
   if (id === targetTabId) unpinTarget(); // unpin a closed target
   return { id };
