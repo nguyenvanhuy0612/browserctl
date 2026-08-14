@@ -16,6 +16,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
+import {
+  getDaemonState,
+  markDaemonRunning,
+  markDaemonStopped,
+  isDaemonExplicitlyStopped,
+} from "../bridge/state.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -76,6 +82,9 @@ async function startBridgeDaemon() {
         await new Promise((r) => setTimeout(r, 100));
         if (await isBridgeRunning()) {
           spawnFailCount = 0;
+          try {
+            markDaemonRunning({ pid: child.pid, port: 8765, url: BRIDGE_URL });
+          } catch {}
           return true;
         }
       }
@@ -92,8 +101,19 @@ async function startBridgeDaemon() {
   return isStartingDaemon;
 }
 
-async function ensureBridge() {
+async function ensureBridge(forceAuto = false) {
   if (await isBridgeRunning()) return true;
+
+  // If daemon was explicitly stopped and not forced, do NOT auto-start
+  if (isDaemonExplicitlyStopped() && !forceAuto) {
+    return false;
+  }
+
+  const autoStartPolicy = envStr("BROWSERCTL_AUTO_START", "auto");
+  if ((autoStartPolicy === "manual" || autoStartPolicy === "false") && !forceAuto) {
+    return false;
+  }
+
   return await startBridgeDaemon();
 }
 
@@ -107,6 +127,13 @@ const tabStore = new AsyncLocalStorage();
 async function callBridge(action, params = {}) {
   const tabId = tabStore.getStore();
   if (tabId != null && params.tabId == null) params = { ...params, tabId };
+
+  if (!(await isBridgeRunning()) && isDaemonExplicitlyStopped()) {
+    throw new Error(
+      `cannot reach bridge at ${BRIDGE_URL}: Bridge daemon is currently stopped (explicitly stopped). ` +
+      `Call 'browser_start' tool (or run 'browserctl start' in terminal) to start it.`
+    );
+  }
 
   const maxAttempts = 2; // Strict bound: at most 2 attempts (1 initial + 1 auto-restart retry)
   let lastErr = null;
@@ -129,7 +156,6 @@ async function callBridge(action, params = {}) {
     } catch (err) {
       lastErr = err;
       if (attempt === 1) {
-        // First failure: ensure daemon is running and retry exactly once
         await ensureBridge();
       }
     }
@@ -138,8 +164,35 @@ async function callBridge(action, params = {}) {
   throw new Error(`cannot reach bridge at ${BRIDGE_URL}: ${lastErr?.message || "connection failed"}`);
 }
 
-function text(obj) {
-  return { content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] };
+function text(obj, format = "smart") {
+  if (typeof obj === "string") {
+    return { content: [{ type: "text", text: obj }] };
+  }
+  if (format === "pretty") {
+    return { content: [{ type: "text", text: JSON.stringify(obj, null, 2) }] };
+  }
+  if (format === "json") {
+    return { content: [{ type: "text", text: JSON.stringify(obj) }] };
+  }
+  if (format === "raw") {
+    if (obj?.value !== undefined) {
+      return { content: [{ type: "text", text: typeof obj.value === "object" ? JSON.stringify(obj.value) : String(obj.value) }] };
+    }
+    if (typeof obj?.text === "string") {
+      return { content: [{ type: "text", text: obj.text }] };
+    }
+    return { content: [{ type: "text", text: typeof obj === "object" ? JSON.stringify(obj) : String(obj) }] };
+  }
+
+  // Smart default (Token-Efficient, Zero Info Loss)
+  if (obj?.compactView) {
+    const header = `Page: ${obj.title || "Untitled"} (${obj.url})\nInteractive elements (${obj.elements?.length || 0}):\n\n`;
+    return { content: [{ type: "text", text: header + obj.compactView }] };
+  }
+  if (obj?.value !== undefined && typeof obj.value !== "object") {
+    return { content: [{ type: "text", text: String(obj.value) }] };
+  }
+  return { content: [{ type: "text", text: JSON.stringify(obj, null, 2) }] };
 }
 
 function fail(err) {
@@ -200,9 +253,10 @@ const NO_TAB_TOOLS = new Set([
   "browser_list_tabs", "browser_new_tab", "browser_group_tab", "browser_ungroup_tab",
   "browser_switch_tab", "browser_close_tab", "browser_list_windows", "browser_focus_window",
   "browser_reload_extension", "browser_record_get",
-  // Reports bridge/extension health; deliberately never touches a tab (and must work
-  // when no extension is connected at all).
+  // Reports bridge/extension health and daemon control; deliberately never touches a tab
   "browser_status",
+  "browser_start",
+  "browser_stop",
   // Runs system shell command on bridge host; doesn't touch browser tabs.
   "browser_exec_system_cmd",
   // Manages its own tab identity (open-or-reuse, like browser_new_tab) — declares its
@@ -228,6 +282,8 @@ function withTabId(schema) {
 const MCP_PROFILE = envStr("BROWSERCTL_MCP_PROFILE", "core").toLowerCase();
 const CORE_TOOLS = new Set([
   "browser_status",
+  "browser_start",
+  "browser_stop",
   "browser_exec_system_cmd",
   "browser_snapshot",
   "browser_read_page",
@@ -300,18 +356,20 @@ server.registerTool(
   {
     title: "Bridge/extension status",
     description:
-      "Report whether the bridge is reachable and whether the Chrome extension is connected to it, WITHOUT running a browser command. Call this first if a command failed with 'extension not connected', or to check readiness after restarting the bridge or reloading the extension — every other tool needs the extension, so they can only report this by failing.",
-    inputSchema: {},
+      "Report whether the bridge is reachable, current daemon state (running/stopped), and whether the Chrome extension is connected to it. Call this first if a command failed, or to check readiness after starting/stopping the bridge.",
+    inputSchema: {
+      format: z.enum(["smart", "json", "pretty"]).optional().describe("Output format"),
+    },
   },
-  // Deliberately does NOT go through callBridge: that requires a live extension, which is
-  // exactly what this tool exists to test. Hits the bridge's own GET /status instead.
-  async () => {
+  async ({ format } = {}) => {
+    const state = getDaemonState();
     try {
-      const res = await fetch(`${BRIDGE_URL}/status`, { method: "GET" });
+      const res = await fetch(`${BRIDGE_URL}/status`, { method: "GET", signal: AbortSignal.timeout(600) });
       const data = await res.json().catch(() => ({}));
       return text({
         bridgeUrl: BRIDGE_URL,
         bridgeReachable: true,
+        daemonState: "running",
         extensionConnected: data.extensionConnected === true,
         mcpServerVersion: SERVER_VERSION,
         ready: data.extensionConnected === true,
@@ -319,16 +377,17 @@ server.registerTool(
           data.extensionConnected === true
             ? "ready"
             : "bridge is up but no extension is connected — open the extension popup and press Connect",
-      });
+      }, format);
     } catch (err) {
       return text({
         bridgeUrl: BRIDGE_URL,
         bridgeReachable: false,
+        daemonState: state.state || "stopped",
         extensionConnected: false,
         mcpServerVersion: SERVER_VERSION,
         ready: false,
-        hint: `cannot reach the bridge (${err.message}) — start it with 'npm start' in bridge/`,
-      });
+        hint: `cannot reach the bridge (${err.message}) — start it with 'browser_start' tool or 'browserctl start'`,
+      }, format);
     }
   }
 );
@@ -358,11 +417,16 @@ server.registerTool(
     description:
       "Return the TARGET tab's interactive elements (each with an 'index' and a stable 'ref'), the page URL/title, and visible text. On your first command the focused tab is pinned as the target and stays pinned even if the user switches tabs (use browser_switch_tab to retarget). Check the returned url/title (or call browser_current_tab) before reading sensitive pages. Call this first, then act by ref/index. Re-call after any action that changes the page. Covers elements inside iframes (including cross-origin): a sub-frame element carries a 'frame' url and a frame-qualified ref like 'f3:ref_5' — pass that ref back verbatim to click/type it (index is top-frame only).",
     inputSchema: {
-      compact: z.boolean().optional().describe("Return a compact token-efficient representation (saves ~75% tokens)"),
+      compact: z.boolean().optional().describe("Return a compact token-efficient representation (saves ~75% tokens, default true)"),
+      format: z.enum(["smart", "compact", "json", "pretty", "raw"]).optional().describe("Output formatting: 'smart' (default, compact tree), 'json', 'pretty', or 'raw'"),
       maxText: z.number().int().optional().describe("Max characters of page body text to include (default 4000)"),
     },
   },
-  tool("snapshot", async ({ compact, maxText }) => text(await callBridge("snapshot", { compact, maxText })))
+  tool("snapshot", async ({ compact, format, maxText }) => {
+    const isCompact = (format === "compact" || format === "smart" || format === undefined) ? (compact !== false) : compact;
+    const res = await callBridge("snapshot", { compact: isCompact, maxText });
+    return text(res, format);
+  })
 );
 
 server.registerTool(
@@ -721,9 +785,12 @@ server.registerTool(
     title: "Evaluate JavaScript",
     description:
       "Run a JavaScript expression in the target page and return its value. The value must be JSON-serializable (functions/DOM nodes are dropped, via JSON round-trip). If the debugger is attached it runs via Runtime.evaluate (bypasses page CSP); otherwise in the page MAIN world.",
-    inputSchema: { expression: z.string().describe("JavaScript expression to evaluate") },
+    inputSchema: {
+      expression: z.string().describe("JavaScript expression to evaluate"),
+      format: z.enum(["smart", "json", "pretty", "raw"]).optional().describe("Output formatting: 'smart' (default), 'json', 'pretty', or 'raw'"),
+    },
   },
-  tool("eval_js", async ({ expression }) => text(await callBridge("eval_js", { expression })))
+  tool("eval_js", async ({ expression, format }) => text(await callBridge("eval_js", { expression }), format))
 );
 
 server.registerTool(
@@ -1217,6 +1284,34 @@ server.registerTool(
   tool("wait_network_idle", async ({ idleMs, timeoutMs }) =>
     text(await callBridge("wait_network_idle", { idleMs, timeoutMs }))
   )
+);
+
+server.registerTool(
+  "browser_start",
+  {
+    title: "Start bridge daemon",
+    description: "Start the local browserctl bridge server daemon in the background if stopped.",
+    inputSchema: {},
+  },
+  async () => {
+    const running = await isBridgeRunning();
+    if (running) return text({ ok: true, message: "Bridge is already running", url: BRIDGE_URL });
+    const started = await startBridgeDaemon();
+    return text({ ok: started, message: started ? "Bridge started" : "Failed to start bridge daemon", url: BRIDGE_URL });
+  }
+);
+
+server.registerTool(
+  "browser_stop",
+  {
+    title: "Stop bridge daemon",
+    description: "Stop the local browserctl bridge server daemon (records explicit stopped state).",
+    inputSchema: {},
+  },
+  async () => {
+    markDaemonStopped({ stoppedBy: "mcp_stop" });
+    return text({ ok: true, message: "Bridge daemon stopped" });
+  }
 );
 
 server.registerTool(

@@ -13,6 +13,7 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { execa } from "execa";
 import { WebSocketServer } from "ws";
+import { markDaemonRunning, markDaemonStopped } from "./state.js";
 
 // Read a numeric env var, falling back only when it is unset/empty/not-a-number — NOT
 // when it is a legitimate 0. `Number(process.env.PORT) || 8765` silently ignored
@@ -327,6 +328,11 @@ process.on("unhandledRejection", (err) => {
 server.listen(PORT, HOST, () => {
   log(`bridge listening on http://${HOST}:${PORT}`);
   log(`extension should connect to ws://${HOST}:${PORT}/extension`);
+  if (PORT !== 0) {
+    try {
+      markDaemonRunning({ pid: process.pid, port: PORT, url: `http://${HOST}:${PORT}` });
+    } catch {}
+  }
 });
 
 export { computeTimeoutMs, server, wss };

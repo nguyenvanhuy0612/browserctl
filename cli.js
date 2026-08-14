@@ -19,6 +19,12 @@ import { spawn, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import fs from "node:fs";
+import {
+  getDaemonState,
+  markDaemonRunning,
+  markDaemonStopped,
+  isDaemonExplicitlyStopped,
+} from "./bridge/state.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -35,9 +41,9 @@ function printHelp() {
 browserctl CLI — Fast, Ergonomic Browser Automation for AI Agents & Developers
 
 Usage:
-  browserctl status                     Check bridge health & extension connection
+  browserctl status                     Check bridge health, daemon state & extension
   browserctl start                      Start bridge daemon in background
-  browserctl stop                       Stop running bridge daemon
+  browserctl stop                       Stop running bridge daemon (records stopped state)
   browserctl restart                    Restart bridge daemon
 
 Navigation & Tabs:
@@ -92,17 +98,20 @@ System & Raw Protocols:
   browserctl exec_system_cmd <cmd>      Run host system command
   browserctl <action> [key=value ...]   Run any of the 68+ protocol actions
 
-Global Flags:
+Formatting & Global Flags:
+  -r, --raw                             Output raw unformatted value (for piping)
+  --json                                Force compact valid JSON output
+  --pretty                              Force 2-space indented pretty JSON output
   -c, --compact                         Output compact token-efficient representation
-  -r, --raw                             Output raw unformatted value (for eval and get)
   -f, --full, --fullpage                Capture fullpage screenshot
   -t, --tab <id>                        Direct command to specific tab ID
   --settle <ms>                         Auto-settle delay after action (default: 150ms)
-  --json                                Force JSON output
   --no-daemon                           Do not auto-start bridge daemon if not running
+  --auto-daemon                         Force auto-start even if previously stopped
 
 Environment:
   BROWSERCTL_BRIDGE_URL                 Default: http://127.0.0.1:8765
+  BROWSERCTL_AUTO_START                 'auto' (default) or 'manual'/'false'
   BROWSERCTL_MCP_PROFILE                'core' (default) or 'all'
 `);
 }
@@ -138,7 +147,12 @@ async function startBridgeDaemon() {
       const start = Date.now();
       while (Date.now() - start < 2500) {
         await new Promise((r) => setTimeout(r, 100));
-        if (await isBridgeRunning()) return true;
+        if (await isBridgeRunning()) {
+          try {
+            markDaemonRunning({ pid: child.pid, port: 8765, url: BRIDGE_URL });
+          } catch {}
+          return true;
+        }
       }
       return false;
     } catch {
@@ -163,6 +177,7 @@ function stopBridgeDaemon() {
           try { execSync(`taskkill /F /PID ${pid}`); } catch {}
         }
       }
+      markDaemonStopped({ stoppedBy: "cli_stop" });
       return true;
     } else {
       const pids = execSync("lsof -ti :8765 -sTCP:LISTEN", { encoding: "utf8" })
@@ -172,19 +187,41 @@ function stopBridgeDaemon() {
       for (const pid of pids) {
         process.kill(parseInt(pid, 10), "SIGTERM");
       }
+      markDaemonStopped({ stoppedBy: "cli_stop" });
       return pids.length > 0;
     }
   } catch {
+    markDaemonStopped({ stoppedBy: "cli_stop" });
     return false;
   }
 }
 
-async function ensureBridge(autoDaemon = true) {
+async function ensureBridge(autoDaemon = true, forceAuto = false) {
   if (await isBridgeRunning()) return true;
-  if (!autoDaemon) {
+
+  if (!autoDaemon && !forceAuto) {
     process.stderr.write("[browserctl] Error: Bridge daemon is not running. Start it with 'browserctl start'.\n");
     process.exit(1);
   }
+
+  // If user/agent explicitly ran 'browserctl stop', do not auto-start unless forced
+  if (isDaemonExplicitlyStopped() && !forceAuto) {
+    process.stderr.write(
+      "[browserctl] Error: Bridge daemon is currently stopped (stopped by user/agent).\n" +
+      "             Run 'browserctl start' to restart the daemon, or pass --auto-daemon.\n"
+    );
+    process.exit(1);
+  }
+
+  const autoStartPolicy = envStr("BROWSERCTL_AUTO_START", "auto");
+  if ((autoStartPolicy === "manual" || autoStartPolicy === "false") && !forceAuto) {
+    process.stderr.write(
+      "[browserctl] Error: Bridge daemon is not running and BROWSERCTL_AUTO_START=manual.\n" +
+      "             Run 'browserctl start' to start the daemon.\n"
+    );
+    process.exit(1);
+  }
+
   process.stderr.write("[browserctl] Bridge daemon not detected. Starting bridge on http://127.0.0.1:8765...\n");
   const started = await startBridgeDaemon();
   if (started) {
@@ -227,6 +264,24 @@ function parseTarget(arg, params) {
   }
 }
 
+// Format a clean ASCII table for list_tabs
+function formatTabsTable(tabs = []) {
+  if (!Array.isArray(tabs) || tabs.length === 0) return "No open tabs.";
+  const header = `ID         ACTIVE   TITLE                                          URL`;
+  const separator = `--------------------------------------------------------------------------------`;
+  const rows = tabs.map((t) => {
+    const id = String(t.id || "").padEnd(10);
+    const active = (t.active ? "*" : " ").padEnd(8);
+    let title = (t.title || "(untitled)").replace(/\n/g, " ");
+    if (title.length > 44) title = title.slice(0, 41) + "...";
+    title = title.padEnd(46);
+    let url = t.url || "";
+    if (url.length > 60) url = url.slice(0, 57) + "...";
+    return `${id} ${active} ${title} ${url}`;
+  });
+  return [header, separator, ...rows].join("\n");
+}
+
 async function main() {
   const rawArgs = process.argv.slice(2);
   if (rawArgs.length === 0 || rawArgs.includes("-h") || rawArgs.includes("--help")) {
@@ -238,10 +293,12 @@ async function main() {
   let args = rawArgs.slice(1);
 
   let jsonOutput = false;
+  let prettyOutput = false;
   let rawOutput = false;
   let compactMode = false;
   let fullpageMode = false;
   let autoDaemon = true;
+  let forceAutoDaemon = false;
   let explicitTabId = null;
   let settleMs = null;
 
@@ -251,6 +308,8 @@ async function main() {
     const a = args[i];
     if (a === "--json") {
       jsonOutput = true;
+    } else if (a === "--pretty") {
+      prettyOutput = true;
     } else if (a === "-r" || a === "--raw") {
       rawOutput = true;
     } else if (a === "-c" || a === "--compact") {
@@ -259,6 +318,8 @@ async function main() {
       fullpageMode = true;
     } else if (a === "--no-daemon") {
       autoDaemon = false;
+    } else if (a === "--auto-daemon") {
+      forceAutoDaemon = true;
     } else if (a === "-t" || a === "--tab") {
       explicitTabId = parseInt(args[++i], 10);
     } else if (a.startsWith("--tab=")) {
@@ -276,22 +337,34 @@ async function main() {
   // Daemon control actions
   if (action === "start" || action === "daemon") {
     if (await isBridgeRunning()) {
-      console.log(JSON.stringify({ ok: true, message: "Bridge is already running", url: BRIDGE_URL }, null, 2));
+      markDaemonRunning({ port: 8765, url: BRIDGE_URL });
+      const out = { ok: true, message: "Bridge is already running", url: BRIDGE_URL };
+      if (prettyOutput) console.log(JSON.stringify(out, null, 2));
+      else if (jsonOutput) console.log(JSON.stringify(out));
+      else console.log(`Bridge is already running on ${BRIDGE_URL}`);
       process.exit(0);
     }
     const started = await startBridgeDaemon();
     if (started) {
-      console.log(JSON.stringify({ ok: true, message: "Bridge started", url: BRIDGE_URL }, null, 2));
+      const out = { ok: true, message: "Bridge started", url: BRIDGE_URL };
+      if (prettyOutput) console.log(JSON.stringify(out, null, 2));
+      else if (jsonOutput) console.log(JSON.stringify(out));
+      else console.log(`Bridge started successfully on ${BRIDGE_URL}`);
       process.exit(0);
     } else {
-      console.error(JSON.stringify({ ok: false, error: "Failed to start bridge daemon" }, null, 2));
+      const out = { ok: false, error: "Failed to start bridge daemon" };
+      if (prettyOutput) console.error(JSON.stringify(out, null, 2));
+      else console.error(JSON.stringify(out));
       process.exit(1);
     }
   }
 
   if (action === "stop") {
     const stopped = stopBridgeDaemon();
-    console.log(JSON.stringify({ ok: true, message: stopped ? "Bridge stopped" : "Bridge was not running" }, null, 2));
+    const out = { ok: true, message: stopped ? "Bridge stopped" : "Bridge was not running" };
+    if (prettyOutput) console.log(JSON.stringify(out, null, 2));
+    else if (jsonOutput) console.log(JSON.stringify(out));
+    else console.log(stopped ? "Bridge stopped (daemon state: stopped)" : "Bridge was not running");
     process.exit(0);
   }
 
@@ -299,24 +372,44 @@ async function main() {
     stopBridgeDaemon();
     await new Promise((r) => setTimeout(r, 200));
     const started = await startBridgeDaemon();
-    console.log(JSON.stringify({ ok: started, message: started ? "Bridge restarted" : "Failed to restart" }, null, 2));
+    const out = { ok: started, message: started ? "Bridge restarted" : "Failed to restart" };
+    if (prettyOutput) console.log(JSON.stringify(out, null, 2));
+    else if (jsonOutput) console.log(JSON.stringify(out));
+    else console.log(started ? `Bridge restarted on ${BRIDGE_URL}` : "Failed to restart bridge");
     process.exit(started ? 0 : 1);
   }
 
   if (action === "status") {
+    const stateInfo = getDaemonState();
     try {
       const res = await fetch(`${BRIDGE_URL}/status`, { signal: AbortSignal.timeout(1000) });
       const data = await res.json();
-      console.log(JSON.stringify({ ok: res.ok, ...data }, null, 2));
+      const statusObj = { ok: res.ok, daemonState: "running", ...data };
+      if (prettyOutput) {
+        console.log(JSON.stringify(statusObj, null, 2));
+      } else if (jsonOutput) {
+        console.log(JSON.stringify(statusObj));
+      } else {
+        console.log(`Bridge: RUNNING (${BRIDGE_URL})`);
+        console.log(`Extension: ${data.extensionConnected ? "CONNECTED" : "DISCONNECTED"}`);
+      }
     } catch (err) {
-      console.log(JSON.stringify({ ok: false, error: `Bridge unreachable: ${err.message}` }, null, 2));
+      const statusObj = { ok: false, daemonState: stateInfo.state || "stopped", error: err.message };
+      if (prettyOutput) {
+        console.log(JSON.stringify(statusObj, null, 2));
+      } else if (jsonOutput) {
+        console.log(JSON.stringify(statusObj));
+      } else {
+        console.log(`Bridge: ${stateInfo.state === "stopped" ? "STOPPED (explicitly)" : "OFFLINE"}`);
+        console.log(`Error: ${err.message}`);
+      }
       process.exit(1);
     }
     return;
   }
 
   // Ensure bridge is up for other actions
-  await ensureBridge(autoDaemon);
+  await ensureBridge(autoDaemon, forceAutoDaemon);
 
   // Tab subcommand router
   if (action === "tab") {
@@ -355,9 +448,13 @@ async function main() {
     const ms = parseInt(args[0], 10);
     await new Promise((r) => setTimeout(r, ms));
     if (rawOutput) {
-      console.log(ms);
-    } else {
+      process.stdout.write(String(ms));
+    } else if (prettyOutput) {
       console.log(JSON.stringify({ ok: true, waitedMs: ms }, null, 2));
+    } else if (jsonOutput) {
+      console.log(JSON.stringify({ ok: true, waitedMs: ms }));
+    } else {
+      console.log(`Waited ${ms}ms`);
     }
     process.exit(0);
   }
@@ -383,7 +480,7 @@ async function main() {
         break;
 
       case "snapshot":
-        if (compactMode) params.compact = true;
+        if (compactMode || (!jsonOutput && !prettyOutput)) params.compact = true;
         if (args[0] && /^\d+$/.test(args[0])) params.maxText = parseInt(args[0], 10);
         break;
 
@@ -569,13 +666,15 @@ async function main() {
     const data = await res.json();
 
     if (!res.ok || !data.ok) {
-      console.error(JSON.stringify({ ok: false, error: data.error || `HTTP ${res.status}` }, null, 2));
+      const errPayload = { ok: false, error: data.error || `HTTP ${res.status}` };
+      if (prettyOutput) console.error(JSON.stringify(errPayload, null, 2));
+      else console.error(JSON.stringify(errPayload));
       process.exit(1);
     }
 
     const result = data.result !== undefined ? data.result : data;
 
-    // Handle binary file saving for screenshot and pdf
+    // Binary file saving for screenshot and pdf
     if (saveFilePath) {
       let b64 = null;
       if (typeof result?.dataUrl === "string") {
@@ -589,8 +688,12 @@ async function main() {
       if (b64) {
         const buf = Buffer.from(b64, "base64");
         fs.writeFileSync(saveFilePath, buf);
-        if (jsonOutput) {
+        if (rawOutput) {
+          process.stdout.write(saveFilePath);
+        } else if (prettyOutput) {
           console.log(JSON.stringify({ ok: true, saved: saveFilePath, bytes: buf.length }, null, 2));
+        } else if (jsonOutput) {
+          console.log(JSON.stringify({ ok: true, saved: saveFilePath, bytes: buf.length }));
         } else {
           console.log(`Saved ${action === "print_pdf" ? "PDF" : "screenshot"} to ${saveFilePath} (${buf.length} bytes)`);
         }
@@ -598,32 +701,56 @@ async function main() {
       }
     }
 
-    // Raw string / unformatted output mode
+    // 1. Raw Output Mode (-r / --raw): pure string without wrappers or trailing newlines
     if (rawOutput) {
-      if (typeof result?.value === "string" || typeof result?.value === "number") {
-        console.log(result.value);
+      if (result?.value !== undefined) {
+        process.stdout.write(typeof result.value === "object" ? JSON.stringify(result.value) : String(result.value));
         return;
       }
       if (typeof result?.text === "string") {
-        console.log(result.text);
+        process.stdout.write(result.text);
         return;
       }
       if (typeof result?.url === "string") {
-        console.log(result.url);
+        process.stdout.write(result.url);
+        return;
+      }
+      if (Array.isArray(result?.tabs)) {
+        process.stdout.write(result.tabs.map((t) => t.id).join(" "));
+        return;
+      }
+      process.stdout.write(typeof result === "object" ? JSON.stringify(result) : String(result));
+      return;
+    }
+
+    // 2. Pretty JSON Mode (--pretty): 2-space indented full object
+    if (prettyOutput) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+
+    // 3. Compact JSON Mode (--json): minified 1-line valid JSON object
+    if (jsonOutput) {
+      console.log(JSON.stringify(result));
+      return;
+    }
+
+    // 4. Smart Default Mode (Token-Efficient, No Info Loss):
+    if (action === "list_tabs" && Array.isArray(result?.tabs)) {
+      console.log(formatTabsTable(result.tabs));
+      return;
+    }
+
+    if (action === "snapshot") {
+      if (result?.compactView) {
+        console.log(`Page: ${result.title || "Untitled"} (${result.url})`);
+        console.log(`Interactive elements (${result.elements?.length || 0}):\n`);
+        console.log(result.compactView);
         return;
       }
     }
 
-    // Friendly compact formatting for snapshot if requested and not forced JSON
-    if (action === "snapshot" && compactMode && result?.compactView && !jsonOutput) {
-      console.log(`Page: ${result.title || "Untitled"} (${result.url})`);
-      console.log(`Interactive elements (${result.elements?.length || 0}):\n`);
-      console.log(result.compactView);
-      return;
-    }
-
-    // Friendly string formatting for get_property when not forced JSON
-    if (action === "get_property" && !jsonOutput && result?.value !== undefined) {
+    if (action === "get_property" && result?.value !== undefined) {
       if (typeof result.value === "object") {
         console.log(JSON.stringify(result.value, null, 2));
       } else {
@@ -632,9 +759,55 @@ async function main() {
       return;
     }
 
+    if (action === "eval_js" && result?.value !== undefined) {
+      if (typeof result.value === "object") {
+        console.log(JSON.stringify(result.value, null, 2));
+      } else {
+        console.log(result.value);
+      }
+      return;
+    }
+
+    // Friendly 1-line action summaries for mutations
+    if (result?.clicked) {
+      console.log(`Clicked ${result.clicked}`);
+      return;
+    }
+    if (result?.typed) {
+      console.log(`Typed into ${result.typed}`);
+      return;
+    }
+    if (result?.cleared) {
+      console.log(`Cleared ${result.cleared}`);
+      return;
+    }
+    if (result?.checked) {
+      console.log(`Checked ${result.checked}`);
+      return;
+    }
+    if (result?.unchecked) {
+      console.log(`Unchecked ${result.unchecked}`);
+      return;
+    }
+    if (result?.focused) {
+      console.log(`Focused ${result.focused}`);
+      return;
+    }
+    if (result?.scrolledIntoView) {
+      console.log(`Scrolled into view: ${result.scrolledIntoView}`);
+      return;
+    }
+    if (result?.selectedOption) {
+      console.log(`Selected option on ${result.selectedOption}`);
+      return;
+    }
+
+    // Fallback: output clean JSON
     console.log(JSON.stringify(result, null, 2));
   } catch (err) {
-    console.error(JSON.stringify({ ok: false, error: err.message }, null, 2));
+    const errPayload = { ok: false, error: err.message };
+    if (prettyOutput) console.error(JSON.stringify(errPayload, null, 2));
+    else console.error(JSON.stringify(errPayload));
     process.exit(1);
   }
 }
