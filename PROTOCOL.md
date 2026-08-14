@@ -122,6 +122,27 @@ Returns `{ url }` once loaded.
 ### `hover`
 `params: { ref?, index?, selector?, text?, autoSettle?: true, settleMs?: 50 }` - hover over target element.
 
+### `focus`
+`params: { ref?, index?, selector?, text?, placeholder? }` - focus target element.
+
+### `dblclick`
+`params: { ref?, index?, selector?, text? }` - double-click target element.
+
+### `clear`
+`params: { ref?, index?, selector?, placeholder? }` - clear an input or textarea field.
+
+### `check`
+`params: { ref?, index?, selector?, text? }` - check a checkbox or radio button.
+
+### `uncheck`
+`params: { ref?, index?, selector?, text? }` - uncheck a checkbox.
+
+### `scrollintoview`
+`params: { ref?, index?, selector?, text?, placeholder? }` - scroll target element into viewport.
+
+### `get_property`
+`params: { property: "text"|"value"|"attr"|"title"|"url"|"html"|"box"|"count", ref?, index?, selector?, attr? }` - retrieve specific property of target element or page. Result: `{ property, value: ... }`.
+
 ### `scroll`
 `params: { direction: "up"|"down", amount? }` - scroll by `amount` px
 (default 600). `direction: "down"` is the default.
