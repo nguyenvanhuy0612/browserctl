@@ -198,14 +198,17 @@ async function connect() {
   });
 }
 
-// On service-worker load/startup, only auto-connect if the user has connected
-// before (autoConnect) and hasn't been left in the give-up state. A fresh
-// install stays idle and makes NO socket attempt -> no console error.
+// On service-worker load/startup/install, auto-connect immediately by default
+// (capped exponential backoff retries in background if bridge is starting up).
+// Only stops if the user explicitly clicks Disconnect in popup (setting giveUp: true).
 async function init() {
-  const { autoConnect = false, giveUp = false } =
+  const { autoConnect = true, giveUp = false } =
     await chrome.storage.local.get(["autoConnect", "giveUp"]);
-  if (autoConnect && !giveUp) startConnecting();
-  else connState = "idle";
+  if (autoConnect !== false && !giveUp) {
+    startConnecting();
+  } else {
+    connState = "idle";
+  }
 }
 
 // Route a command to the right handler. Returns { ok, result } or throws.
