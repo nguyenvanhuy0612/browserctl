@@ -9,7 +9,7 @@ All three are now one.
 | Repo directory | `claude/browserctl` |
 | MCP server key in `~/.claude.json` | `browserctl` |
 | Internal identifier prefix | `bctl` |
-| Package names | `browserctl-bridge`, `browserctl-mcp` |
+| Package names | `browserctl` (root package & CLI), `browserctl-mcp` (MCP binary) |
 | Extension display name | `browserctl` |
 | MCP tool prefix | `browser_` — deliberately unchanged |
 

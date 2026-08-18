@@ -40,16 +40,22 @@ debugger acquisition** — including the auto-reattach path, which is easy to mi
 | Command | How it gets its capability |
 |---|---|
 | `cdp_detach` | releases a session; never acquires one |
+| `clear` | content script |
+| `check` | content script |
+| `uncheck` | content script |
 | `click` | content script |
 | `click_selector` | content script |
 | `close_tab` | chrome.tabs / chrome.windows |
 | `current_tab` | chrome.tabs / chrome.windows |
 | `describe_element` | content script |
+| `fill` | content script |
 | `fill_selector` | content script |
 | `find` | content script |
 | `find_text` | content script |
+| `focus` | content script |
 | `focus_window` | chrome.tabs / chrome.windows |
 | `get_page_content` | content script |
+| `get_property` | content script |
 | `go_back` | chrome.tabs / chrome.windows |
 | `go_forward` | chrome.tabs / chrome.windows |
 | `group_tab` | chrome.tabs / chrome.windows |
@@ -62,6 +68,7 @@ debugger acquisition** — including the auto-reattach path, which is easy to mi
 | `net_start` | chrome.webRequest |
 | `net_stop` | chrome.webRequest |
 | `new_tab` | chrome.tabs / chrome.windows |
+| `paste` | content script |
 | `press_key` | content script |
 | `read_page` | content script |
 | `read_pdf` | chrome.tabs / chrome.windows |
@@ -72,6 +79,7 @@ debugger acquisition** — including the auto-reattach path, which is easy to mi
 | `reload_extension` | chrome.tabs / chrome.windows |
 | `replay` | chrome.tabs / chrome.windows |
 | `scroll` | content script |
+| `scrollintoview` | content script |
 | `select_option` | content script |
 | `snapshot` | content script |
 | `storage_clear` | content script |

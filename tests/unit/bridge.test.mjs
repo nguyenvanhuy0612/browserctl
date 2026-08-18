@@ -7,10 +7,7 @@
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-// Reuse the bridge's own "ws" dependency (no new npm deps) via a direct relative
-// path into bridge/node_modules — tests/unit has no node_modules of its own to
-// resolve the bare "ws" specifier from.
-import { WebSocket } from "../../bridge/node_modules/ws/wrapper.mjs";
+import { WebSocket } from "ws";
 
 // Small, test-only overrides so timeout/payload-cap behavior can be exercised in
 // milliseconds/kilobytes instead of real minutes/megabytes. Must be set before

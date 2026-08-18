@@ -10,7 +10,7 @@
 //   - navigate/go_back/go_forward wait for the real load (hardened waitForComplete)
 //   - coordinate_click maps viewport pixels correctly
 //
-// Prereqs: bridge running (bridge/ npm start) and the extension connected.
+// Prereqs: bridge running (`browserctl start` or `npm start`) and the extension connected.
 // Run:  node tests/e2e/run.mjs
 // It creates a dedicated tab, runs everything there, and closes it at the end.
 

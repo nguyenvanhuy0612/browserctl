@@ -42,76 +42,80 @@ modifiers** cannot work on a hidden tab — they now fail with an actionable err
 silently doing nothing. Everything else, including every DOM action and every screenshot,
 genuinely works in the background. See `docs/REFERENCE.md` for the full matrix.
 
-## Setup
+## Quickstart & Installation
 
-### 1. Bridge server
+### 1. Install & Configure MCP (Zero-Setup via NPX)
+
+You can run `browserctl` directly without cloning the repository.
+
+#### For Claude Desktop / Antigravity / Cursor / Windsurf (`.mcp.json`)
+
+Add `browserctl` to your MCP configuration:
+
+```jsonc
+{
+  "mcpServers": {
+    "browserctl": {
+      "command": "npx",
+      "args": ["-y", "browserctl-mcp"],
+      "env": {
+        "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765",
+        "BROWSERCTL_MCP_PROFILE": "core" // 'core' (~24 tools) or 'all' (all 70+ tools)
+      }
+    }
+  }
+}
+```
+
+#### For Claude Code CLI
 
 ```bash
-cd bridge
-npm install
-npm start          # runs bridge server in foreground (http://0.0.0.0:8765)
+claude mcp add browserctl -- npx -y browserctl-mcp
 ```
 
-Or use the CLI to manage the daemon in the background:
+#### Global CLI Installation
+
+To use the `browserctl` command from anywhere in your terminal:
 
 ```bash
-browserctl start      # Spawn bridge daemon in background (zero-terminal)
-browserctl status     # Check bridge health, daemon state & extension connection
-browserctl stop       # Stop bridge daemon (records explicit stopped state)
-browserctl restart    # Restart bridge daemon
+npm install -g browserctl
 ```
 
-**Auto-Start Daemon**: When you run any CLI command (e.g. `browserctl open ...`) or
-when an MCP client connects, the bridge daemon is spawned automatically if it was
-never started before. If you explicitly ran `browserctl stop`, subsequent commands
-will NOT auto-start; they return an actionable error:
-```
-[browserctl] Error: Bridge daemon is currently stopped (stopped by user/agent).
-             Run 'browserctl start' to restart the daemon, or pass --auto-daemon.
-```
+---
 
-This follows the same state model as Docker/Tailscale: explicit stop is respected,
-fresh installs auto-start seamlessly. Override with `--auto-daemon` or set
-`BROWSERCTL_AUTO_START=manual` to disable auto-start entirely.
-
-### 2. Load the extension
+### 2. Load the Chrome Extension
 
 1. Open `chrome://extensions` (or `edge://extensions` on Microsoft Edge)
-2. Enable **Developer mode** (top right)
-3. **Load unpacked** -> select the `extension/` folder
-4. Click the extension icon and press **Connect** in the popup.
+2. Enable **Developer mode** (top right toggle)
+3. Click **Load unpacked** -> select the `extension/` folder
+4. Click the extension icon in Chrome toolbar and press **Connect** in the popup.
 
-A freshly installed extension stays idle and makes no connection attempt (so a
-not-yet-started bridge produces no console error). The first time you press
-**Connect** and it succeeds, the extension remembers it and auto-reconnects on
-later browser starts. After that it keeps trying with capped exponential backoff
-(up to 30s between tries) and **never permanently gives up** on a transient
-outage — restart the bridge and the extension re-links on its own, no manual
-Connect needed. A `chrome.alarms` keepalive resumes reconnect even after the
-MV3 service worker is recycled. Only an explicit **Disconnect** stops the loop.
-When both are running, the popup reads **Connected**.
+> **Auto-Reconnect & Keepalive**: Once connected, the extension remembers the link and automatically reconnects on browser startup. Only an explicit **Disconnect** in the popup stops reconnection.
 
-While connected, the bridge sends an application-level heartbeat ping every ~20s.
-Receiving it resets the MV3 service-worker idle timer, so the socket stays
-genuinely open instead of dropping on an idle gap; the extension's pong lets the
-bridge drop a dead link promptly. The keepalive alarm is then only a fallback.
+---
 
-Works on any Chromium browser (Chrome, Edge). The host/port the extension dials
-is configurable on the extension's **options page** (popup -> "Open settings",
-or the Extensions page -> Details -> Extension options) and stored in
-`chrome.storage`; the service worker reconnects automatically on change.
+### 3. Bridge Daemon & Zero-Terminal Execution
 
-### CLI Helper (`browserctl`)
+**No manual terminal needed**: When an MCP client launches or when you run any `browserctl` CLI command, the local bridge daemon is started **automatically in the background**.
 
-`browserctl` is executable globally and can be invoked directly from anywhere in the terminal:
+You can also manage the daemon explicitly:
 
 ```bash
-# Daemon management
-browserctl status                         # Check bridge, daemon state & extension
+browserctl status                         # Check bridge health, daemon state & extension
 browserctl start                          # Start bridge daemon in background
-browserctl stop                           # Stop bridge daemon (explicit stopped state)
+browserctl stop                           # Stop bridge daemon (records explicit stopped state)
 browserctl restart                        # Restart bridge daemon
+```
 
+**State Machine (Docker/Tailscale Model)**:
+- If you explicitly ran `browserctl stop`, subsequent commands will NOT auto-start the daemon unexpectedly; they prompt you to run `browserctl start` (or pass `--auto-daemon`).
+- To disable auto-start globally, set `BROWSERCTL_AUTO_START=manual`.
+
+---
+
+## CLI Reference (`browserctl`)
+
+```bash
 # Navigation & History
 browserctl open https://github.com        # Navigate target tab (alias: navigate)
 browserctl back | forward | reload        # History navigation
@@ -124,6 +128,8 @@ browserctl get url                        # Get page URL
 browserctl get text @e1                   # Get visible text of element
 browserctl get value @e1                  # Get input/textarea value
 browserctl get attr @e1 href              # Get element attribute
+browserctl get box @e1                    # Get bounding box (x, y, width, height)
+browserctl get count "button"             # Count matching elements
 
 # Interaction & Form Utilities
 browserctl click @e1                      # Click by ref (@e1, ref_1, 0)
@@ -183,15 +189,10 @@ browserctl tabs --json             # -> {"tabs":[...]}
 
 The `mcp/` server exposes browser automation tools for MCP clients (Antigravity, Claude Code, Cursor, Windsurf).
 
-**Auto-Bridge Daemon**: The MCP server automatically starts the bridge daemon in the
-background when launched by an MCP client. No manual terminal or `npm start` required.
-If the daemon was explicitly stopped (via `browser_stop` tool or `browserctl stop`),
-auto-start is suppressed until the agent calls `browser_start`.
-
 ### Token Optimization & Profiles
 By default, `browserctl` runs with `BROWSERCTL_MCP_PROFILE="core"` which exposes ~24 core tools plus `browser_action` (a universal dispatcher tool), saving ~10,000 system prompt tokens. To register all 70+ granular tools, set `BROWSERCTL_MCP_PROFILE="all"`.
 
-### MCP Core Interaction Tools
+### MCP Core Tools
 
 | Tool | Description |
 |---|---|
@@ -199,6 +200,10 @@ By default, `browserctl` runs with `BROWSERCTL_MCP_PROFILE="core"` which exposes
 | `browser_fill` | Fill input or rich-text editor (ProseMirror/Tiptap/Vue/React) |
 | `browser_paste` | Paste large text/Markdown via Clipboard events without AST corruption |
 | `browser_type` | Focus element and set text (React/Vue `v-model` compatible) |
+| `browser_snapshot` | Fast token-efficient DOM snapshot with stable refs |
+| `browser_read_page` | Accessibility tree inspection |
+| `browser_screenshot` | Viewport or full-page screenshot (lossless PNG or vision-optimized JPEG) |
+| `browser_eval_js` | Evaluate JavaScript in page context |
 | `browser_start` | Start bridge daemon in background if stopped |
 | `browser_stop` | Stop bridge daemon (records explicit stopped state) |
 | `browser_status` | Check bridge health, daemon state, extension connection |
@@ -206,21 +211,14 @@ By default, `browserctl` runs with `BROWSERCTL_MCP_PROFILE="core"` which exposes
 ### Output Format Parameter
 
 Tools that return structured data (`browser_snapshot`, `browser_eval_js`, `browser_status`)
-accept an optional `format` parameter:
-
-| Value | Description |
-|---|---|
-| `"smart"` (default) | Token-efficient compact output |
-| `"json"` | Compact single-line JSON |
-| `"pretty"` | 2-space indented JSON |
-| `"raw"` | Direct scalar value only |
+accept an optional `format` parameter (`"smart"` default, `"json"`, `"pretty"`, `"raw"`).
 
 ```jsonc
 {
   "mcpServers": {
     "browserctl": {
-      "command": "node",
-      "args": ["/Users/admin/Documents/my_notes/claude/browserctl/mcp/index.js"],
+      "command": "npx",
+      "args": ["-y", "browserctl-mcp"],
       "env": {
         "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765",
         "BROWSERCTL_MCP_PROFILE": "core"
@@ -231,8 +229,8 @@ accept an optional `format` parameter:
 ```
 
 The bridge daemon auto-starts when the MCP server boots. The extension must be
-installed and connected in Chrome. Typical Claude Code use:
-"snapshot the page, then click the login button" -> Claude calls `browser_snapshot`,
+installed and connected in Chrome. Typical agent use:
+"snapshot the page, then click the login button" -> Agent calls `browser_snapshot`,
 reads the indexed elements, then `browser_click`.
 
 ## Using it from any other agent (raw HTTP)
