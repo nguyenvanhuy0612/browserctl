@@ -299,6 +299,16 @@ Non-goals, and why:
 - **Locator generation and test assertions.** playwright-mcp does this better and
   emits locators that paste straight into real Playwright tests. Competing here
   means losing on our opponent's home ground.
+- **Visual Web / Frontend Design Editors (e.g. mcp-chrome style).** Out of scope.
+  `browserctl` is focused strictly on robust web automation, DOM control, and unattended
+  background execution. Interactive CSS visual drag-and-drop belongs in dedicated frontend IDE tools.
+- **Semantic Vector Tab Search (Wasm SIMD embeddings).** Evaluated and rejected: requires
+  heavy Wasm binaries (10-50MB bloat) and background CPU extraction, whereas LLMs already
+  perform zero-overhead semantic selection directly from `browser_list_tabs` (titles/URLs)
+  and targeted `browser_read_page`.
+- **Chrome Native Bookmarks/History APIs.** Evaluated: while trivial to implement, adding
+  `"bookmarks"` and `"history"` permissions triggers browser security warnings and dilutes the
+  core web automation mission.
 - **Performance tracing, insights, Lighthouse.** Needs the DevTools trace engine;
   cost far exceeds value (see `backlog-chrome-devtools-parity.md`).
 - **Matching playwright-mcp on feature count.** The moat is the control model, not
