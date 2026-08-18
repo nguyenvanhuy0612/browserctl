@@ -1,11 +1,11 @@
 # browserctl — complete reference
 
-Version 0.5. Captured 2026-08-04. The extension, bridge, and MCP server are versioned
+Version 0.5.1. The extension, bridge, and MCP server are versioned
 together; `PROTOCOL.md` is the wire-level spec and this document is the operator's guide.
 
 ## What it is
 
-**browserctl** (v0.5, 68 tools) gives an AI agent DOM-level control of a *real*, already-logged-in Chrome
+**browserctl** (v0.5.1, 70+ tools) gives an AI agent DOM-level control of a *real*, already-logged-in Chrome
 or Edge, through a neutral HTTP/WebSocket API and an MCP server. It drives one pinned tab
 **in the background**, without stealing focus and without a debugger banner on the common
 path, so you can keep working in your own tab while the agent works in its own.
@@ -13,33 +13,60 @@ path, so you can keep working in your own tab while the agent works in its own.
 It is a general-purpose browser control surface — deliberately **not** a test-automation
 framework. See `prior-art.md` § Positioning decision for what that rules out and why.
 
-### CLI Helper (`cli.js`)
+### CLI Helper (`browserctl`)
 
-A quick CLI helper script is available at `cli.js` for standalone command execution (or from shell agents):
+`browserctl` is executable globally and can be invoked directly from anywhere in the terminal:
 
 ```bash
-node cli.js status
-node cli.js navigate https://www.linkedin.com
-node cli.js snapshot
-node cli.js click ref_1
-node cli.js type ref_2 "hello"
-node cli.js exec_system_cmd "echo hello"
+# Daemon & connectivity
+browserctl status                         # Check bridge and extension connection
+browserctl start                          # Start bridge daemon in background
+browserctl stop                           # Stop bridge daemon (records stopped state)
+
+# Navigation & History
+browserctl open https://github.com        # Navigate target tab (alias: navigate)
+browserctl back | forward | reload        # History navigation
+
+# Inspection & Fast Property Queries (get)
+browserctl snapshot --compact             # Token-efficient DOM snapshot (saves 75% tokens)
+browserctl read_page                      # Read accessibility tree with refs
+browserctl get title                      # Get page title
+browserctl get url                        # Get page URL
+browserctl get text @e1                   # Get visible text of element
+browserctl get value @e1                  # Get input/textarea value
+browserctl get attr @e1 href              # Get element attribute
+
+# Interaction & Form Utilities
+browserctl click @e1                      # Click by ref (@e1, ref_1, 0)
+browserctl fill @e1 "my query"            # Clear input and fill text (React/Vue v-model compatible)
+browserctl paste @e1 "markdown content"   # Paste multi-line text into inputs or rich-text editors (ProseMirror/Tiptap)
+browserctl type @e2 "appended text"       # Type into input field
+browserctl clear @e1                      # Clear input field
+browserctl check @e3                      # Check checkbox / radio button
+browserctl uncheck @e3                    # Uncheck checkbox
+browserctl select @e4 "value"             # Select dropdown option
+
+# Capture, Export & JavaScript
+browserctl screenshot page.png [-f]       # Capture viewport or fullpage screenshot to file
+browserctl pdf document.pdf               # Print page to PDF file directly
+browserctl eval -r "document.title"       # Run JS and output raw value to stdout
+browserctl tab [list|new|switch|close]    # Manage browser tabs
 ```
 
 ## Architecture
 
 ```
-Agent (Claude Code / any MCP client / any HTTP client)
+Agent (Claude Code / Antigravity / any MCP client / CLI / HTTP client)
       |  MCP stdio            |  HTTP POST /command
       v                       v
 mcp/index.js  ------------>  bridge/server.js        (Node, 0.0.0.0:8765, configurable via HOST/PORT)
- 66 tools, thin wrapper       relay + correlation + heartbeat
+ (Auto-daemon spawn)          relay + correlation + heartbeat + daemon state machine
                                       |  WebSocket /extension
                                       v
                               extension/ (Manifest V3)
                                 background.js  service worker, dispatch, tab pinning
-                                content.js     DOM reads/writes, a11y tree, refs
-                                cdp.js         chrome.debugger: console/network/HAR/input
+                                content.js     DOM reads/writes, a11y tree, refs, insertText
+                                cdp.js         chrome.debugger: console/network/HAR/input/pdf
                                 netlog.js      chrome.webRequest light capture (no banner)
 ```
 
@@ -52,15 +79,9 @@ Four dispatch layers, and every action belongs to exactly one:
 | `CDP_ACTIONS` | `chrome.debugger` | yes | yes, **except synthetic input** |
 | everything else | `chrome.tabs` / `chrome.windows` in the worker | no | yes |
 
-## Install
+## Install & Setup
 
-### 1. Bridge
-
-```bash
-cd bridge && npm install && npm start      # listens on 0.0.0.0:8765 by default (HOST/PORT overridable via env)
-```
-
-### 2. Extension
+### 1. Load the Chrome Extension
 
 1. `chrome://extensions` (or `edge://extensions`) → enable **Developer mode**
 2. **Load unpacked** → select the `extension/` folder
@@ -71,42 +92,58 @@ makes no connection attempt. After the first successful Connect it remembers and
 auto-reconnects with capped exponential backoff (max 30s), and never permanently gives up
 on a transient outage — only an explicit **Disconnect** stops it.
 
-> **Moving the repo directory breaks the extension.** Chrome registers an unpacked
-> extension by absolute path; after a move, Reload cannot recover it and you must
-> **Load unpacked** again from the new path (new extension ID, empty `chrome.storage`, so
-> press Connect once more). See `rename-plan.md`.
+### 2. Using with MCP Clients (Claude Code, Antigravity, Cursor, Windsurf)
 
-Host/port are configurable on the options page and stored in `chrome.storage`; the worker
-reconnects on change. Keep the extension host at `127.0.0.1` so Chrome connects to the local bridge.
+**Zero-Manual-Server**: The bridge daemon is started automatically in the background when the MCP server launches. No separate `npm start` terminal required!
 
-### 3. MCP server
+#### Option A: Run via `npx` (from NPM Registry)
 
-```bash
-cd mcp && npm install
-# macOS
-claude mcp add browserctl -- node "/Users/admin/Documents/my_notes/claude/browserctl/mcp/index.js"
-# Windows
-claude mcp add browserctl -- node "C:/Users/HUYNGUYEN/Documents/my_notes/claude/browserctl/mcp/index.js"
-```
-
-Or in a project's `.mcp.json`:
+Add to your `claude_desktop_config.json`, `.mcp.json`, or Antigravity MCP settings:
 
 ```jsonc
 {
   "mcpServers": {
     "browserctl": {
-      "command": "node",
-      "args": ["/absolute/path/to/claude/browserctl/mcp/index.js"],
+      "command": "npx",
+      "args": ["-y", "browserctl-mcp"],
       "env": {
         "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765",
-        "BROWSERCTL_MCP_PROFILE": "core" // default: 'core' (~20 tools + browser_action); set 'all' for full 68 schemas
+        "BROWSERCTL_MCP_PROFILE": "core" // 'core' (~24 tools) or 'all' (all 70+ tools)
       }
     }
   }
 }
 ```
 
-Tools appear as `mcp__browserctl__browser_*`. In `core` mode, `browser_action` is always available to dynamically invoke any protocol action (CDP, cookies, storage, HAR export, recordings, etc.). `BRIDGE_URL` is still honoured as a legacy alias for `BROWSERCTL_BRIDGE_URL`.
+Or with Claude CLI:
+```bash
+claude mcp add browserctl -- npx -y browserctl-mcp
+```
+
+#### Option B: Global Install via NPM
+
+```bash
+npm install -g browserctl
+```
+
+#### Option C: Local Path
+
+```jsonc
+{
+  "mcpServers": {
+    "browserctl": {
+      "command": "node",
+      "args": ["/absolute/path/to/browserctl/mcp/index.js"],
+      "env": {
+        "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765",
+        "BROWSERCTL_MCP_PROFILE": "core"
+      }
+    }
+  }
+}
+```
+
+Tools appear as `mcp__browserctl__browser_*`. In `core` mode, `browser_action` is always available to dynamically invoke any protocol action (CDP, cookies, storage, HAR export, recordings, etc.).
 
 ## The control model
 
@@ -200,22 +237,35 @@ Every tab-scoped tool also accepts `tabId`.
 
 | Tool | Purpose | Params |
 |---|---|---|
-| `browser_click` | Click element | `index`, `ref` |
-| `browser_click_selector` | Click by CSS selector | — |
-| `browser_type` | Type into element | `index`, `ref`, `text`, `submit` |
-| `browser_fill_selector` | Fill by CSS selector | — |
-| `browser_hover` | Hover element | `index`, `ref` |
-| `browser_select_option` | Select dropdown option | `index`, `ref`, `value`, `label` |
-| `browser_press_key` | Press a key | `key`, `index`, `ref`, `modifiers` |
+| `browser_click` | Click element by ref/selector/text | `ref`, `selector`, `text`, `waitFor`, `settleMs` |
+| `browser_fill` | Fill input or rich-text editor (clears & sets instantly) | `ref`, `selector`, `text`, `waitFor`, `submit` |
+| `browser_paste` | Paste large text/Markdown via Clipboard events | `ref`, `selector`, `text`, `waitFor`, `submit` |
+| `browser_type` | Focus element and set text (React/Vue `v-model` compatible) | `ref`, `selector`, `text`, `waitFor`, `submit` |
+| `browser_clear` | Clear input/textarea element | `ref`, `selector` |
+| `browser_check` | Check checkbox or radio button | `ref`, `selector`, `text` |
+| `browser_uncheck` | Uncheck checkbox | `ref`, `selector`, `text` |
+| `browser_click_selector` | Click by CSS selector | `selector` |
+| `browser_fill_selector` | Fill by CSS selector | `selector`, `value` |
+| `browser_hover` | Hover element | `ref`, `selector`, `text` |
+| `browser_select_option` | Select dropdown option | `ref`, `selector`, `value`, `label` |
+| `browser_press_key` | Press a key | `key`, `ref`, `modifiers`, `allowSynthetic` |
 | `browser_scroll` | Scroll page | `direction`, `amount` |
-| `browser_insert_text` | Insert text (CDP) | — |
+| `browser_insert_text` | Insert text (CDP) | `text` |
+
+### Daemon & Lifecycle Management
+
+| Tool | Purpose | Params |
+|---|---|---|
+| `browser_status` | Bridge & extension connectivity, daemon state | `format` |
+| `browser_start` | Start bridge daemon in background if stopped | — |
+| `browser_stop` | Stop bridge daemon (records explicit stopped state) | — |
 
 ### Interact (pixel — FOREGROUND tab only)
 
 | Tool | Purpose | Params |
 |---|---|---|
 | `browser_coordinate_click` | Click at coordinates | `x`, `y`, `button`, `clickCount` |
-| `browser_coordinate_drag` | Drag between coordinates | `fromX` |
+| `browser_coordinate_drag` | Drag between coordinates | `fromX`, `fromY`, `toX`, `toY` |
 
 ### Navigate & wait
 

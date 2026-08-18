@@ -1,23 +1,59 @@
 {
   "name": "browserctl",
   "version": "0.5.1",
-  "description": "Universal Browser Control Protocol for AI Agents and Developers",
+  "description": "Universal Browser Control Protocol & MCP Server for AI Agents and Developers",
   "type": "module",
   "main": "cli.js",
   "bin": {
-    "browserctl": "./cli.js"
+    "browserctl": "./cli.js",
+    "browserctl-mcp": "./mcp/index.js",
+    "bctl": "./cli.js"
+  },
+  "files": [
+    "cli.js",
+    "bridge/",
+    "mcp/",
+    "extension/",
+    "README.md",
+    "PROTOCOL.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
   },
   "scripts": {
-    "test": "node --test tests/unit/bridge.test.mjs",
-    "start": "node bridge/server.js"
+    "test": "node --test tests/unit/bridge.test.mjs tests/unit/cli_and_mcp.test.mjs",
+    "start": "node bridge/server.js",
+    "mcp": "node mcp/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "execa": "^10.0.1",
+    "ws": "^8.18.0",
+    "zod": "^4.4.3"
   },
   "keywords": [
     "mcp",
+    "mcp-server",
     "browser",
+    "browser-control",
     "automation",
     "ai-agent",
-    "chrome"
+    "claude",
+    "chrome",
+    "extension"
   ],
-  "author": "Nguyen Van Huy",
-  "license": "MIT"
+  "author": "Nguyen Van Huy <nguyenvanhuy0612@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nguyenvanhuy0612/browserctl.git"
+  },
+  "homepage": "https://github.com/nguyenvanhuy0612/browserctl#readme",
+  "bugs": {
+    "url": "https://github.com/nguyenvanhuy0612/browserctl/issues"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
 }
