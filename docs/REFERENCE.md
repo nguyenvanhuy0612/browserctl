@@ -252,13 +252,16 @@ Every tab-scoped tool also accepts `tabId`.
 | `browser_scroll` | Scroll page | `direction`, `amount` |
 | `browser_insert_text` | Insert text (CDP) | `text` |
 
-### Daemon & Lifecycle Management
+### Daemon & Dynamic Tool Management
 
 | Tool | Purpose | Params |
 |---|---|---|
 | `browser_status` | Bridge & extension connectivity, daemon state | `format` |
 | `browser_start` | Start bridge daemon in background if stopped | — |
 | `browser_stop` | Stop bridge daemon (records explicit stopped state) | — |
+| `browser_load_tools` | Dynamically load tool categories (`network`, `cdp`, `cookies`, `storage`, etc.) into prompt | `profile`, `tools` |
+| `browser_unload_tools` | Unload extra tools and reset prompt back to lightweight `core` profile | `profile`, `tools` |
+| `browser_list_available_tools` | List all tool profiles and currently active/inactive status | `format` |
 
 ### Interact (pixel — FOREGROUND tab only)
 
