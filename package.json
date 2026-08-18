@@ -1,12 +1,12 @@
 {
-  "name": "@nguyenvanhuy0612/browserctl",
+  "name": "browserctl-mcp",
   "version": "0.5.1",
   "description": "Universal Browser Control Protocol & MCP Server for AI Agents and Developers",
   "type": "module",
   "main": "cli.js",
   "bin": {
-    "browserctl": "./cli.js",
     "browserctl-mcp": "./mcp/index.js",
+    "browserctl": "./cli.js",
     "bctl": "./cli.js"
   },
   "files": [
