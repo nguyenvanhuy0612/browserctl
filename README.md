@@ -1,7 +1,12 @@
 # browserctl
 
-A Chrome extension + local bridge server that lets any AI agent (Claude, GPT, or a
-plain script) drive a real Chrome browser through a neutral HTTP/WebSocket API.
+A Chrome/Edge extension + local bridge server + MCP server that lets any AI agent (Claude, Antigravity, Cursor, or scripts) drive a real Chromium browser through a neutral HTTP/WebSocket API.
+
+> [!WARNING]
+> **Safety & Isolation Disclaimer:**
+> `browserctl` grants AI agents full programmatic control over browser DOM, forms, cookies, and network requests.
+> - **DO NOT USE ON YOUR PRIMARY PERSONAL BROWSER PROFILE** (e.g. personal profiles containing saved banking credentials, password managers, or private data).
+> - **STRONGLY RECOMMENDED**: Run `browserctl` in a dedicated, isolated browser profile, an open-source **Chromium test build** (e.g. Ungoogled Chromium / raw Chromium), or an isolated sandbox/testing browser instance.
 
 ## How it works
 

@@ -3,6 +3,10 @@
 Version 0.5.1. The extension, bridge, and MCP server are versioned
 together; `PROTOCOL.md` is the wire-level spec and this document is the operator's guide.
 
+> [!WARNING]
+> **Safety & Isolation Disclaimer:**
+> `browserctl` gives AI agents direct DOM and network control. Never run on a primary browser profile with personal credentials. Use dedicated testing profiles or open-source Chromium builds.
+
 ## What it is
 
 **browserctl** (v0.5.1, 70+ tools) gives an AI agent DOM-level control of a *real*, already-logged-in Chrome
