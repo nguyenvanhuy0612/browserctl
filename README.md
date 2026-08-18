@@ -62,7 +62,7 @@ Add `browserctl` to your MCP configuration:
   "mcpServers": {
     "browserctl": {
       "command": "npx",
-      "args": ["-y", "browserctl-mcp"],
+      "args": ["-y", "-p", "@nguyenvanhuy0612/browserctl", "browserctl-mcp"],
       "env": {
         "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765",
         "BROWSERCTL_MCP_PROFILE": "core" // 'core' (~24 tools) or 'all' (all 70+ tools)
@@ -75,7 +75,7 @@ Add `browserctl` to your MCP configuration:
 #### For Claude Code CLI
 
 ```bash
-claude mcp add browserctl -- npx -y browserctl-mcp
+claude mcp add browserctl -- npx -y -p @nguyenvanhuy0612/browserctl browserctl-mcp
 ```
 
 #### Global CLI Installation
@@ -83,7 +83,7 @@ claude mcp add browserctl -- npx -y browserctl-mcp
 To use the `browserctl` command from anywhere in your terminal:
 
 ```bash
-npm install -g browserctl
+npm install -g @nguyenvanhuy0612/browserctl
 ```
 
 ---

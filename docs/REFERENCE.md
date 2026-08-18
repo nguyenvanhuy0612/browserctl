@@ -109,7 +109,7 @@ Add to your `claude_desktop_config.json`, `.mcp.json`, or Antigravity MCP settin
   "mcpServers": {
     "browserctl": {
       "command": "npx",
-      "args": ["-y", "browserctl-mcp"],
+      "args": ["-y", "-p", "@nguyenvanhuy0612/browserctl", "browserctl-mcp"],
       "env": {
         "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765",
         "BROWSERCTL_MCP_PROFILE": "core" // 'core' (~24 tools) or 'all' (all 70+ tools)
@@ -121,13 +121,13 @@ Add to your `claude_desktop_config.json`, `.mcp.json`, or Antigravity MCP settin
 
 Or with Claude CLI:
 ```bash
-claude mcp add browserctl -- npx -y browserctl-mcp
+claude mcp add browserctl -- npx -y -p @nguyenvanhuy0612/browserctl browserctl-mcp
 ```
 
 #### Option B: Global Install via NPM
 
 ```bash
-npm install -g browserctl
+npm install -g @nguyenvanhuy0612/browserctl
 ```
 
 #### Option C: Local Path
