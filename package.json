@@ -5,9 +5,9 @@
   "type": "module",
   "main": "cli.js",
   "bin": {
-    "browserctl-mcp": "./mcp/index.js",
-    "browserctl": "./cli.js",
-    "bctl": "./cli.js"
+    "browserctl-mcp": "mcp/index.js",
+    "browserctl": "cli.js",
+    "bctl": "cli.js"
   },
   "files": [
     "cli.js",
@@ -46,7 +46,7 @@
   "author": "Nguyen Van Huy <nguyenvanhuy0612@gmail.com>",
   "repository": {
     "type": "git",
-    "url": "https://github.com/nguyenvanhuy0612/browserctl.git"
+    "url": "git+https://github.com/nguyenvanhuy0612/browserctl.git"
   },
   "homepage": "https://github.com/nguyenvanhuy0612/browserctl#readme",
   "bugs": {
