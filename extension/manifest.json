@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "browserctl",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Lets an AI agent drive this browser via a local bridge server.",
   "permissions": [
     "tabs",

@@ -420,7 +420,7 @@ function buildHar(entries, bodies) {
   return {
     log: {
       version: "1.2",
-      creator: { name: "browserctl", version: "0.5.0" },
+      creator: { name: "browserctl", version: "0.5.1" },
       entries: harEntries,
     },
   };
