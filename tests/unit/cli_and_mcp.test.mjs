@@ -54,15 +54,35 @@ test("CLI: wait supports default, --json, --pretty, and -r modes", async () => {
   assert.ok(defaultOut.includes("Waited 50ms"));
 });
 
-test("MCP: core profile filters tools and registers lifecycle tools", async () => {
+test("MCP: core profile registers lifecycle and dynamic load/unload tools", async () => {
   const script = `
     process.env.BROWSERCTL_MCP_PROFILE = "core";
-    const mod = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
-    console.log("MCP_OK");
+    const { server, TOOL_CATEGORIES } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
+    const initialTools = Object.values(server._registeredTools).filter(t => t.enabled !== false);
+    const initialCount = initialTools.length;
+
+    // 1. Check browser_list_available_tools
+    const listHandler = server._registeredTools["browser_list_available_tools"].handler;
+    const listRes = await listHandler();
+    if (!listRes.content[0].text.includes("categories")) throw new Error("List failed");
+
+    // 2. Load 'network' category
+    const loadHandler = server._registeredTools["browser_load_tools"].handler;
+    await loadHandler({ profile: "network" });
+    const afterLoadCount = Object.values(server._registeredTools).filter(t => t.enabled !== false).length;
+    if (afterLoadCount <= initialCount) throw new Error("Load profile network failed: count did not increase");
+
+    // 3. Unload back to core
+    const unloadHandler = server._registeredTools["browser_unload_tools"].handler;
+    await unloadHandler();
+    const afterUnloadCount = Object.values(server._registeredTools).filter(t => t.enabled !== false).length;
+    if (afterUnloadCount !== initialCount) throw new Error("Reset to core failed: count did not match initial");
+
+    console.log("DYNAMIC_LOAD_OK");
     process.exit(0);
   `;
   const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]);
-  assert.ok(stdout.includes("MCP_OK"));
+  assert.ok(stdout.includes("DYNAMIC_LOAD_OK"));
 });
 
 test("State Manager: transitions between running, stopped, and uninitialized correctly", () => {

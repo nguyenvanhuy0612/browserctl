@@ -189,8 +189,12 @@ browserctl tabs --json             # -> {"tabs":[...]}
 
 The `mcp/` server exposes browser automation tools for MCP clients (Antigravity, Claude Code, Cursor, Windsurf).
 
-### Token Optimization & Profiles
-By default, `browserctl` runs with `BROWSERCTL_MCP_PROFILE="core"` which exposes ~24 core tools plus `browser_action` (a universal dispatcher tool), saving ~10,000 system prompt tokens. To register all 70+ granular tools, set `BROWSERCTL_MCP_PROFILE="all"`.
+### Dynamic Tool Discovery & Profile Management
+AI agents can dynamically load and unload specialized tool categories into the active session without restarting the server:
+
+* `browser_load_tools`: Load a category (`"network"`, `"cdp"`, `"cookies"`, `"storage"`, `"console"`, `"record"`, `"tabs"`, `"advanced"`, `"all"`) or specific tools directly into the prompt.
+* `browser_unload_tools`: Unload extra tools and reset back to the lightweight `"core"` profile to free system prompt tokens.
+* `browser_list_available_tools`: Check which tool categories are currently active vs available for loading.
 
 ### MCP Core Tools
 
@@ -204,13 +208,16 @@ By default, `browserctl` runs with `BROWSERCTL_MCP_PROFILE="core"` which exposes
 | `browser_read_page` | Accessibility tree inspection |
 | `browser_screenshot` | Viewport or full-page screenshot (lossless PNG or vision-optimized JPEG) |
 | `browser_eval_js` | Evaluate JavaScript in page context |
+| `browser_load_tools` | Dynamically load tool categories (`cdp`, `network`, `cookies`, etc.) into prompt |
+| `browser_unload_tools` | Unload extra tools and reset active prompt back to core profile |
+| `browser_list_available_tools` | List all tool categories and active status |
 | `browser_start` | Start bridge daemon in background if stopped |
 | `browser_stop` | Stop bridge daemon (records explicit stopped state) |
 | `browser_status` | Check bridge health, daemon state, extension connection |
 
 ### Output Format Parameter
 
-Tools that return structured data (`browser_snapshot`, `browser_eval_js`, `browser_status`)
+Tools that return structured data (`browser_snapshot`, `browser_eval_js`, `browser_status`, `browser_list_available_tools`)
 accept an optional `format` parameter (`"smart"` default, `"json"`, `"pretty"`, `"raw"`).
 
 ```jsonc

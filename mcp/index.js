@@ -278,50 +278,278 @@ function withTabId(schema) {
   return { ...schema, tabId: TAB_ID_FIELD }; // raw shape (plain object of fields), incl. {}
 }
 
-// Tool Profiles: 'core' (default, ~20 essential tools + browser_action) or 'all' (all 68 tools).
-// Core mode saves ~10k tokens in system prompts while still allowing any action via browser_action.
+// Tool Profiles & Categories for Dynamic Loading/Unloading
 const MCP_PROFILE = envStr("BROWSERCTL_MCP_PROFILE", "core").toLowerCase();
-const CORE_TOOLS = new Set([
-  "browser_status",
-  "browser_start",
-  "browser_stop",
-  "browser_exec_system_cmd",
-  "browser_snapshot",
-  "browser_read_page",
-  "browser_find",
-  "browser_find_text",
-  "browser_navigate",
-  "browser_click",
-  "browser_type",
-  "browser_fill",
-  "browser_paste",
-  "browser_scroll",
-  "browser_hover",
-  "browser_select_option",
-  "browser_press_key",
-  "browser_wait_for",
-  "browser_wait_settle",
-  "browser_get_page_content",
-  "browser_screenshot",
-  "browser_screenshot_fullpage",
-  "browser_list_tabs",
-  "browser_new_tab",
-  "browser_switch_tab",
-  "browser_close_tab",
-  "browser_eval_js",
-  "browser_action",
-]);
+
+const TOOL_CATEGORIES = {
+  core: [
+    "browser_status",
+    "browser_start",
+    "browser_stop",
+    "browser_exec_system_cmd",
+    "browser_snapshot",
+    "browser_read_page",
+    "browser_find",
+    "browser_find_text",
+    "browser_navigate",
+    "browser_click",
+    "browser_type",
+    "browser_fill",
+    "browser_paste",
+    "browser_scroll",
+    "browser_hover",
+    "browser_select_option",
+    "browser_press_key",
+    "browser_wait_for",
+    "browser_wait_settle",
+    "browser_get_page_content",
+    "browser_screenshot",
+    "browser_screenshot_fullpage",
+    "browser_list_tabs",
+    "browser_new_tab",
+    "browser_switch_tab",
+    "browser_close_tab",
+    "browser_eval_js",
+    "browser_action",
+    "browser_load_tools",
+    "browser_unload_tools",
+    "browser_list_available_tools",
+  ],
+  network: [
+    "browser_get_network_requests",
+    "browser_get_response_body",
+    "browser_export_har",
+    "browser_net_start",
+    "browser_net_stop",
+    "browser_net_get",
+    "browser_net_clear",
+    "browser_wait_network_idle",
+  ],
+  cdp: [
+    "browser_cdp_attach",
+    "browser_cdp_detach",
+    "browser_cdp_send",
+    "browser_coordinate_click",
+    "browser_coordinate_drag",
+    "browser_insert_text",
+    "browser_audit",
+  ],
+  cookies: [
+    "browser_get_cookies",
+    "browser_set_cookie",
+    "browser_delete_cookies",
+  ],
+  storage: [
+    "browser_storage_get",
+    "browser_storage_set",
+    "browser_storage_remove",
+    "browser_storage_clear",
+  ],
+  console: [
+    "browser_get_console_logs",
+  ],
+  record: [
+    "browser_record_start",
+    "browser_record_stop",
+    "browser_record_get",
+    "browser_replay",
+  ],
+  tabs: [
+    "browser_list_windows",
+    "browser_focus_window",
+    "browser_group_tab",
+    "browser_ungroup_tab",
+    "browser_spoof_visibility",
+    "browser_current_tab",
+  ],
+  advanced: [
+    "browser_describe_element",
+    "browser_a11y_snapshot",
+    "browser_read_pdf",
+    "browser_open_and_read",
+    "browser_element_screenshot",
+    "browser_print_pdf",
+    "browser_go_back",
+    "browser_go_forward",
+    "browser_reload",
+    "browser_click_selector",
+    "browser_fill_selector",
+    "browser_reload_extension",
+  ],
+};
+
+const CORE_TOOLS = new Set(TOOL_CATEGORIES.core);
 
 const _registerTool = server.registerTool.bind(server);
 server.registerTool = (name, config, handler) => {
-  if (MCP_PROFILE !== "all" && MCP_PROFILE !== "full" && !CORE_TOOLS.has(name)) {
-    return;
-  }
   if (!NO_TAB_TOOLS.has(name) && config && "inputSchema" in config) {
     config = { ...config, inputSchema: withTabId(config.inputSchema) };
   }
-  return _registerTool(name, config, handler);
+  const reg = _registerTool(name, config, handler);
+  // If running in core profile and this is not a core tool, disable initially
+  if (MCP_PROFILE !== "all" && MCP_PROFILE !== "full" && !CORE_TOOLS.has(name)) {
+    if (server._registeredTools?.[name]) {
+      server._registeredTools[name].enabled = false;
+    }
+  }
+  return reg;
 };
+
+server.registerTool(
+  "browser_load_tools",
+  {
+    title: "Dynamically load tools into session",
+    description:
+      "Load a tool category (profile) or specific tools dynamically into the active prompt session without restarting the MCP server. Available profiles: 'network', 'cdp', 'cookies', 'storage', 'console', 'record', 'tabs', 'advanced', 'all'. Use browser_list_available_tools to see what is available.",
+    inputSchema: {
+      profile: z
+        .enum(["network", "cdp", "cookies", "storage", "console", "record", "tabs", "advanced", "all"])
+        .optional()
+        .describe("Category of tools to load"),
+      tools: z
+        .array(z.string())
+        .optional()
+        .describe("Specific tool names to load (e.g. ['browser_export_har', 'browser_get_cookies'])"),
+    },
+  },
+  async ({ profile, tools } = {}) => {
+    const toEnable = new Set();
+    if (profile === "all") {
+      for (const list of Object.values(TOOL_CATEGORIES)) {
+        for (const t of list) toEnable.add(t);
+      }
+      for (const t of Object.keys(server._registeredTools || {})) {
+        toEnable.add(t);
+      }
+    } else if (profile && TOOL_CATEGORIES[profile]) {
+      for (const t of TOOL_CATEGORIES[profile]) toEnable.add(t);
+    }
+    if (Array.isArray(tools)) {
+      for (const t of tools) toEnable.add(t);
+    }
+
+    const enabledList = [];
+    for (const name of toEnable) {
+      const entry = server._registeredTools?.[name];
+      if (entry) {
+        entry.enabled = true;
+        enabledList.push(name);
+      }
+    }
+
+    try {
+      await server.sendToolListChanged();
+    } catch {}
+
+    const totalActive = Object.values(server._registeredTools || {}).filter((t) => t.enabled !== false).length;
+    return text({
+      ok: true,
+      message: `Loaded ${enabledList.length} tools into active session.`,
+      loadedProfile: profile || null,
+      loadedTools: enabledList,
+      totalActiveTools: totalActive,
+    });
+  }
+);
+
+server.registerTool(
+  "browser_unload_tools",
+  {
+    title: "Dynamically unload tools from session",
+    description:
+      "Unload specific tool categories or reset active tools back to the lightweight 'core' profile. Frees system prompt tokens when specialized tools are no longer needed.",
+    inputSchema: {
+      profile: z
+        .enum(["network", "cdp", "cookies", "storage", "console", "record", "tabs", "advanced", "all"])
+        .optional()
+        .describe("Category of tools to unload. If omitted or 'all', resets back to the base 'core' profile."),
+      tools: z
+        .array(z.string())
+        .optional()
+        .describe("Specific tool names to unload"),
+    },
+  },
+  async ({ profile, tools } = {}) => {
+    const toDisable = new Set();
+    if (!profile && !tools) {
+      // Reset to core profile: disable everything not in CORE_TOOLS
+      for (const [name, entry] of Object.entries(server._registeredTools || {})) {
+        if (!CORE_TOOLS.has(name)) {
+          toDisable.add(name);
+        }
+      }
+    } else if (profile === "all") {
+      for (const [name, entry] of Object.entries(server._registeredTools || {})) {
+        if (!CORE_TOOLS.has(name)) {
+          toDisable.add(name);
+        }
+      }
+    } else if (profile && TOOL_CATEGORIES[profile]) {
+      for (const t of TOOL_CATEGORIES[profile]) {
+        if (!CORE_TOOLS.has(t)) toDisable.add(t);
+      }
+    }
+    if (Array.isArray(tools)) {
+      for (const t of tools) {
+        if (!CORE_TOOLS.has(t)) toDisable.add(t);
+      }
+    }
+
+    const disabledList = [];
+    for (const name of toDisable) {
+      const entry = server._registeredTools?.[name];
+      if (entry) {
+        entry.enabled = false;
+        disabledList.push(name);
+      }
+    }
+
+    try {
+      await server.sendToolListChanged();
+    } catch {}
+
+    const totalActive = Object.values(server._registeredTools || {}).filter((t) => t.enabled !== false).length;
+    return text({
+      ok: true,
+      message: `Unloaded ${disabledList.length} tools.`,
+      unloadedProfile: profile || (tools ? null : "reset_to_core"),
+      unloadedTools: disabledList,
+      totalActiveTools: totalActive,
+    });
+  }
+);
+
+server.registerTool(
+  "browser_list_available_tools",
+  {
+    title: "List available tool profiles & catalog",
+    description:
+      "List all tool categories (profiles) and check which tools are currently active (loaded in prompt) vs inactive (available for dynamic loading).",
+    inputSchema: {
+      format: z.enum(["smart", "json", "pretty"]).optional().describe("Output format"),
+    },
+  },
+  async ({ format } = {}) => {
+    const registered = server._registeredTools || {};
+    const categories = {};
+    for (const [cat, tools] of Object.entries(TOOL_CATEGORIES)) {
+      categories[cat] = tools.map((name) => ({
+        tool: name,
+        active: registered[name] ? registered[name].enabled !== false : false,
+      }));
+    }
+    const totalRegistered = Object.keys(registered).length;
+    const totalActive = Object.values(registered).filter((t) => t.enabled !== false).length;
+
+    const summary = {
+      activeProfile: totalActive === totalRegistered ? "all" : "core (or customized)",
+      totalActiveTools: totalActive,
+      totalRegisteredTools: totalRegistered,
+      categories,
+    };
+    return text(summary, format);
+  }
+);
 
 server.registerTool(
   "browser_action",
@@ -1383,3 +1611,5 @@ const transport = new StdioServerTransport();
 await server.connect(transport);
 ensureBridge().catch(() => {});
 console.error(`browserctl MCP server running (bridge: ${BRIDGE_URL})`);
+
+export { server, TOOL_CATEGORIES, CORE_TOOLS };
