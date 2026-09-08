@@ -1,0 +1,95 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>bctl multiframe e2e page</title>
+<style>
+  body { font-family: sans-serif; margin: 16px; }
+  header, nav, main { display: block; margin-bottom: 16px; }
+  /* Anchored bottom-right, well under 25% of any reasonable viewport, so it must be
+     reported as an OPEN dialog but never as the blocking active modal. */
+  .side-dialog {
+    position: fixed; right: 12px; bottom: 12px;
+    width: 220px; height: 120px;
+    background: #fff; border: 2px solid #333; padding: 8px; z-index: 999;
+  }
+  /* React-portal shape: a zero-size ancestor wrapper with an absolutely positioned,
+     fully painted child — the case that used to be pruned out of read_page entirely. */
+  .portal-wrapper { width: 0; height: 0; overflow: hidden; position: relative; }
+  .portal-panel {
+    position: absolute; top: 0; left: 0; width: 300px; height: 160px;
+    background: #eef; border: 1px solid #66c; padding: 8px;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <input id="hdr-search" type="text" placeholder="Search site" />
+    <button id="hdr-signin">Sign In</button>
+  </header>
+
+  <nav>
+    <a href="/mf/home">Home</a>
+    <a href="/mf/products">Products</a>
+    <a href="/mf/contact">Contact</a>
+  </nav>
+
+  <main>
+    <!-- Two anchors, same destination + same label, one carrying a long opaque query
+         token. Must collapse to a single listed row plus a duplicate-suppression notice. -->
+    <p>
+      <a href="/product/42?ref=list" id="dup1">View Details</a>
+      <a href="/product/42?tok=QWERTYUIOPASDFGHJKLZXCVBNM1234567890QWERTY" id="dup2">View Details</a>
+    </p>
+
+    <!-- Label well over 200 characters — the truncation-hint case. -->
+    <a href="/product/999" id="longlabel">This premium wireless mechanical keyboard features hot swappable switches per key RGB backlighting a detachable braided USB-C cable doubleshot PBT keycaps and a solid CNC machined aluminum frame designed for competitive gaming and everyday typing comfort every single day</a>
+
+    <!-- Menu built from menuitemradio (not menuitem), one pre-checked. Clicking a row
+         moves the checked state, exercising both read paths and click-by-ref. -->
+    <ul role="menu" aria-label="Sort by" id="sort-menu">
+      <li role="menuitemradio" aria-checked="false" id="sort-newest" tabindex="0">Newest</li>
+      <li role="menuitemradio" aria-checked="true" id="sort-relevance" tabindex="0">Relevance</li>
+      <li role="menuitemradio" aria-checked="false" id="sort-price" tabindex="0">Price</li>
+    </ul>
+
+    <!-- Repetitive run of 5 identical controls -> repetitive-run folding. -->
+    <ul id="cart-list">
+      <li>Item A <button class="rm-btn">Remove</button></li>
+      <li>Item B <button class="rm-btn">Remove</button></li>
+      <li>Item C <button class="rm-btn">Remove</button></li>
+      <li>Item D <button class="rm-btn">Remove</button></li>
+      <li>Item E <button class="rm-btn">Remove</button></li>
+    </ul>
+
+    <!-- Same-origin iframe (served from this same http origin). -->
+    <iframe id="childframe" src="/child.html" width="360" height="240"></iframe>
+  </main>
+
+  <!-- Open, visible dialog anchored to a side — must NOT cover the viewport centre and
+       must cover under 25% of it, so it is reported as "open" but never as blocking. -->
+  <div role="dialog" aria-label="Notifications" class="side-dialog" id="side-dialog">
+    <p>You have 2 new notifications.</p>
+    <button id="dialog-close">Dismiss</button>
+  </div>
+
+  <script>
+    // Exclusive-check behaviour for the menuitemradio group, so a click-by-ref test has
+    // an observable effect to assert on.
+    (function () {
+      const items = Array.from(document.querySelectorAll('#sort-menu [role="menuitemradio"]'));
+      items.forEach((it) => {
+        it.addEventListener('click', () => {
+          items.forEach((o) => o.setAttribute('aria-checked', o === it ? 'true' : 'false'));
+        });
+      });
+    })();
+
+    document.getElementById('dialog-close').addEventListener('click', () => {
+      document.getElementById('side-dialog').remove();
+    });
+
+    console.log('bctl-multiframe-ready');
+  </script>
+</body>
+</html>

@@ -11,9 +11,14 @@
 
 import http from "node:http";
 import { randomUUID } from "node:crypto";
+import { appendFileSync, statSync, renameSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { execa } from "execa";
 import { WebSocketServer } from "ws";
 import { markDaemonRunning, markDaemonStopped } from "./state.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Read a numeric env var, falling back only when it is unset/empty/not-a-number — NOT
 // when it is a legitimate 0. `Number(process.env.PORT) || 8765` silently ignored
@@ -170,10 +175,73 @@ const heartbeat = setInterval(() => {
 
 wss.on("close", () => clearInterval(heartbeat));
 
+// ---------------------------------------------------------------------------
+// Optional per-call log (F32)
+//
+// Five probe runs, five wrong self-reported call counts, one fabricated wholesale —
+// and no way to tell from this side which was which, because the bridge kept no record
+// of what it actually served. Off by default so ordinary use does not grow a file.
+//
+//   BROWSERCTL_CALL_LOG=1                 -> bridge/calls.jsonl
+//   BROWSERCTL_CALL_LOG=/path/to/log      -> that path
+//
+// Parameter VALUES are never written: fill/type/paste carry what the user typed and
+// eval_js carries code. Only key names and a size are recorded.
+const CALL_LOG_ENV = process.env.BROWSERCTL_CALL_LOG || "";
+const CALL_LOG_PATH = !CALL_LOG_ENV || CALL_LOG_ENV === "0" || CALL_LOG_ENV === "false"
+  ? null
+  : (CALL_LOG_ENV === "1" || CALL_LOG_ENV === "true"
+      ? join(__dirname, "calls.jsonl")
+      : CALL_LOG_ENV);
+const RUN_ID = randomUUID().slice(0, 8);
+const RUN_STARTED_AT = new Date().toISOString();
+const CALL_LOG_MAX_BYTES = 8 * 1024 * 1024;
+let callSeq = 0;
+
+function paramShape(params) {
+  if (!params || typeof params !== "object") return null;
+  const out = {};
+  for (const [k, v] of Object.entries(params)) {
+    if (v === null || v === undefined) { out[k] = "null"; continue; }
+    if (typeof v === "string") out[k] = `str:${v.length}`;
+    else if (typeof v === "number" || typeof v === "boolean") out[k] = v;
+    else if (Array.isArray(v)) out[k] = `array:${v.length}`;
+    else out[k] = "object";
+  }
+  return out;
+}
+
+function logCall(entry) {
+  if (!CALL_LOG_PATH) return;
+  try {
+    try {
+      const st = statSync(CALL_LOG_PATH);
+      if (st.size > CALL_LOG_MAX_BYTES) renameSync(CALL_LOG_PATH, CALL_LOG_PATH + ".1");
+    } catch {}
+    appendFileSync(CALL_LOG_PATH, JSON.stringify(entry) + "\n");
+  } catch (err) {
+    // Logging must never take the bridge down.
+  }
+}
+
 function handleCommand(body, res) {
   const { action, params } = body || {};
   if (!action || typeof action !== "string") {
     return sendJson(res, 400, { ok: false, error: "missing 'action'" });
+  }
+
+  // The bridge can answer this itself, so an agent that reaches for the name it saw on
+  // the browser_status tool gets the status rather than a redirect to another endpoint.
+  if (action === "status") {
+    return sendJson(res, 200, {
+      ok: true,
+      result: {
+        bridgeUrl: `http://${HOST === "0.0.0.0" ? "127.0.0.1" : HOST}:${PORT}`,
+        extensionConnected: extensionSocket != null,
+        runId: RUN_ID,
+        callLog: CALL_LOG_PATH || null,
+      },
+    });
   }
 
   // Handle local system execution command directly on the bridge host
@@ -228,6 +296,20 @@ function handleCommand(body, res) {
 
   const id = randomUUID();
   const message = { id, action, params: params || {} };
+  const seq = ++callSeq;
+  const startedAt = Date.now();
+  const record = (ok, extra) => logCall({
+    ts: new Date().toISOString(),
+    runId: RUN_ID,
+    runStartedAt: RUN_STARTED_AT,
+    seq,
+    action,
+    tabId: (params && (params.tabId ?? params.tab_id)) ?? null,
+    params: paramShape(params),
+    ok,
+    durationMs: Date.now() - startedAt,
+    ...(extra || {}),
+  });
 
   const timeoutMs = computeTimeoutMs(action, params);
   const wait = new Promise((resolve, reject) => {
@@ -243,6 +325,7 @@ function handleCommand(body, res) {
   } catch (err) {
     const entry = pending.get(id);
     if (entry) { clearTimeout(entry.timer); pending.delete(id); }
+    record(false, { failure: "send" });
     return sendJson(res, 502, { ok: false, error: "failed to reach extension: " + err.message });
   }
 
@@ -254,8 +337,14 @@ function handleCommand(body, res) {
     // 5xx into a transport exception and usually discards the body, hiding the
     // actionable `error` message. Transport-level problems keep their own 5xx codes
     // above (503 no extension, 502 send failed, 504 timeout).
-    .then((reply) => sendJson(res, reply.ok ? 200 : 400, reply))
-    .catch((err) => sendJson(res, 504, { ok: false, error: String(err.message || err) }));
+    .then((reply) => {
+      record(!!reply.ok, reply.ok ? null : { code: reply.code || null });
+      return sendJson(res, reply.ok ? 200 : 400, reply);
+    })
+    .catch((err) => {
+      record(false, { failure: "timeout" });
+      return sendJson(res, 504, { ok: false, error: String(err.message || err) });
+    });
 }
 
 function readBody(req) {

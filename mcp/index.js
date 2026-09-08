@@ -151,9 +151,22 @@ async function callBridge(action, params = {}) {
         signal: AbortSignal.timeout(timeoutMs),
       });
       const data = await res.json().catch(() => ({}));
-      if (!data.ok) throw new Error(data.error || `command '${action}' failed (HTTP ${res.status})`);
+      if (!data.ok) {
+        const err = new Error(data.error || `command '${action}' failed (HTTP ${res.status})`);
+        if (data.code) err.code = data.code;
+        if (data.diagnostics) err.diagnostics = data.diagnostics;
+        if (data.recoveryHint) err.recoveryHint = data.recoveryHint;
+        // The bridge answered; the command itself failed. Retrying would dispatch the
+        // action a second time (a click that errors after firing would fire twice), and
+        // falling through to the transport error below would relabel a page-level
+        // problem as a connectivity problem and discard code/diagnostics/recoveryHint —
+        // which is every structured error the extension produces.
+        err.isApplicationError = true;
+        throw err;
+      }
       return data.result;
     } catch (err) {
+      if (err?.isApplicationError) throw err;
       lastErr = err;
       if (attempt === 1) {
         await ensureBridge();
@@ -186,8 +199,53 @@ function text(obj, format = "smart") {
 
   // Smart default (Token-Efficient, Zero Info Loss)
   if (obj?.compactView) {
-    const header = `Page: ${obj.title || "Untitled"} (${obj.url})\nInteractive elements (${obj.elements?.length || 0}):\n\n`;
-    return { content: [{ type: "text", text: header + obj.compactView }] };
+    const vh = obj.viewport?.height || 0;
+    const sy = obj.viewport?.scrollY || 0;
+    const sh = obj.viewport?.scrollHeight || vh;
+    const total = obj.totalElementsCount ?? obj.elements?.length ?? 0;
+    const visible = obj.elements?.length || 0;
+    const folded = obj.foldedCount ? `, ${obj.foldedCount} folded` : "";
+
+    let header = `Page: ${obj.title || "Untitled"} (${obj.url})\n`;
+    if (obj.viewport) {
+      header += `Viewport: Y: ${sy}px-${sy + vh}px of ${sh}px total height (${obj.viewport.width}x${vh}, scroll: ${obj.viewport.scrollPercent}%, scope: ${obj.scope || "viewport"})\n`;
+    }
+    if (obj.pageState?.hasActiveModal) {
+      header += `[Active Modal: <${obj.pageState.activeModalTag || "dialog"}>]\n`;
+    }
+    if (obj.scope === "viewport" && obj.offscreenCount > 0) {
+      header += `Elements: ${visible} visible in viewport (${total} total on page${folded})\n`;
+      // The compact view already carries a notice that names what is offscreen; a second
+      // count-only line above it is duplicated tokens and a second number to reconcile.
+      header += "\n";
+    } else {
+      header += `Interactive elements (${visible}${folded}):\n\n`;
+    }
+    const hint = inactiveCapabilityHint();
+    return { content: [{ type: "text", text: header + obj.compactView + (hint ? "\n" + hint : "") }] };
+  }
+  // get_property results: keep the terse "just the value" output, but never drop the
+  // qualifiers that say how much to trust it — whether an attribute was actually present
+  // (an absent one used to render as no output at all), and whether the selector matched
+  // more elements than the one answered for.
+  if (obj?.property !== undefined && (obj.value !== undefined || obj.present !== undefined)) {
+    const lines = [];
+    if (obj.property === "attr" && obj.present === false) {
+      lines.push(`${obj.name}: (attribute not present)`);
+    } else if (obj.property === "attr" && obj.resolved) {
+      // Show both: the raw attribute is what the page says, the resolved URL is what it
+      // means. Printing only the raw value sent an agent to eval_js to check whether a
+      // bare "front" was the whole answer.
+      lines.push(`${obj.value}   (resolves to ${obj.resolved})`);
+    } else if (obj.value === null) {
+      lines.push("(null)");
+    } else if (typeof obj.value !== "object") {
+      lines.push(String(obj.value));
+    } else {
+      lines.push(JSON.stringify(obj.value));
+    }
+    if (obj.note) lines.push(`Note: ${obj.note}`);
+    return { content: [{ type: "text", text: lines.join("\n") }] };
   }
   if (obj?.value !== undefined && typeof obj.value !== "object") {
     return { content: [{ type: "text", text: String(obj.value) }] };
@@ -195,7 +253,31 @@ function text(obj, format = "smart") {
   return { content: [{ type: "text", text: JSON.stringify(obj, null, 2) }] };
 }
 
+// One line, only when something is actually unloaded. A small model will not go looking
+// for capabilities it cannot see: given no prompt at all it concluded that network
+// capture, cookies, HAR, recording and profiling were impossible, while given one
+// sentence it found them immediately. The sentence belongs here, not in the user's task.
+function inactiveCapabilityHint() {
+  const all = Object.values(server._registeredTools || {});
+  const inactive = all.filter((t) => t.enabled === false).length;
+  if (inactive === 0) return "";
+  const profiles = Object.entries(TOOL_CATEGORIES)
+    .filter(([name]) => name !== "core")
+    .filter(([, list]) => list.some((n) => server._registeredTools?.[n]?.enabled === false))
+    .map(([name]) => name);
+  if (profiles.length === 0) return "";
+  return `[${inactive} more capabilities not loaded — ${profiles.join(", ")}. Load with browser_load_tools before assuming something is impossible.]`;
+}
+
 function fail(err) {
+  if (err && err.code) {
+    const lines = [
+      `Error [${err.code}]: ${err.message || err}`,
+      err.diagnostics ? `Diagnostics: ${JSON.stringify(err.diagnostics)}` : null,
+      err.recoveryHint ? `Suggested Remedy: ${err.recoveryHint}` : null,
+    ].filter(Boolean);
+    return { content: [{ type: "text", text: lines.join("\n") }], isError: true };
+  }
   return { content: [{ type: "text", text: `Error: ${err.message || err}` }], isError: true };
 }
 
@@ -203,7 +285,13 @@ function fail(err) {
 // Run the build inside the tabStore context seeded with args.tabId so any callBridge
 // it makes routes to that tab (see tabStore/callBridge above). tabId undefined => no
 // override => the bridge uses the pinned target, exactly as before.
+// Every protocol action reachable through a registered tool. browser_action can dispatch
+// any of them by name, but until now it shipped with no way to find out what they are —
+// so the escape hatch existed and no agent ever used it.
+const KNOWN_ACTIONS = new Set();
+
 function tool(action, build) {
+  KNOWN_ACTIONS.add(action);
   return async (args = {}) => {
     try {
       return await tabStore.run(args.tabId, () => build(args));
@@ -219,6 +307,26 @@ function tool(action, build) {
 // built around — the single most important thing an agent must get right here.
 const INSTRUCTIONS = `This server drives ONE pinned "target" tab in the background. Follow this policy on every task:
 
+WHAT YOU WANT -> WHAT TO CALL. There is a tool for each of these; reaching for browser_eval_js
+instead costs far more tokens and gives you no diagnostics when it goes wrong.
+- See what is on the page, or what I can click ....... browser_snapshot   (TEXT, not an image)
+- Find a control when I know its label ............... browser_find
+- Find a value/price/status sitting in plain text .... browser_find_text
+- Read one element's text, value, HTML or box ........ browser_get_text
+- Read one attribute (href, src, aria-*) ............. browser_get_attribute
+- Count matching elements ............................ browser_get_count
+- See the nesting/structure of a form or region ...... browser_read_page
+- Click / type / fill / choose an option ............. browser_click, browser_type, browser_fill, browser_select_option
+- Reach more of a long page or list .................. browser_scroll, or browser_snapshot with scope='all'
+- Wait for the page to be ready ...................... browser_wait_settle  (navigation already waits)
+- Network requests, cookies, storage, console, CDP ... browser_load_tools, then the tool it unlocks
+- Anything at all, without loading its tool .......... browser_action({action, params}); call it bare for the catalogue
+
+Every read tool tells you what it did NOT return. If a response mentions offscreen elements, an open
+dialog, folded rows or "possible hidden content", your answer is probably incomplete — follow it up
+before reporting. Never conclude a capability is missing without checking browser_action's catalogue.
+
+
 - Pinned target: your first command pins the currently focused tab as the target, and it STAYS pinned even after the user switches to other tabs. Every command — DOM (click/type/navigate/read), CDP (debugger/console/network/eval), light network capture, and screenshots — acts on that pinned target, never on whatever tab the user is currently looking at.
 - Work in the background. Do NOT switch or foreground a tab in order to act on it: clicks, typing, navigation, reads, and screenshots all work while the target sits in the background. The user must be able to keep working in their own tab (e.g. GitLab) uninterrupted while you work yours (e.g. LinkedIn).
 - Call browser_group_tab once near the start so the user can see which tab you drive (a labeled tab group). It does not steal focus.
@@ -229,7 +337,7 @@ const INSTRUCTIONS = `This server drives ONE pinned "target" tab in the backgrou
 - Daemon & Zero-Terminal Execution: The local bridge server daemon is automatically started and maintained in the background by this MCP server. You DO NOT need to run a background terminal command, dev server, or long-running process to start or keep the bridge running. If the daemon is ever reported stopped, simply invoke the 'browser_start' tool.
 - Full protocol capability & browser_action tool: In default (core) mode, dedicated tools are registered for primary operations. ALL other protocol capabilities (including cdp_send, cdp_attach, get_console_logs, get_network_requests, export_har, get_cookies, set_cookie, delete_cookies, storage_get, storage_set, read_pdf, record_start, record_stop, replay, describe_element, etc.) are 100% available by calling the 'browser_action' tool with { action: "<action_name>", params: { ... } } or via the host CLI 'browserctl <action>'.`;
 
-const SERVER_VERSION = "0.5.1";
+const SERVER_VERSION = "0.6.0";
 
 const server = new McpServer(
   { name: "browserctl", version: SERVER_VERSION },
@@ -297,12 +405,16 @@ const TOOL_CATEGORIES = {
     "browser_fill",
     "browser_paste",
     "browser_scroll",
+    "browser_dismiss_modal",
     "browser_hover",
     "browser_select_option",
     "browser_press_key",
     "browser_wait_for",
     "browser_wait_settle",
     "browser_get_page_content",
+    "browser_get_text",
+    "browser_get_attribute",
+    "browser_get_count",
     "browser_screenshot",
     "browser_screenshot_fullpage",
     "browser_list_tabs",
@@ -380,10 +492,52 @@ const TOOL_CATEGORIES = {
 
 const CORE_TOOLS = new Set(TOOL_CATEGORIES.core);
 
+// A flat list of 35 tools gives a model no way to ask "which of these reads a page?" —
+// it has to infer the grouping from 35 prose blocks every turn. Three consecutive probe
+// runs picked `read_page` over `snapshot` despite `snapshot` being registered first and
+// described as the primary reader, because nothing said the two are alternatives in one
+// group, and "snapshot" reads as "screenshot" to anything trained on browser tooling.
+//
+// Each description is prefixed with its group and, where a group has a default, which
+// member to reach for first. This is the cheapest possible disambiguation: no new tools,
+// no renames, one line the model sees before the prose.
+const TOOL_GROUPS = {
+  READ: [
+    "browser_snapshot", "browser_read_page", "browser_find", "browser_find_text",
+    "browser_get_text", "browser_get_attribute", "browser_get_count",
+    "browser_get_page_content", "browser_screenshot", "browser_screenshot_fullpage",
+  ],
+  ACT: [
+    "browser_click", "browser_type", "browser_fill", "browser_paste", "browser_hover",
+    "browser_select_option", "browser_press_key", "browser_scroll", "browser_dismiss_modal",
+  ],
+  NAVIGATE: ["browser_navigate", "browser_new_tab", "browser_switch_tab", "browser_close_tab", "browser_list_tabs"],
+  WAIT: ["browser_wait_for", "browser_wait_settle"],
+  CAPABILITY: ["browser_load_tools", "browser_unload_tools", "browser_list_available_tools", "browser_action"],
+  SESSION: ["browser_status", "browser_start", "browser_stop", "browser_exec_system_cmd"],
+};
+const GROUP_OF = new Map();
+for (const [g, names] of Object.entries(TOOL_GROUPS)) for (const n of names) GROUP_OF.set(n, g);
+
+// Said once per group, on every member, so the choice never depends on having read the
+// sibling's description.
+const GROUP_NOTE = {
+  READ: "READ group (snapshot, read_page, find, find_text, get_text, screenshot). DEFAULT: browser_snapshot — it is a text census of the page's controls, not an image, and it is the only reader that reports open dialogs, what it left out, and content that loads on demand.",
+  ACT: "ACT group. Every action returns an 'effect' block (DOM mutations, url change) — check it rather than assuming the page reacted.",
+  NAVIGATE: "NAVIGATE group. These pin the target tab; they wait for the page to be usable before returning.",
+  WAIT: "WAIT group. Prefer a READ tool where you can: snapshot/find report what is actually on the page instead of asking you to guess a string.",
+  CAPABILITY: "CAPABILITY group. 45 further capabilities (network, cookies, storage, console, CDP, HAR) are one browser_load_tools call away.",
+  SESSION: "SESSION group. The bridge daemon starts and maintains itself — you should almost never call these. Do NOT call browser_stop to 'clean up' at the end of a task: the daemon is shared with the user and with other agents, and stopping it interrupts their work.",
+};
+
 const _registerTool = server.registerTool.bind(server);
 server.registerTool = (name, config, handler) => {
   if (!NO_TAB_TOOLS.has(name) && config && "inputSchema" in config) {
     config = { ...config, inputSchema: withTabId(config.inputSchema) };
+  }
+  const group = GROUP_OF.get(name);
+  if (group && config && config.description) {
+    config = { ...config, description: `[${group}] ${GROUP_NOTE[group]}\n\n${config.description}` };
   }
   const reg = _registerTool(name, config, handler);
   // If running in core profile and this is not a core tool, disable initially
@@ -400,7 +554,17 @@ server.registerTool(
   {
     title: "Dynamically load tools into session",
     description:
-      "Load a tool category (profile) or specific tools dynamically into the active prompt session without restarting the MCP server. Available profiles: 'network', 'cdp', 'cookies', 'storage', 'console', 'record', 'tabs', 'advanced', 'all'. Use browser_list_available_tools to see what is available.",
+      "Unlock capabilities that are NOT currently loaded. The tools you can see are a subset; these profiles exist and are one call away:\n" +
+      "  network  — capture every request the page makes, read response bodies, export a HAR, wait for network idle\n" +
+      "  cookies  — read, set and delete cookies\n" +
+      "  storage  — read and write localStorage / sessionStorage\n" +
+      "  console  — read the page's console messages and errors\n" +
+      "  cdp      — Chrome DevTools Protocol: raw CDP commands, coordinate clicks/drags, IME-safe text insert, Lighthouse audit\n" +
+      "  record   — record an interaction sequence and replay it\n" +
+      "  tabs     — window management, tab groups, visibility spoofing\n" +
+      "  advanced — accessibility-tree snapshot, PDF read/print, back/forward/reload, element screenshots\n" +
+      "  all      — everything at once\n" +
+      "If a task seems to need something you have no tool for (network traffic, cookies, storage, console output, raw CDP), load the profile instead of falling back to eval_js.",
     inputSchema: {
       profile: z
         .enum(["network", "cdp", "cookies", "storage", "console", "record", "tabs", "advanced", "all"])
@@ -551,18 +715,75 @@ server.registerTool(
   }
 );
 
+// The MCP tool surface and the protocol action surface are not the same list, and an
+// agent only ever sees the first one. `browser_get_text` is a tool; `get_text` is NOT a
+// protocol action — it is `get_property` with `{property: "text"}`. So an agent that
+// discovered browser_action (the documented escape hatch for capabilities with no loaded
+// tool) and reached for the read it had just seen got a bare "unknown action: get_text",
+// and did what agents do at a dead end: fell back to eval_js and hand-rolled the read.
+// Measured on a live audit, six of the most common reads failed this way.
+//
+// Every tool name now dispatches, whatever layer it belongs to.
+const ACTION_ALIASES = {
+  get_text: { action: "get_property", params: { property: "text" } },
+  get_value: { action: "get_property", params: { property: "value" } },
+  get_html: { action: "get_property", params: { property: "html" } },
+  get_box: { action: "get_property", params: { property: "box" } },
+  get_attribute: { action: "get_property", params: { property: "attr" } },
+  get_count: { action: "get_property", params: { property: "count" } },
+  screenshot_fullpage: { action: "screenshot", params: { fullPage: true } },
+  dismiss_modal: { action: "dismiss", params: {} },
+};
+
+// Handled by the MCP server itself, never sent to the bridge. Routing one through
+// browser_action used to return "unknown action", which reads like the capability is
+// missing rather than like it is simply reachable another way.
+const MCP_ONLY_TOOLS = new Set([
+  "status", "start", "stop", "load_tools", "unload_tools", "list_available_tools", "action",
+]);
+
 server.registerTool(
   "browser_action",
   {
     title: "Universal Browser Action Dispatcher",
     description:
-      "Execute any browserctl protocol action directly by name (e.g. 'click', 'type', 'navigate', 'cdp_send', 'snapshot', 'storage_get', 'export_har', 'record_start', etc.) with custom parameters. Use this to execute specialized actions without needing individual MCP tool schemas.",
+      "Execute any browserctl protocol action by name, with no need to load that action's own MCP tool. Call it with NO arguments to get the catalogue of every available action name. Parameters are the same as the matching browser_<action> tool takes.\n" +
+      "This also reaches a few actions that have no dedicated tool at all: 'dismiss' (close the active modal), 'close_modal', 'element_rect', and get_property variants such as {action:'get_property', params:{property:'html', ref:'@ref_1'}}.",
     inputSchema: {
-      action: z.string().describe("The action name (e.g. 'click', 'type', 'navigate', 'cdp_send', 'snapshot', 'storage_get', etc.)"),
+      action: z
+        .string()
+        .optional()
+        .describe("Action name, e.g. 'click', 'navigate', 'export_har', 'get_cookies'. Omit to list every available action."),
       params: z.record(z.string(), z.any()).optional().describe("Parameters for the action as a key-value object"),
     },
   },
-  tool("action", async ({ action, params = {} }) => text(await callBridge(action, params)))
+  tool("action", async ({ action, params = {} }) => {
+    if (!action) {
+      const extra = ["dismiss", "close_modal", "element_rect"];
+      const actions = [...new Set([...KNOWN_ACTIONS, ...extra, ...Object.keys(ACTION_ALIASES)])]
+        .filter((a) => a !== "action").sort();
+      return text({
+        note:
+          "Dispatch any of these with browser_action({action, params}). Every name here matches the " +
+          "browser_<name> tool and takes the same parameters, so you can go straight from a tool name " +
+          "you saw to a call. A few names are conveniences that map onto get_property: " +
+          "get_text / get_value / get_html / get_box / get_attribute / get_count.",
+        count: actions.length,
+        actions,
+      });
+    }
+    const mapped = ACTION_ALIASES[action];
+    if (mapped) return text(await callBridge(mapped.action, { ...mapped.params, ...params }));
+    if (MCP_ONLY_TOOLS.has(action)) {
+      const err = new Error(
+        `'${action}' is handled by the MCP server itself, not by the browser — call the tool browser_${action} directly rather than routing it through browser_action.`
+      );
+      err.code = "MCP_ONLY_TOOL";
+      err.recoveryHint = `Call browser_${action}.`;
+      throw err;
+    }
+    return text(await callBridge(action, params));
+  })
 );
 
 server.registerTool(
@@ -646,16 +867,20 @@ server.registerTool(
   {
     title: "Snapshot page",
     description:
-      "Return the TARGET tab's interactive elements (each with an 'index' and a stable 'ref'), the page URL/title, and visible text. On your first command the focused tab is pinned as the target and stays pinned even if the user switches tabs (use browser_switch_tab to retarget). Check the returned url/title (or call browser_current_tab) before reading sensitive pages. Call this first, then act by ref/index. Re-call after any action that changes the page. Covers elements inside iframes (including cross-origin): a sub-frame element carries a 'frame' url and a frame-qualified ref like 'f3:ref_5' — pass that ref back verbatim to click/type it (index is top-frame only).",
+      "NOT an image — despite the name, this returns TEXT. It is the primary tool to inspect ANY page state, UI controls, navigation headers, notifications, badges, form fields, and interactive layout (includes aria-labels, buttons, links, inputs). Returns the TARGET tab's interactive elements (each with an 'index' and a stable 'ref'), the page URL/title, visible text, viewport state, and every open dialog. Elements are listed in reading order. Call this first, then act by ref/index, and re-call after any action that changes the page.\n" +
+      "SCOPE: 'viewport' (default) lists only what is on screen; 'all' lists everything currently in the DOM. On a dense SPA the two differ by roughly 10-35% of the census, so 'all' is cheap — prefer it whenever a COUNT or a COMPLETE list is the answer ('how many X', 'list all Y'), because a viewport census can silently omit rows of exactly the kind you were asked for. The response names what it withheld.\n" +
+      "'all' means every element IN THE DOM — not everything the page can show. Feeds, notification panels, infinite lists and virtualised tables keep most rows out of the DOM until something is clicked, so no scope setting reveals them; when such content is likely the response carries a 'Possible hidden content' line naming the control to click.\n" +
+      "In compact mode key inputs and search boxes are preserved at the top, and dense repetitive runs are folded (their refs still listed) to protect the token budget. Also reported: open dialogs whether or not they block the page, truncated labels with the ref that returns the rest, and suppressed duplicate links.",
     inputSchema: {
-      compact: z.boolean().optional().describe("Return a compact token-efficient representation (saves ~75% tokens, default true)"),
+      scope: z.enum(["viewport", "all"]).optional().describe("'viewport' (default) = on-screen elements only. 'all' = every element currently in the DOM (NOT every row the page could load). Use 'all' for counts and complete lists; it typically costs only 3-35% more than viewport."),
+      compact: z.boolean().optional().describe("Compact indented view (default true). Passing false returns the same elements as structured JSON — it is not a larger census."),
       format: z.enum(["smart", "compact", "json", "pretty", "raw"]).optional().describe("Output formatting: 'smart' (default, compact tree), 'json', 'pretty', or 'raw'"),
       maxText: z.number().int().optional().describe("Max characters of page body text to include (default 4000)"),
     },
   },
-  tool("snapshot", async ({ compact, format, maxText }) => {
+  tool("snapshot", async ({ scope, compact, format, maxText }) => {
     const isCompact = (format === "compact" || format === "smart" || format === undefined) ? (compact !== false) : compact;
-    const res = await callBridge("snapshot", { compact: isCompact, maxText });
+    const res = await callBridge("snapshot", { scope: scope || "viewport", compact: isCompact, maxText });
     return text(res, format);
   })
 );
@@ -665,10 +890,12 @@ server.registerTool(
   {
     title: "Read page (accessibility tree)",
     description:
-      "Return the TARGET tab's accessibility tree as compact indented text — roles, accessible names, and a stable 'ref' on each interactive element (e.g. textbox \"Email\" [ref_5]). Cheaper than a screenshot and usable for reasoning about structured pages. Act on results with browser_click/browser_type using the ref. mode='interactive' (default) lists actionable elements; mode='all' includes everything. Pass ref_id to focus a subtree, depth to limit nesting. iframe contents are appended under an 'iframe [f<id>] <url>' header with frame-qualified refs (e.g. f3:ref_5).",
+      "SPECIALISED reader — reach for browser_snapshot first unless you specifically need NESTING (which control sits inside which group, form or region). Returns the accessibility tree as indented text — roles, accessible names, ARIA state, and a stable 'ref' on each interactive element (e.g. textbox \"Email\" [ref_5]). Unlike snapshot it has a depth limit, and it does NOT report open dialogs, what it left out, or content that loads on demand — so it cannot tell you when your answer is incomplete.\n" +
+      "mode='interactive' (default) lists actionable elements and headings; mode='all' includes every element except script/style. Pass ref_id to focus a subtree. 'depth' defaults to 60: a React/Comet SPA nests content 25-45 levels deep, and a walk that stops short returns an almost empty tree — the response now says 'depthClipped' and reports 'deepestReached' when that happens, so an empty result is never mistaken for an empty page.\n" +
+      "iframe contents are appended under an 'iframe [f<id>] <url>' header with frame-qualified refs (e.g. f3:ref_5).",
     inputSchema: {
       mode: z.enum(["interactive", "all"]).optional().describe("Default 'interactive'"),
-      depth: z.number().int().optional().describe("Max nesting depth (default 15)"),
+      depth: z.number().int().optional().describe("Max nesting depth (default 60). Deep SPAs need this; raise it further if the response reports depthClipped."),
       ref_id: z.string().optional().describe("Focus the subtree under this ref"),
       maxChars: z.number().int().optional().describe("Output cap (default 50000)"),
     },
@@ -683,9 +910,12 @@ server.registerTool(
   {
     title: "Find elements by text",
     description:
-      "Find interactive elements whose accessible name / text / placeholder / aria-label contains the query. Returns up to 'max' matches, each with a stable 'ref' to act on. Searches inside iframes too; matches from a sub-frame carry a frame-qualified ref (e.g. f3:ref_5) — pass it back verbatim. Use when you know the label of a control but not its index.",
+      "Find elements whose accessible name / text / placeholder / aria-label / title contains the query, e.g. query='Notifications'. Use when you know a control's label but not its index.\n" +
+      "Each match carries a stable 'ref' to act on, plus 'matchedBy' saying which rung found it — 'interactive' (native control), 'aria' (role/tabindex widget), 'custom-element' (Web Component), or 'text-container' (the text exists but nothing listens for a click on it, so 'clickable' is false and browser_click will refuse the ref). browser_click resolves text through this same ladder, so anything listed here as clickable can be clicked.\n" +
+      "SCOPE: searches the WHOLE PAGE — top frame, open Shadow DOM and iframes — regardless of what is on screen. This differs from browser_snapshot, which defaults to the viewport, so the two can disagree about how many matches exist; find sees more. A sub-frame match carries a frame-qualified ref such as 'f3:ref_5', which must be passed back verbatim.\n" +
+      "On zero matches the response carries 'nearest': labels that differ only by diacritics or case, with their refs — so a one-character transcription error costs one call, not four. Long labels are cut at 200 chars and carry 'truncatedBy' plus the get-text call that returns the rest.",
     inputSchema: {
-      query: z.string().describe("Text to match (case-insensitive substring)"),
+      query: z.string().describe("Required text to match, e.g. 'Notifications', 'Search' (case-insensitive substring)"),
       max: z.number().int().optional().describe("Max matches (default 20)"),
     },
   },
@@ -697,9 +927,11 @@ server.registerTool(
   {
     title: "Find text on the page",
     description:
-      "Search the FULL page text (not just interactive elements) for a query and return matching snippets with surrounding context, each flagged 'visible' (false for screen-reader-only/off-screen text) and paired with the nearest clickable/typeable ancestor if one exists ('nearestInteractive': {ref, tag, text}), so a hit can be turned into an action in one follow-up call. A match may span an inline element boundary (e.g. a name in its own link followed by plain text) — when it touches 2+ distinct interactive ancestors, an additional 'spanInteractives' array lists all of them (nearestInteractive stays the first/start one). Use this to answer 'does this page contain X, and where' — e.g. a rating, a price, a status string sitting in plain text that browser_find/browser_snapshot can't see (they only index interactive elements by design). For 'what can I click', use browser_find instead. Top frame only (like browser_get_page_content) — does not search iframes.",
+      "Search the page's text (not just interactive elements) for a query, e.g. query='Total: $50' — a price, rating or status string sitting in plain text that browser_find and browser_snapshot cannot see, because those index interactive elements by design. For 'what can I click', use browser_find instead.\n" +
+      "SCOPE: searches the top frame including open Shadow DOM, but NOT iframes. The response states what was searched in 'searchedScope', so an empty result tells you whether the text is absent or merely out of scope.\n" +
+      "Each match carries 'visible' (false for screen-reader-only or off-screen text) and 'nearestInteractive' ({ref, tag, text}) — the closest clickable/typeable ancestor, so a text hit becomes an action in one follow-up call. A match spanning 2+ interactive ancestors also carries 'spanInteractives'.",
     inputSchema: {
-      query: z.string().describe("Text to match (case-insensitive substring by default)"),
+      query: z.string().describe("Required text to match (e.g. 'status', 'error message')"),
       regex: z.boolean().optional().describe("Treat query as a JS regex pattern instead of a literal substring. Default false."),
       max: z.number().int().optional().describe("Max matches (default 20)"),
       contextChars: z.number().int().optional().describe("Characters of context to include before/after each match (default 80)"),
@@ -715,16 +947,21 @@ server.registerTool(
   {
     title: "Navigate",
     description: "Load a URL in the target tab (pins it as the target for later commands). Returns the final URL once loaded.",
-    inputSchema: { url: z.string().describe("Absolute URL to load") },
+    inputSchema: {
+      url: z.string().describe("Absolute URL to load"),
+      tabId: z.number().int().optional().describe("Tab id to navigate (default: target tab)"),
+      tab_id: z.number().int().optional().describe("Alias for tabId"),
+    },
   },
-  tool("navigate", async ({ url }) => text(await callBridge("navigate", { url })))
+  tool("navigate", async ({ url, tabId, tab_id }) => text(await callBridge("navigate", { url, tabId: tabId ?? tab_id })))
 );
 
 server.registerTool(
   "browser_click",
   {
     title: "Click element",
-    description: "Click an element identified by 'ref' (e.g. '@e1', 'ref_5'), 'index', CSS 'selector', or visible 'text'. Automatically waits for DOM mutations to settle.",
+    description:
+      "Click an element identified by 'ref' (e.g. '@ref_5', 'ref_5', '@e1'), 'index', CSS 'selector', or visible 'text'. Resolves across standard buttons/links, ARIA controls (menuitem, option, tab, treeitem, switch), and custom Web Components (tags containing '-'). Automatically waits for DOM mutations to settle.",
     inputSchema: z.object({
       index: z.number().int().optional().describe("Element index from browser_snapshot"),
       ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5', '@e1')"),
@@ -747,7 +984,7 @@ server.registerTool(
   {
     title: "Type / Fill text into element",
     description:
-      "Instantly focus an element (by 'ref', 'index', 'selector', or 'placeholder') and set its text via native prototype setters (compatible with React/Vue v-model and rich-text contenteditable editors like ProseMirror/Tiptap), NOT slow keystroke simulation. Set submit=true to press Enter afterward.",
+      "Instantly focus an editable element (<input>, <textarea>, or contenteditable editor by 'ref', 'index', 'selector', or 'placeholder') and set its text via native prototype setters (compatible with React/Vue v-model and rich-text editors like ProseMirror/Tiptap). If an uneditable element (e.g. <a> or <button>) is targeted, returns candidate input refs in the viewport. Set submit=true to press Enter afterward.",
     inputSchema: z.object({
       index: z.number().int().optional().describe("Element index from browser_snapshot"),
       ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5', '@e1')"),
@@ -772,7 +1009,7 @@ server.registerTool(
   {
     title: "Fill text into input or rich-text editor",
     description:
-      "High-level fill primitive: clears existing value and sets text instantly via native prototype setters and bubbling events. Fully compatible with Vue/React v-model and rich-text ProseMirror/Tiptap contenteditable editors.",
+      "High-level fill primitive: clears existing value and sets text instantly via native prototype setters and bubbling events. Fully compatible with Vue/React v-model and rich-text ProseMirror/Tiptap contenteditable editors. If an uneditable element is targeted by mistake, returns candidate editable input refs in the viewport.",
     inputSchema: z.object({
       index: z.number().int().optional().describe("Element index from browser_snapshot"),
       ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5', '@e1')"),
@@ -820,15 +1057,35 @@ server.registerTool(
 server.registerTool(
   "browser_scroll",
   {
-    title: "Scroll page",
-    description: "Scroll the page up or down by a number of pixels (default 600).",
+    title: "Scroll page or container",
+    description:
+      "Scroll the page or a specific container (e.g. div with overflow:auto, iframe, table, drawer) up or down. Automatically detects nested scrollable containers if the root window is locked.",
     inputSchema: {
-      direction: z.enum(["up", "down"]).optional().describe("Default 'down'"),
+      direction: z.enum(["up", "down", "left", "right"]).optional().describe("Default 'down'"),
       amount: z.number().optional().describe("Pixels to scroll, default 600"),
+      ref: z.string().optional().describe("Target scrollable element ref (e.g. '@ref_1', '@f898:ref_54')"),
+      selector: z.string().optional().describe("Target scrollable CSS selector"),
+      index: z.number().int().optional().describe("Element index from snapshot"),
     },
   },
-  tool("scroll", async ({ direction, amount }) =>
-    text(await callBridge("scroll", { direction, amount }))
+  tool("scroll", async ({ direction, amount, ref, selector, index }) =>
+    text(await callBridge("scroll", { direction, amount, ref, selector, index }))
+  )
+);
+
+server.registerTool(
+  "browser_dismiss_modal",
+  {
+    title: "Dismiss active modal or drawer",
+    description:
+      "Dismiss or close an active modal, dialog, side drawer, or flyout by triggering its close button or dispatching an Escape key event.",
+    inputSchema: {
+      ref: z.string().optional().describe("Optional element ref of the close button or modal"),
+      selector: z.string().optional().describe("Optional CSS selector of the close button or modal"),
+    },
+  },
+  tool("dismiss", async ({ ref, selector }) =>
+    text(await callBridge("dismiss", { ref, selector }))
   )
 );
 
@@ -969,11 +1226,13 @@ server.registerTool(
     title: "Switch tab",
     description: "Make the tab with the given id active and the target for subsequent commands. Activates the tab within its window but does NOT raise the window (no focus steal) unless focus=true. Prefer browser_navigate/browser_new_tab to work a new page; use this (especially focus=true) only when the user asks to bring a tab forward.",
     inputSchema: {
-      id: z.number().int().describe("Tab id from browser_list_tabs"),
+      id: z.number().int().optional().describe("Tab id from browser_list_tabs"),
+      tabId: z.number().int().optional().describe("Alias for id"),
+      tab_id: z.number().int().optional().describe("Alias for id"),
       focus: z.boolean().optional().describe("Also raise the window to the foreground (steals the user's focus). Default false."),
     },
   },
-  tool("switch_tab", async ({ id, focus }) => text(await callBridge("switch_tab", { id, focus })))
+  tool("switch_tab", async ({ id, tabId, tab_id, focus }) => text(await callBridge("switch_tab", { id: id ?? tabId ?? tab_id, focus })))
 );
 
 server.registerTool(
@@ -992,9 +1251,13 @@ server.registerTool(
   {
     title: "Close tab",
     description: "Close the tab with the given id.",
-    inputSchema: { id: z.number().int().describe("Tab id from browser_list_tabs") },
+    inputSchema: {
+      id: z.number().int().optional().describe("Tab id from browser_list_tabs"),
+      tabId: z.number().int().optional().describe("Alias for id"),
+      tab_id: z.number().int().optional().describe("Alias for id"),
+    },
   },
-  tool("close_tab", async ({ id }) => text(await callBridge("close_tab", { id })))
+  tool("close_tab", async ({ id, tabId, tab_id }) => text(await callBridge("close_tab", { id: id ?? tabId ?? tab_id })))
 );
 
 // --- CDP-backed tools (console / network / HAR / eval). Require browser_cdp_attach. ---
@@ -1067,7 +1330,7 @@ server.registerTool(
   {
     title: "Evaluate JavaScript",
     description:
-      "Run a JavaScript expression in the target page and return its value. The value must be JSON-serializable (functions/DOM nodes are dropped, via JSON round-trip). If the debugger is attached it runs via Runtime.evaluate (bypasses page CSP); otherwise in the page MAIN world.",
+      "Run a JavaScript expression in the target page and return its value. The value must be JSON-serializable. Automatically falls back to CDP Runtime.evaluate if page Content Security Policy (CSP) or Trusted Types block standard script execution. For reading text or attributes without writing JS, prefer 'browser_get_text' or 'browser_get_attribute'.",
     inputSchema: {
       expression: z.string().describe("JavaScript expression to evaluate"),
       format: z.enum(["smart", "json", "pretty", "raw"]).optional().describe("Output formatting: 'smart' (default), 'json', 'pretty', or 'raw'"),
@@ -1170,7 +1433,7 @@ server.registerTool(
   {
     title: "Wait for page to settle",
     description:
-      "Wait until the page is fully loaded AND no CSS/JS animations are running (document.readyState complete + getAnimations() empty). Catches transitions that wait_for/network-idle miss. Use before a screenshot or read after navigation.",
+      "Wait until the page is fully loaded AND no CSS/JS animations are running (document.readyState complete + getAnimations() empty). Catches transitions that wait_for/network-idle miss. Ideal for modern SPAs (YouTube, Algolia, Azure Portal, GitHub) where background WebSockets or telemetry prevent network-idle from reaching zero. Use before a screenshot or snapshot after navigation or input submission.",
     inputSchema: { timeoutMs: z.number().int().optional().describe("Timeout in ms (default 10000)") },
   },
   tool("wait_settle", async ({ timeoutMs }) => text(await callBridge("wait_settle", { timeoutMs })))
@@ -1180,11 +1443,70 @@ server.registerTool(
   "browser_get_page_content",
   {
     title: "Get readable page content",
-    description: "Extract the main readable text of the page (title, url, cleaned text). Good for reading articles.",
+    description: "Extract the main readable prose/article text of the page (title, url, cleaned text). Good for reading articles and documentation. NOTE: Only extracts article prose text. For web app UI, headers, icon buttons, badges, unread counts, and notifications, use browser_snapshot instead.",
     inputSchema: { maxChars: z.number().int().optional().describe("Max characters of text (default 8000)") },
   },
   tool("get_page_content", async ({ maxChars }) =>
     text(await callBridge("get_page_content", { maxChars }))
+  )
+);
+
+server.registerTool(
+  "browser_get_text",
+  {
+    title: "Read an element's text, value, HTML or box",
+    description:
+      "Read one property of an element identified by CSS 'selector' (e.g. '.price', '#status', 'h1'), 'ref' (e.g. '@ref_1'), or 'index'. Pierces open Shadow DOM and works on custom Web Components. property: 'text' (default, visible innerText) | 'value' (current form-field value, including what a page set itself) | 'html' (the element's outerHTML markup) | 'box' (position and size). Prefer this over eval_js for all four. Returns the FIRST match: when a selector matches several elements the response says so in 'matchCount' — pass a ref to pick a specific one.",
+    inputSchema: z.object({
+      selector: z.string().optional().describe("CSS selector (e.g. 'ytd-active-account-header-renderer', '.header-title')"),
+      ref: z.string().optional().describe("Stable element ref (e.g. '@ref_1', 'ref_5')"),
+      index: z.number().int().optional().describe("Element index from browser_snapshot"),
+      placeholder: z.string().optional().describe("Match input by placeholder attribute"),
+      property: z
+        .enum(["text", "value", "html", "box"])
+        .optional()
+        .describe("Which property to read. Default 'text'. Use 'html' for raw markup, 'value' for form-field contents."),
+    }).refine((v) => v.selector !== undefined || v.ref !== undefined || v.index !== undefined || v.placeholder !== undefined, {
+      message: "Provide at least one of 'selector', 'ref', 'index', or 'placeholder'.",
+    }),
+  },
+  tool("get_property", async ({ selector, ref, index, placeholder, property }) =>
+    text(await callBridge("get_property", { property: property || "text", selector, ref, index, placeholder }))
+  )
+);
+
+server.registerTool(
+  "browser_get_attribute",
+  {
+    title: "Get attribute of element",
+    description:
+      "Get the value of a specific HTML/DOM attribute (e.g. 'href', 'aria-label', 'value', 'src', 'data-*') from an element identified by CSS 'selector', 'ref', or 'index'. Pierces open Shadow DOM.",
+    inputSchema: z.object({
+      attr: z.string().describe("Attribute name to read (e.g. 'href', 'aria-label', 'value', 'src')"),
+      selector: z.string().optional().describe("CSS selector (e.g. 'a.login-btn', 'input#email')"),
+      ref: z.string().optional().describe("Stable element ref (e.g. '@ref_1', 'ref_5')"),
+      index: z.number().int().optional().describe("Element index from browser_snapshot"),
+    }).refine((v) => v.selector !== undefined || v.ref !== undefined || v.index !== undefined, {
+      message: "Provide at least one of 'selector', 'ref', or 'index'.",
+    }),
+  },
+  tool("get_property", async ({ attr, selector, ref, index }) =>
+    text(await callBridge("get_property", { property: "attr", attr, selector, ref, index }))
+  )
+);
+
+server.registerTool(
+  "browser_get_count",
+  {
+    title: "Count matching elements",
+    description:
+      "Count the number of elements matching a CSS selector across the page and open Shadow DOM (e.g. 'button', 'a[href]', 'ytd-video-renderer'). Fast census tool.",
+    inputSchema: {
+      selector: z.string().describe("CSS selector to count (e.g. 'button', 'a[href]', '[aria-expanded=\"false\"]')"),
+    },
+  },
+  tool("get_property", async ({ selector }) =>
+    text(await callBridge("get_property", { property: "count", selector }))
   )
 );
 
@@ -1361,7 +1683,10 @@ server.registerTool(
   "browser_a11y_snapshot",
   {
     title: "Accessibility snapshot",
-    description: "Return the page's accessibility tree (role/name/value) — a semantic view of the page. Requires browser_cdp_attach.",
+    description:
+      "SECOND OPINION on the page, from Chrome itself. Returns Chrome's own accessibility tree — the role, name and state it computes for every control by the HTML-AAM spec — not browserctl's census. Each node carries a 'ref' where the census has the same control, so results are directly actionable.\n" +
+      "Use it when browser_snapshot's answer looks wrong or incomplete: a control you can see but cannot find, a name that does not match what is on screen, or a form whose state you want confirmed independently. 'censusCoverage' says how much of Chrome's control list the census also had, and 'notInCensus' names the difference — usually screen-reader-only text, occasionally a real gap.\n" +
+      "COST: attaches the debugger, so Chrome shows a 'browserctl started debugging this browser' banner on that tab, and it is ~3x slower and ~2x larger than browser_snapshot. It is a diagnostic, not a replacement — reach for browser_snapshot first. Attaches on its own; no separate browser_cdp_attach needed.",
     inputSchema: { max: z.number().int().optional().describe("Max nodes (default 200)") },
   },
   tool("a11y_snapshot", async ({ max }) => text(await callBridge("a11y_snapshot", { max })))
@@ -1391,15 +1716,17 @@ server.registerTool(
   {
     title: "Describe one element",
     description:
-      "Given a ref (from browser_snapshot/browser_read_page/browser_find/browser_find_text) or an index (from the latest browser_snapshot), return everything useful for debugging it: tag, full attribute dump, bounding rect, a visibility verdict WITH the specific reason it failed if not visible ('zero-size rect' | 'visibility:hidden' | 'display:none' | 'opacity:0' | 'disabled' | 'visible'), and whether it matches the interactive-element selector browser_find/browser_snapshot use. Use this to understand why a click/type failed, why an element didn't show up in browser_snapshot, or to inspect an element browser_find_text pointed at via nearestInteractive. Does not return full computed style (hundreds of mostly-noise properties) — just the fields that explain real failures.",
+      "Given a CSS 'selector', 'ref', or 'index', return everything useful for debugging it: tag, full attribute dump, bounding rect, visibility verdict WITH the specific reason ('visible' | 'display:none' | 'visibility:hidden' | 'zero-size rect' | 'opacity:0' | 'disabled'), and whether it matches the interactive selector. Pierces open Shadow DOM.",
     inputSchema: z.object({
+      selector: z.string().optional().describe("CSS selector to describe (e.g. 'ytd-active-account-header-renderer', '#submit-btn')"),
+      ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5', '@ref_1')"),
       index: z.number().int().optional().describe("Element index from browser_snapshot"),
-      ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5')"),
-    }).refine((v) => v.index !== undefined || v.ref !== undefined, {
-      message: "Provide at least one of 'ref' or 'index'.",
+      placeholder: z.string().optional().describe("Match input by placeholder attribute"),
+    }).refine((v) => v.selector !== undefined || v.ref !== undefined || v.index !== undefined || v.placeholder !== undefined, {
+      message: "Provide at least one of 'selector', 'ref', 'index', or 'placeholder'.",
     }),
   },
-  tool("describe_element", async ({ index, ref }) => text(await callBridge("describe_element", { index, ref })))
+  tool("describe_element", async ({ selector, ref, index, placeholder }) => text(await callBridge("describe_element", { selector, ref, index, placeholder })))
 );
 
 server.registerTool(
@@ -1426,10 +1753,18 @@ server.registerTool(
   "browser_get_cookies",
   {
     title: "Get cookies",
-    description: "Return browser cookies, optionally filtered to cookies whose domain contains this substring. Requires browser_cdp_attach.",
-    inputSchema: { urlContains: z.string().optional() },
+    description:
+      "Return the cookies that apply to the TARGET TAB's current page (this is the default scope, and the answer to \"what cookies did this page set\"). Pass allDomains:true to read every cookie in the browser profile instead — that returns the user's whole session jar across all sites, so ask for it only when the task really needs it. Capped at 200 cookies; the response says when it truncated. Requires browser_cdp_attach.",
+    inputSchema: {
+      urlContains: z.string().optional().describe("Keep only cookies whose domain contains this substring"),
+      url: z.string().optional().describe("Scope to this URL instead of the target tab's current page"),
+      allDomains: z.boolean().optional().describe("Read every cookie in the browser profile, not just this page's. Default false."),
+      limit: z.number().int().optional().describe("Max cookies to return (default 200)"),
+    },
   },
-  tool("get_cookies", async ({ urlContains }) => text(await callBridge("get_cookies", { urlContains })))
+  tool("get_cookies", async ({ urlContains, url, allDomains, limit }) =>
+    text(await callBridge("get_cookies", { urlContains, url, allDomains, limit }))
+  )
 );
 
 server.registerTool(
@@ -1561,11 +1896,16 @@ server.registerTool(
   "browser_wait_network_idle",
   {
     title: "Wait for network idle",
-    description: "Wait until the target tab has had no in-flight requests for idleMs (default 500), up to timeoutMs (default 10000). Reduces flaky waits.",
-    inputSchema: { idleMs: z.number().int().optional(), timeoutMs: z.number().int().optional() },
+    description:
+      "Wait until the target tab has had no in-flight requests for idleMs (default 500), up to timeoutMs (default 10000). For modern SPAs with persistent WebSockets, telemetry, or long-polling (YouTube, Algolia, Twitter, Azure Portal), network-idle may time out waiting for 0 requests; use 'browser_wait_settle' instead or set maxInFlight to tolerate background connections.",
+    inputSchema: {
+      idleMs: z.number().int().optional().describe("Quiet period in ms with <= maxInFlight requests (default 500)"),
+      timeoutMs: z.number().int().optional().describe("Maximum wait timeout in ms (default 10000)"),
+      maxInFlight: z.number().int().optional().describe("Tolerate up to N background/in-flight requests (e.g. 1 for WebSockets/telemetry, default 0)"),
+    },
   },
-  tool("wait_network_idle", async ({ idleMs, timeoutMs }) =>
-    text(await callBridge("wait_network_idle", { idleMs, timeoutMs }))
+  tool("wait_network_idle", async ({ idleMs, timeoutMs, maxInFlight }) =>
+    text(await callBridge("wait_network_idle", { idleMs, timeoutMs, maxInFlight }))
   )
 );
 
@@ -1588,7 +1928,11 @@ server.registerTool(
   "browser_stop",
   {
     title: "Stop bridge daemon",
-    description: "Stop the local browserctl bridge server daemon (records explicit stopped state).",
+    description:
+      "Stop the local browserctl bridge daemon. DO NOT call this to tidy up when a task is finished — " +
+      "the daemon is shared with the user and with any other agent driving a tab, it starts and maintains " +
+      "itself, and stopping it interrupts their work and records an explicit stopped state that blocks " +
+      "auto-restart. Call it only when the user asks you to shut the bridge down.",
     inputSchema: {},
   },
   async () => {

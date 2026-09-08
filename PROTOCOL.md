@@ -1,6 +1,6 @@
 # Command protocol
 
-Current version: **0.5.1** (extension, bridge, and MCP server are versioned together).
+Current version: **0.6.0** (extension, bridge, and MCP server are versioned together).
 
 Agents send commands to the bridge:
 
@@ -86,7 +86,14 @@ Returns the page's interactive elements (each with a stable `index` and stable `
 load), plus page metadata and visible text. This is the agent's main "what's on
 screen" call.
 
-Params: optional `{ "compact": true, "maxText": 4000 }` (`compact: true` returns dense single-line representation saving ~75% tokens).
+Params: optional `{ "scope": "viewport"|"all", "compact": true, "maxText": 4000 }`. `scope` defaults to
+`viewport`; `all` lists every element currently in the DOM — which is NOT every row the page can show,
+since feeds and virtualised lists materialise rows only on interaction.
+
+`text` is the element's accessible name, resolved the way the browser resolves it (0.6.0): `aria-label`,
+`aria-labelledby`, a descendant image's `alt`, `title`/`placeholder`, a form control's `<label for>` /
+wrapping `<label>` / row text, then slotted shadow content. A control's `value` is never used as its
+name.
 
 Result:
 ```jsonc
@@ -94,17 +101,35 @@ Result:
   "url": "https://example.com/",
   "title": "Example",
   "elements": [
-    { "index": 0, "ref": "ref_1", "tag": "a",      "text": "Home",        "href": "/" },
+    { "index": 0, "ref": "ref_1", "tag": "a",      "text": "Home",        "href": "/", "hrefKey": "https://example.com/" },
     { "index": 1, "ref": "ref_2", "tag": "input",  "type": "search",      "placeholder": "Search", "value": "" },
-    { "index": 2, "ref": "ref_3", "tag": "button", "text": "Submit" }
+    { "index": 2, "ref": "ref_3", "tag": "li",     "text": "Only me",     "role": "menuitemradio", "state": { "checked": "true" } },
+    { "index": 3, "ref": "ref_4", "tag": "input",  "type": "checkbox",    "text": "I'm travelling for work", "viaLabel": true },
+    { "index": 4, "ref": "ref_5", "tag": "div",    "text": "Next",        "revealOn": "hover/focus" },
+    { "index": 5, "ref": "ref_6", "tag": "a",      "text": "A very long label…", "textTruncatedBy": 318 }
   ],
-  "compactView": "[@ref_1] <a> \"Home\" -> /\n[@ref_2] <input>[type=search] (placeholder: \"Search\")\n[@ref_3] <button> \"Submit\"",
+  "pageState": {
+    "hasActiveModal": false,
+    "openDialogs": [ { "label": "Notifications", "tag": "div", "width": 360, "height": 661 } ]
+  },
+  "compactView": "[Structure: 30 repeated <tr> rows (~2 controls each)]\n  [@ref_1] <a> \"Home\" -> /\n…",
   "text": "Visible page text, truncated..."
 }
 ```
 
-Indices and refs are valid until the page navigates or is re-rendered. Re-`snapshot` after
-any action that changes the page.
+Per-element fields added in 0.6.0: `role` and `state` (from `aria-checked`/`selected`/`expanded`/
+`pressed`/`current`/`disabled`), `hrefKey` (href normalised for duplicate detection), `textTruncatedBy`
+(characters cut, retrievable with `get_property text`), `viaLabel` (a visually hidden control operated
+through its visible label), `revealOn` (hidden until hover/focus). `pageState.openDialogs` lists every
+open dialog, whether or not it blocks the page.
+
+`compactView` opens with a `[Structure: …]` line describing the page's shape, and closes with notices
+naming what was withheld — offscreen elements *by kind*, suppressed duplicates, folded runs, and
+`[Possible hidden content: …]` for controls that load more rows on demand.
+
+Elements are listed in reading order within each landmark block. Indices and refs are valid until the
+page navigates or is re-rendered; a stale `ref` now reports the ref that replaced it where the same
+label is still on the page. Re-`snapshot` after any action that changes the page.
 
 ## Actions
 
@@ -114,6 +139,30 @@ Returns `{ url }` once loaded.
 
 ### `click`
 `params: { ref?, index?, selector?, text?, autoSettle?: true, settleMs?: 150 }` - click target element (by ref e.g. `@e1`/`ref_1`, numeric index, CSS selector `#id`, or visible text matching). Automatically waits for DOM mutations to settle (default 150ms).
+
+Every click/type/fill/paste returns an `effect` block so the caller can tell a real action from a no-op:
+
+```jsonc
+{
+  "clicked": "@ref_119",
+  "waitedMs": 56,
+  "effect": {
+    "measured": true,
+    "domMutated": true,
+    "mutationCount": 34,
+    "urlChanged": false,
+    "targetStillPresent": true,
+    // 0.6.0: for a control carrying aria-checked/selected/pressed/expanded, whether its
+    // OWN state moved. "The DOM mutated" is not evidence the intended thing happened —
+    // eight consecutive clicks on a real audience selector each reported 34+ mutations
+    // while the selection never committed.
+    "controlState": { "changed": ["checked: false -> true"], "unchanged": [] }
+  }
+}
+```
+
+A click that mutates the page without moving the control's state carries an explicit warning, as does
+one that produces no mutation at all.
 
 ### `type`
 `params: { ref?, index?, selector?, placeholder?, text, submit?, autoSettle?: true, settleMs?: 100 }` - focus the element, set its value to `text`
@@ -311,7 +360,7 @@ tool. Add a redaction pass in `util.js` if pointing it at a shared/untrusted con
 Direction: match the official extension's control model, openly (no blocklist / org-lock /
 gating), agent stays external. Principle: **DOM-first, CDP-fallback** — structured work via
 the content script (no banner), CDP only for pixel input, background-tab capture, protocol
-capture, and CSP-bypass eval. See `docs/superpowers/specs/2026-06-30-claude-for-chrome-open-design.md`.
+capture, and CSP-bypass eval. See `docs/2026-06-30-claude-for-chrome-open-design.md`.
 
 ### Background tab control
 - Target is **pinned on first touch** and held across user tab switches (see the target-tab

@@ -17,6 +17,7 @@
 import http from "node:http";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 function envStr(name, fallback) {
   const raw = process.env[name];
   return raw !== undefined && raw !== "" ? raw : fallback;

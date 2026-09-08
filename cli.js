@@ -55,8 +55,9 @@ Navigation & Tabs:
   browserctl tab close [id]             Close tab (alias: close_tab)
 
 Inspection & Query (get):
-  browserctl snapshot [-c|--compact]    Capture interactive DOM elements (compact saves ~75% tokens)
-  browserctl read_page [mode]           Read accessibility tree & text (mode: interactive | all)
+  browserctl snapshot [--all]           Capture interactive DOM elements (--all = everything in the DOM)
+  browserctl read_page [mode] [--depth N] [--max-chars N] [--ref @ref_1]
+                                        Read accessibility tree & text (mode: interactive | all)
   browserctl get text <target>          Get visible text of element (@e1, ref_1, selector)
   browserctl get value <target>         Get value of input/textarea/select
   browserctl get attr <target> <name>   Get attribute value (e.g. href, src, placeholder)
@@ -67,9 +68,9 @@ Inspection & Query (get):
   browserctl get count <selector>       Count matching elements
 
 Interaction:
-  browserctl click <target>             Click element (@e1, ref_1, 0, --text "...", --selector "...")
+  browserctl click <target>             Click element (@e1, ref_1, 0, --text "...", custom elements, ARIA roles)
   browserctl dblclick <target>          Double-click element
-  browserctl fill <target> <text>       Clear input and fill text (@e1, ref_1, --placeholder "...")
+  browserctl fill <target> <text>       Clear input and fill text (recovers with candidate input refs if targeted element is not editable)
   browserctl paste <target> <text>      Paste text/markdown into field or rich-text editor
   browserctl type <target> <text>       Type into input field (appends/types text)
   browserctl clear <target>             Clear input/textarea field
@@ -77,23 +78,23 @@ Interaction:
   browserctl uncheck <target>           Uncheck checkbox
   browserctl select <target> <val...>   Select option in dropdown by value or --label "..."
   browserctl hover <target>             Hover over element
-  browserctl focus <target>             Focus target element
-  browserctl scroll [up|down] [amount]  Scroll current page
+  browserctl scroll [up|down] [amount] [target] Scroll page or container (@ref, selector)
   browserctl scrollintoview <target>    Scroll element into view
   browserctl press <key>                Press key (Enter, Tab, Escape, etc.)
+  browserctl dismiss [target]           Dismiss active modal, drawer, or flyout (Escape or close button)
 
 Wait & Synchronization:
-  browserctl wait <ms>                  Sleep for specified milliseconds (e.g. wait 2000)
+  browserctl wait [<ms>]                Sleep for specified milliseconds (e.g. wait 2000)
+  browserctl wait [--settle|--auto]     Wait for DOM mutations and animations to finish (default)
   browserctl wait <target>              Wait for element to appear in DOM
   browserctl wait --text "..."          Wait for visible text to appear
   browserctl wait --selector "..."      Wait for CSS selector to appear
-  browserctl wait --network-idle        Wait for network activity to settle
-  browserctl wait --settle              Wait for DOM mutations and animations to finish
+  browserctl wait --network-idle [--tolerance N] Wait for network activity to settle (tolerates N background requests)
 
 Capture & Export:
   browserctl screenshot [file.png] [-f] Take viewport or fullpage screenshot (saves to file or returns base64)
   browserctl pdf [file.pdf]             Print page to PDF (saves to file or returns base64)
-  browserctl eval <expression> [-r]     Evaluate JavaScript (use -r / --raw for raw stdout output)
+  browserctl eval <expression> [-r]     Evaluate JavaScript (auto-bypasses CSP/Trusted Types via CDP)
 
 System & Raw Protocols:
   browserctl exec_system_cmd <cmd>      Run host system command
@@ -257,10 +258,15 @@ function parseTarget(arg, params) {
     return;
   }
 
-  // Matches @e1, @1, e1, ref_1, ref1
-  const m = trimmed.match(/^@(?:e|ref_?)?(\d+)$/i) || trimmed.match(/^(?:ref_?)(\d+)$/i);
-  if (m) {
+  // Matches any @-prefixed target identifier: @ref_1, @1, @e1, @f898:ref_54, @f12:e5
+  if (trimmed.startsWith("@")) {
     params.ref = trimmed;
+    return;
+  }
+
+  // Matches frame-qualified or local refs without @: f898:ref_54, f1:e2, ref_1, ref1, e1
+  if (/^(?:f\w+:)?(?:ref_?|e)\w+$/i.test(trimmed)) {
+    params.ref = `@${trimmed}`;
     return;
   }
 
@@ -277,7 +283,8 @@ function parseTarget(arg, params) {
     trimmed.includes("[") ||
     trimmed.includes(":") ||
     trimmed.includes(" ") ||
-    HTML_TAGS.has(trimmed.toLowerCase())
+    HTML_TAGS.has(trimmed.toLowerCase()) ||
+    (!trimmed.startsWith("-") && /^[a-z][a-z0-9._]*-[a-z0-9._-]*$/i.test(trimmed))
   ) {
     params.selector = trimmed;
   } else {
@@ -310,9 +317,6 @@ async function main() {
     process.exit(0);
   }
 
-  let action = rawArgs[0];
-  let args = rawArgs.slice(1);
-
   let jsonOutput = false;
   let prettyOutput = false;
   let rawOutput = false;
@@ -323,10 +327,10 @@ async function main() {
   let explicitTabId = null;
   let settleMs = null;
 
-  // Filter global flags
-  const filteredArgs = [];
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
+  // Filter global flags from ANY position in rawArgs
+  const positionalArgs = [];
+  for (let i = 0; i < rawArgs.length; i++) {
+    const a = rawArgs[i];
     if (a === "--json") {
       jsonOutput = true;
     } else if (a === "--pretty") {
@@ -342,18 +346,42 @@ async function main() {
     } else if (a === "--auto-daemon") {
       forceAutoDaemon = true;
     } else if (a === "-t" || a === "--tab") {
-      explicitTabId = parseInt(args[++i], 10);
+      explicitTabId = parseInt(rawArgs[++i], 10);
     } else if (a.startsWith("--tab=")) {
       explicitTabId = parseInt(a.slice(6), 10);
     } else if (a === "--settle") {
-      settleMs = parseInt(args[++i], 10);
+      settleMs = parseInt(rawArgs[++i], 10);
     } else if (a.startsWith("--settle=")) {
       settleMs = parseInt(a.slice(9), 10);
     } else {
-      filteredArgs.push(a);
+      positionalArgs.push(a);
     }
   }
-  args = filteredArgs;
+
+  if (positionalArgs.length === 0) {
+    printHelp();
+    process.exit(0);
+  }
+
+  let action = positionalArgs[0];
+  let args = positionalArgs.slice(1);
+
+  // Friendly action aliases for agent ergonomics
+  if (action === "tabs" || action === "tab_list") {
+    action = "tab";
+    args = ["list", ...args];
+  } else if (action === "switch") {
+    action = "tab";
+    args = ["switch", ...args];
+  } else if (action === "get_text") {
+    action = "get";
+    args = ["text", ...args];
+  } else if (action === "get_count") {
+    action = "get";
+    args = ["count", ...args];
+  } else if (action === "close_modal") {
+    action = "dismiss";
+  }
 
   // Daemon control actions
   if (action === "start" || action === "daemon") {
@@ -502,15 +530,32 @@ async function main() {
 
       case "snapshot":
         if (compactMode || (!jsonOutput && !prettyOutput)) params.compact = true;
+        if (rawArgs.includes("--all")) params.scope = "all";
         if (args[0] && /^\d+$/.test(args[0])) params.maxText = parseInt(args[0], 10);
         break;
 
       case "read_page":
-        if (args[0]) params.mode = args[0];
+        if (args[0] && !args[0].startsWith("-")) params.mode = args[0];
+        // --depth and --max-chars were parsed by nobody: the flags were accepted on the
+        // command line and silently dropped, so `read_page --depth 8` quietly ran at the
+        // default. A parameter that vanishes without a word is worse than one rejected.
+        for (let i = 0; i < args.length; i++) {
+          const a = args[i];
+          const val = (inline) => (inline !== undefined ? inline : args[++i]);
+          let m;
+          if ((m = /^--depth(?:=(\d+))?$/.exec(a))) params.depth = Number(val(m[1]));
+          else if ((m = /^--max-?chars(?:=(\d+))?$/.exec(a))) params.maxChars = Number(val(m[1]));
+          else if ((m = /^--ref(?:=(.+))?$/.exec(a))) params.ref_id = val(m[1]);
+        }
+        if (params.depth !== undefined && !Number.isFinite(params.depth)) {
+          console.error("read_page: --depth needs a number, e.g. --depth 60");
+          process.exit(2);
+        }
         break;
 
       case "get": {
-        const prop = args[0] || "text";
+        let prop = args[0] || "text";
+        if (prop === "attribute") prop = "attr";
         params.property = prop;
         if (prop === "title" || prop === "url") {
           // No target needed
@@ -555,6 +600,7 @@ async function main() {
       case "check":
       case "uncheck":
       case "scrollintoview":
+      case "describe":
       case "describe_element":
       case "element_screenshot": {
         let i = 0;
@@ -570,6 +616,7 @@ async function main() {
           }
           i++;
         }
+        if (action === "describe") action = "describe_element";
         break;
       }
 
@@ -621,9 +668,11 @@ async function main() {
           if (args[i] === "--network-idle") {
             action = "wait_network_idle";
             hasType = true;
-          } else if (args[i] === "--settle") {
+          } else if (args[i] === "--settle" || args[i] === "--auto") {
             action = "wait_settle";
             hasType = true;
+          } else if (args[i] === "--tolerance" || args[i] === "--max-inflight") {
+            if (args[i + 1]) params.maxInFlight = parseInt(args[++i], 10);
           } else if (args[i] === "--text" && args[i + 1]) {
             action = "wait_for";
             params.text = args[++i];
@@ -664,10 +713,33 @@ async function main() {
         break;
       }
 
-      case "scroll":
-        if (args[0] === "up" || args[0] === "down") params.direction = args[0];
-        if (args[1] && /^\d+$/.test(args[1])) params.amount = parseInt(args[1], 10);
+      case "dismiss": {
+        let i = 0;
+        while (i < args.length) {
+          if (args[i] === "--selector" && args[i + 1]) {
+            params.selector = args[++i];
+          } else {
+            parseTarget(args[i], params);
+          }
+          i++;
+        }
         break;
+      }
+
+      case "scroll": {
+        for (const arg of args) {
+          if (arg === "up" || arg === "down" || arg === "left" || arg === "right") {
+            params.direction = arg;
+          } else if (/^\d+$/.test(arg) && !params.amount) {
+            params.amount = parseInt(arg, 10);
+          } else if (arg.startsWith("--selector=") || arg === "--selector") {
+            if (arg.startsWith("--selector=")) params.selector = arg.slice(11);
+          } else {
+            parseTarget(arg, params);
+          }
+        }
+        break;
+      }
 
       case "press_key":
         if (args[0]) params.key = args[0];
@@ -714,6 +786,9 @@ async function main() {
 
     if (!res.ok || !data.ok) {
       const errPayload = { ok: false, error: data.error || `HTTP ${res.status}` };
+      if (data.code) errPayload.code = data.code;
+      if (data.diagnostics) errPayload.diagnostics = data.diagnostics;
+      if (data.recoveryHint) errPayload.recoveryHint = data.recoveryHint;
       if (prettyOutput) console.error(JSON.stringify(errPayload, null, 2));
       else console.error(JSON.stringify(errPayload));
       process.exit(1);
@@ -791,8 +866,26 @@ async function main() {
     if (action === "snapshot") {
       if (result?.compactView) {
         console.log(`Page: ${result.title || "Untitled"} (${result.url})`);
-        console.log(`Interactive elements (${result.elements?.length || 0}):\n`);
-        console.log(result.compactView);
+        if (result.viewport) {
+          const vh = result.viewport.height || 0;
+          const sy = result.viewport.scrollY || 0;
+          const sh = result.viewport.scrollHeight || vh;
+          console.log(`Viewport: Y: ${sy}px-${sy + vh}px of ${sh}px total height (${result.viewport.width}x${vh}, scroll: ${result.viewport.scrollPercent}%, scope: ${result.scope || "viewport"})`);
+        }
+        if (result.pageState?.hasActiveModal) {
+          console.log(`[Active Modal: <${result.pageState.activeModalTag || "dialog"}>]`);
+        }
+        const total = result.totalElementsCount ?? result.elements?.length ?? 0;
+        const visible = result.elements?.length || 0;
+        const folded = result.foldedCount ? `, ${result.foldedCount} folded` : "";
+        if (result.scope === "viewport" && result.offscreenCount > 0) {
+          console.log(`Elements: ${visible} visible in viewport (${total} total on page${folded})`);
+          // The compact view's own footer notice names the KINDS of element offscreen,
+          // which this line cannot. Printing both wasted tokens and gave two numbers.
+        } else {
+          console.log(`Interactive elements (${visible}${folded}):`);
+        }
+        console.log(`\n${result.compactView}`);
         return;
       }
     }

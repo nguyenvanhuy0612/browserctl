@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>bctl multiframe child</title>
+<style>
+  body { font-family: sans-serif; margin: 8px; }
+  /* Same React-portal shape as the top frame, so the fix is proven inside a sub-frame
+     too (the merge path, not just the single-frame content script). */
+  .portal-wrapper { width: 0; height: 0; overflow: hidden; position: relative; }
+  .portal-panel {
+    position: absolute; top: 0; left: 0; width: 300px; height: 160px;
+    background: #efe; border: 1px solid #6a6; padding: 8px;
+  }
+</style>
+</head>
+<body>
+  <input id="ifr-search" type="text" placeholder="Iframe search" />
+  <button id="ifr-btn" onclick="this.textContent='Iframe Clicked'">Iframe Action</button>
+
+  <div class="portal-wrapper" id="portal-wrapper">
+    <div class="portal-panel" id="portal-panel">
+      <h2>Portal Panel</h2>
+      <button id="portal-btn">Portal Action</button>
+    </div>
+  </div>
+
+  <script>console.log('bctl-multiframe-child-ready');</script>
+</body>
+</html>

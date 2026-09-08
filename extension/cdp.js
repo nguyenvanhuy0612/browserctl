@@ -217,7 +217,14 @@ export async function captureViewport(tabId, { format = "jpeg", quality = 55 } =
     if (w && h) {
       const MAX_SIDE = 1568; // Anthropic vision tiling: longest side cap
       const scale = Math.min(1, MAX_SIDE / Math.max(w, h));
-      clip = { x: 0, y: 0, width: w, height: h, scale };
+      // clip is in PAGE coordinates, so it has to follow the scroll offset. Hardcoding
+      // y:0 meant that on any scrolled page the requested region sat outside the
+      // viewport, and with captureBeyondViewport:false Chrome returns unpainted white
+      // for it — the "screenshot came back blank" both agent probes hit after scrolling,
+      // each falling back to snapshots and treating screenshots as unreliable.
+      const x = Math.round(vp.pageX || 0);
+      const y = Math.round(vp.pageY || 0);
+      clip = { x, y, width: w, height: h, scale };
     }
   } catch {}
   // Record the effective screenshot->CSS-pixel scale so coordinate_click/drag can map
@@ -427,6 +434,10 @@ function buildHar(entries, bodies) {
 }
 
 // Build a compact list of meaningful accessibility nodes from a full AX tree.
+// The AX properties worth carrying: they are the control's state, which is what an agent
+// needs to decide whether to act. Dropping them left the tree a read-only curiosity.
+const AX_STATE_PROPS = new Set(["checked", "selected", "expanded", "pressed", "disabled", "required", "invalid", "level"]);
+
 function collectAxNodes(axNodes, max) {
   const skip = new Set(["none", "GenericContainer", "InlineTextBox", "ignored"]);
   const out = [];
@@ -436,7 +447,15 @@ function collectAxNodes(axNodes, max) {
     const name = (node.name && node.name.value) || "";
     const value = node.value && node.value.value;
     if (!name && (value === undefined || value === "")) continue;
-    out.push({ role, name, value });
+    const entry = { role, name };
+    if (value !== undefined && value !== "") entry.value = value;
+    for (const p of node.properties || []) {
+      if (!AX_STATE_PROPS.has(p.name)) continue;
+      const v = p.value && p.value.value;
+      if (v === undefined || v === false || v === "false") continue;
+      (entry.state || (entry.state = {}))[p.name] = v;
+    }
+    out.push(entry);
     if (out.length >= max) break;
   }
   return out;
@@ -620,26 +639,43 @@ export async function handleCdp(action, params, tabId) {
         return { ok: true, result: await runtimeEval(tabId, params.expression) };
       }
       // Fallback without attach: run in the page's MAIN world (subject to page CSP).
-      const [out] = await chrome.scripting.executeScript({
-        target: { tabId },
-        world: "MAIN",
-        func: (expr) => {
-          try {
-            const v = eval(expr);
-            // JSON.stringify(undefined) returns undefined (not "undefined"), and
-            // JSON.parse(undefined) throws — surfacing a misleading error for a
-            // successful eval that simply returns nothing (assignments, void, DOM calls).
-            if (v === undefined) return { ok: true, value: null };
-            return { ok: true, value: JSON.parse(JSON.stringify(v)) };
-          }
-          catch (err) { return { ok: false, error: String(err) }; }
-        },
-        args: [params.expression],
-      });
-      if (!out.result.ok) {
-        throw new Error(out.result.error + " (tip: cdp_attach first to bypass page CSP)");
+      try {
+        const [out] = await chrome.scripting.executeScript({
+          target: { tabId },
+          world: "MAIN",
+          func: (expr) => {
+            try {
+              const v = eval(expr);
+              // JSON.stringify(undefined) returns undefined (not "undefined"), and
+              // JSON.parse(undefined) throws — surfacing a misleading error for a
+              // successful eval that simply returns nothing (assignments, void, DOM calls).
+              if (v === undefined) return { ok: true, value: null };
+              return { ok: true, value: JSON.parse(JSON.stringify(v)) };
+            }
+            catch (err) { return { ok: false, error: String(err) }; }
+          },
+          args: [params.expression],
+        });
+        if (out?.result?.ok) {
+          return { ok: true, result: { value: out.result.value } };
+        }
+
+        const errStr = out?.result?.error || "";
+        const isCspOrTrustedTypes = /trusted type|content security policy|csp|eval.*disabled|violates.*directive/i.test(errStr);
+        if (!isCspOrTrustedTypes) {
+          throw new Error(errStr + " (tip: cdp_attach first to bypass page CSP)");
+        }
+      } catch (scriptErr) {
+        if (!/trusted type|content security policy|csp|eval.*disabled|violates.*directive/i.test(scriptErr?.message || "")) {
+          throw scriptErr;
+        }
       }
-      return { ok: true, result: { value: out.result.value } };
+
+      // Seamless Auto-Fallback: page CSP / Trusted Types blocked MAIN world eval.
+      // Transparently attach debugger and evaluate via CDP Runtime.evaluate (bypasses CSP completely).
+      await ensureAttached(tabId);
+      const evalRes = await runtimeEval(tabId, params.expression);
+      return { ok: true, result: evalRes };
     }
 
     case "coordinate_click": {
@@ -740,7 +776,11 @@ export async function handleCdp(action, params, tabId) {
     }
 
     case "a11y_snapshot": {
-      requireSession(tabId);
+      // Attach on demand, the way screenshot already does. Requiring an explicit
+      // cdp_attach first made this read fail with "not attached: call cdp_attach first"
+      // on a first call — a two-step handshake for a plain read, and the kind of dead end
+      // that sends an agent to eval_js instead of retrying with the right prelude.
+      await ensureAttached(tabId);
       const max = params.max ?? 200;  // ?? so max:0 is honoured
       try { await send(tabId, "Accessibility.enable"); } catch {}
       const { nodes: axNodes } = await send(tabId, "Accessibility.getFullAXTree");
@@ -850,11 +890,37 @@ export async function handleCdp(action, params, tabId) {
     case "get_cookies": {
       requireSession(tabId);
       try { await send(tabId, "Network.enable"); } catch {}
-      const { cookies: all } = await send(tabId, "Network.getAllCookies");
+      // Default to THIS page's cookies. getAllCookies returns the whole jar — asked for
+      // "what cookies did this page set", it answered with 2,226 cookies across every
+      // domain, 704 KB: every session cookie the user holds, for banking, mail and work
+      // SSO, pulled into an agent's context and its transcript by a question about one
+      // page. The wide read stays available, but it has to be asked for.
+      let raw;
+      let scope;
+      if (params.allDomains) {
+        ({ cookies: raw } = await send(tabId, "Network.getAllCookies"));
+        scope = "all domains in this browser profile";
+      } else {
+        let url = params.url;
+        if (!url) {
+          const tab = await chrome.tabs.get(tabId).catch(() => null);
+          url = tab && tab.url;
+        }
+        if (!url || /^(chrome|about|edge|devtools):/i.test(url)) {
+          const err = new Error(`cannot determine a page URL to scope cookies to (tab url: ${url || "unknown"})`);
+          err.code = "INVALID_ARGUMENT";
+          err.recoveryHint = "Pass url:'https://example.com', or allDomains:true to read the entire cookie jar.";
+          throw err;
+        }
+        ({ cookies: raw } = await send(tabId, "Network.getCookies", { urls: [url] }));
+        scope = url;
+      }
       const filtered = params.urlContains
-        ? (all || []).filter((c) => String(c.domain || "").includes(params.urlContains))
-        : (all || []);
-      const cookies = filtered.map((c) => ({
+        ? (raw || []).filter((c) => String(c.domain || "").includes(params.urlContains))
+        : (raw || []);
+      const MAX = params.limit ?? 200;
+      const page = filtered.slice(0, MAX);
+      const cookies = page.map((c) => ({
         name: c.name,
         domain: c.domain,
         path: c.path,
@@ -863,7 +929,13 @@ export async function handleCdp(action, params, tabId) {
         httpOnly: c.httpOnly,
         expires: c.expires,
       }));
-      return { ok: true, result: { count: cookies.length, cookies } };
+      const result = { count: cookies.length, scope, cookies };
+      if (filtered.length > cookies.length) {
+        result.totalMatched = filtered.length;
+        result.truncated = true;
+        result.note = `showing ${cookies.length} of ${filtered.length}; narrow with urlContains or raise limit`;
+      }
+      return { ok: true, result };
     }
 
     case "set_cookie": {

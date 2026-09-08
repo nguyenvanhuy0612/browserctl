@@ -65,7 +65,7 @@ Add `browserctl` to your MCP configuration:
       "args": ["-y", "browserctl-mcp"],
       "env": {
         "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765",
-        "BROWSERCTL_MCP_PROFILE": "core" // 'core' (~24 tools) or 'all' (all 70+ tools)
+        "BROWSERCTL_MCP_PROFILE": "core" // 'core' (35 tools) or 'all' (all 80)
       }
     }
   }
@@ -118,53 +118,44 @@ browserctl restart                        # Restart bridge daemon
 
 ---
 
-## CLI Reference (`browserctl`)
+## CLI Reference & AI Agent Guide (`browserctl`)
 
-```bash
-# Navigation & History
-browserctl open https://github.com        # Navigate target tab (alias: navigate)
-browserctl back | forward | reload        # History navigation
+`browserctl` is executable globally and can be invoked directly from anywhere in the terminal or by AI agents via `node cli.js`. Global flags (such as `--tab <id>`, `-c|--compact`, `--json`, `--pretty`) can appear at any position in the command line.
 
-# Inspection & Fast Property Queries (get)
-browserctl snapshot --compact             # Token-efficient DOM snapshot (saves 75% tokens)
-browserctl read_page                      # Read accessibility tree with refs
-browserctl get title                      # Get page title
-browserctl get url                        # Get page URL
-browserctl get text @e1                   # Get visible text of element
-browserctl get value @e1                  # Get input/textarea value
-browserctl get attr @e1 href              # Get element attribute
-browserctl get box @e1                    # Get bounding box (x, y, width, height)
-browserctl get count "button"             # Count matching elements
+### Quick Cheatsheet
 
-# Interaction & Form Utilities
-browserctl click @e1                      # Click by ref (@e1, ref_1, 0)
-browserctl click --text "Sign In"         # Click by visible text
-browserctl fill @e1 "my query"            # Clear input and fill text (React/Vue v-model compatible)
-browserctl paste @e1 "markdown content"   # Paste multi-line text into inputs or rich-text editors (ProseMirror/Tiptap)
-browserctl type @e2 "appended text"       # Type into input field
-browserctl clear @e1                      # Clear input field
-browserctl check @e3                      # Check checkbox / radio button
-browserctl uncheck @e3                    # Uncheck checkbox
-browserctl select @e4 "value"             # Select dropdown option
-browserctl hover @e1                      # Hover element
-browserctl focus @e1                      # Focus element
-browserctl scroll down 400                # Scroll page
+| Task | Command | Description |
+| :--- | :--- | :--- |
+| **Inspect UI** | `browserctl snapshot -c` | Compact viewport interactive DOM with Key Inputs section & smart feed folding |
+| **Full DOM** | `browserctl snapshot --all` | Capture entire page DOM (including offscreen elements) |
+| **Click** | `browserctl click @ref_X` | Mouse click on ref, text, ARIA role, or custom element (`*-*`) |
+| **Type / Fill** | `browserctl fill @ref_X "text"` | Fast native fill on input/textarea (emits candidate refs if not editable) |
+| **Keystroke** | `browserctl press Enter` | Dispatch key press (e.g. `Enter`, `Tab`, `Escape`) |
+| **Scroll** | `browserctl scroll down [px] [target]` | Scroll page or container (smart nested container detection) |
+| **Dismiss** | `browserctl dismiss [target]` | Close active modal, drawer, or flyout (Escape or close button) |
+| **Read Text** | `browserctl get text @ref_X` | Extract visible text or value of target ref |
+| **Count Items** | `browserctl get count <selector>` | Fast CSS selector census (e.g. `'button'`, `'a[href]'`) |
+| **Tabs** | `browserctl tab list` | List all open tabs (aliases: `tabs`, `tab switch <id>`, `switch <id>`) |
+| **Wait** | `browserctl wait [--settle|--auto]` | Wait for DOM mutations and animations to settle (ideal for SPAs) |
+| **Network Idle** | `browserctl wait --network-idle [--tolerance 1]` | Wait for network quiet period (supports tolerance for persistent sockets) |
+| **Eval JS** | `browserctl eval <expr> [-r]` | Evaluate JavaScript (auto-bypasses CSP and Trusted Types via CDP) |
 
-> **Form & Rich-Text Compatibility**: `fill`, `type`, and `paste` inject values instantly via native prototype setters (fully compatible with React/Vue `v-model`) and seamlessly handle rich-text `contenteditable` editors (ProseMirror, Tiptap, Quill, Lexical). When multiple forms coexist on a page, always target elements by their stable `@ref` from `snapshot` to avoid selector ambiguity.
+### Command Catalog by Functional Group
 
-# Synchronization & Timing
-browserctl wait 2000                      # Sleep for 2000 ms
-browserctl wait @e1                       # Wait for element to appear
-browserctl wait --text "Welcome"          # Wait for text to appear
-browserctl wait --network-idle            # Wait for network idle
-browserctl wait --settle                  # Wait for DOM mutations to settle
+For deep parameters, protocol schemas, and examples, refer to [docs/REFERENCE.md](docs/REFERENCE.md) and [PROTOCOL.md](PROTOCOL.md):
 
-# Capture, Export & JavaScript
-browserctl screenshot page.png [-f]       # Capture viewport or fullpage screenshot to file
-browserctl pdf document.pdf               # Print page to PDF file directly
-browserctl eval -r "document.title"       # Run JS and output raw value to stdout
-browserctl tab [list|new|switch|close]    # Manage browser tabs
-```
+- **Navigation & Tab Control** ([REFERENCE.md](docs/REFERENCE.md)):
+  `open <url>`, `reload`, `back`, `forward`, `tab list` (alias: `tabs`), `tab switch <id>` (alias: `switch`), `tab new [url]`, `tab close [id]`.
+- **Page Inspection & Property Extraction** ([REFERENCE.md](docs/REFERENCE.md)):
+  `snapshot [-c|--compact] [--all]` (DOM tree with `@ref_N` markers, Key Inputs & Search Fields block, active drawer alert, smart feed folding, and Quick Actions footer), `read_page`, `get text <target>` (alias: `get_text`), `get value <target>`, `get attr <target> <name>`, `get count <selector>` (alias: `get_count`), `find <query>`, `get title`, `get url`, `get html`, `get box`.
+- **Physical User Interaction** ([REFERENCE.md](docs/REFERENCE.md)):
+  `click <target>` (standard, custom elements `*-*`, and ARIA roles), `dblclick <target>`, `fill <target> "text"` (with candidate input recovery hints), `type <target> "text"`, `paste <target> "text"`, `clear <target>`, `press <key>`, `dismiss [target]`, `check <target>`, `uncheck <target>`, `select <target> <val>`, `hover <target>`, `focus <target>`, `scroll <down|up> [px] [target]`, `scrollintoview <target>`.
+- **Synchronization & Waiting**:
+  `wait [--settle|--auto]` (default: waits for DOM mutations and CSS/JS animations to settle), `wait --network-idle [--tolerance N]`, `wait <target>`, `wait --text "..."`, `wait <ms>`.
+- **Capture, Export & JavaScript**:
+  `screenshot [file.png] [-f]`, `pdf [file.pdf]`, `eval <js_expr> [-r]` (automatic CDP Runtime fallback on CSP / Trusted Types errors).
+- **CDP & Network Diagnostics** ([PROTOCOL.md](PROTOCOL.md)):
+  `cdp_attach`, `cdp_detach`, `cdp_send`, `get_console_logs`, `get_network_requests`, `export_har`.
 
 ### Output Formatting
 
@@ -205,14 +196,21 @@ AI agents can dynamically load and unload specialized tool categories into the a
 
 | Tool | Description |
 |---|---|
-| `browser_click` | Click element by ref/index/selector/text (supports `waitFor` selector) |
-| `browser_fill` | Fill input or rich-text editor (ProseMirror/Tiptap/Vue/React) |
+| `browser_click` | Click element by ref/index/selector/text across standard tags, ARIA roles, and custom Web Components |
+| `browser_fill` | Fill input or rich-text editor (with recovery hints suggesting candidate inputs on mismatch) |
 | `browser_paste` | Paste large text/Markdown via Clipboard events without AST corruption |
 | `browser_type` | Focus element and set text (React/Vue `v-model` compatible) |
-| `browser_snapshot` | Fast token-efficient DOM snapshot with stable refs |
+| `browser_snapshot` | Primary inspection tool (preserves Key Inputs block at top, folds dense feeds, saves 75-85% tokens) |
+| `browser_get_text` | Extract visible innerText from element by selector, ref, or index (no eval_js needed) |
+| `browser_get_attribute` | Read specific DOM attribute (href, aria-label, src, etc.) from target element |
+| `browser_get_count` | Fast element census count matching CSS selector across page and open Shadow DOM |
+| `browser_describe_element` | Inspect element tag, attributes, bounding box, and actionability visibility |
+| `browser_dismiss_modal` | Dismiss active modal, side drawer, or flyout (clicks close or sends Escape) |
+| `browser_wait_settle` | Wait for DOM mutations & animations to settle (ideal for SPAs with active WebSockets) |
 | `browser_read_page` | Accessibility tree inspection |
+| `browser_get_page_content` | Extract article or documentation text (prose only, not for app UI or headers) |
 | `browser_screenshot` | Viewport or full-page screenshot (lossless PNG or vision-optimized JPEG) |
-| `browser_eval_js` | Evaluate JavaScript in page context |
+| `browser_eval_js` | Evaluate JavaScript in page context (auto-bypasses CSP & Trusted Types via CDP) |
 | `browser_load_tools` | Dynamically load tool categories (`cdp`, `network`, `cookies`, etc.) into prompt |
 | `browser_unload_tools` | Unload extra tools and reset active prompt back to core profile |
 | `browser_list_available_tools` | List all tool categories and active status |
@@ -271,17 +269,30 @@ issue `click` / `type` / `scroll` / `navigate` -> `snapshot` again.
 
 ## Status
 
-Working, **v0.5**, 65 MCP tools over 64 bridge actions. Control parity with the official
+Working, **v0.6.0**, 80 MCP tools over 73 bridge actions. Control parity with the official
 "Claude in Chrome" surface (open): DOM-index + accessibility-tree (`read_page`) reads with
 stable refs, ref/coordinate interaction, background-tab control, screenshots (incl.
 background tabs), console/network/HAR capture, record/replay, and tab grouping. Reads and
 interaction pierce open shadow DOM and cover iframes (including cross-origin) via
 all_frames injection with frame-qualified refs.
 
-Tests: 18/18 unit, 62/62 e2e, 58 of 60 commands exercised.
+**0.6.0 is an agent-accuracy release.** Every census row now carries the name Chrome itself
+computes for that control — measured at 100% of Chrome's named controls on github.com,
+booking.com and news.ycombinator.com, against 71-89% before. Actions report whether the
+control's own state actually moved, not just that the DOM churned. Reads say what they left
+out, and name the kind of thing it was.
+
+Tests: 81/81 unit, 70/70 e2e, 19/19 multi-frame e2e, 9/9 label parity, 59 of 61 commands
+exercised, 0 unexpected failures on a whole-surface audit against live sites.
 
 Docs:
 
+- **`CHANGELOG.md`** — what changed in this release and why, with the measurements.
+- `skills/browserctl/SKILL.md` — an optional Claude Code skill stub describing browserctl in
+  task language ("drive a real tab in the background", "a logged-in session"). Symlink it into
+  `~/.claude/skills/` if you want browserctl reached by intent rather than by tool name; on a
+  machine with a competing browser skill installed, that is the difference between being used
+  and being ignored.
 - **`docs/REFERENCE.md`** — the operator's guide: install, control model, every tool
   grouped with its params, recipes, failure modes, the foreground-input matrix. Start here.
 - `PROTOCOL.md` — wire-level command spec and per-version changelog.
@@ -290,6 +301,9 @@ Docs:
 - `docs/backlog-capability-gaps.md` — the five tracked gaps, with verified CDP surfaces.
 - `docs/debugger-policy.md` — which commands need `chrome.debugger` (45 of 65 never do),
   what a per-site denial would cost, and the single chokepoint to enforce it at.
+- `docs/fix-plan-v2-verified-2026-09-08.md` — the evidence base for 0.6.0: 69 findings from
+  driving browserctl with fresh-context agents on live sites, each with its repro and how it
+  was verified. Read §19-§20 first if you want the method rather than the list.
 
 ## Testing
 
@@ -298,12 +312,35 @@ real commands against a controlled page the runner serves over http:
 
 ```bash
 # bridge must be running and the extension connected
-node tests/e2e/run.mjs                    # 62 checks; never steals focus
+node tests/e2e/run.mjs                    # 70 checks; never steals focus
 E2E_FOREGROUND=1 node tests/e2e/run.mjs   # + the 2 synthetic-input tests (steals focus)
+
+# multi-frame regression suite: landmark grouping, key-input hoisting, repetitive-run
+# folding, duplicate-link suppression, long-label truncation hints, an open-but-not-
+# blocking dialog, a React-portal (zero-size wrapper) panel, and a menuitemradio menu —
+# all against a page with a same-origin iframe, so the compact-view MERGE path (not just
+# the single-frame content script) is exercised. SKIPs cleanly (exit 0) if the bridge or
+# extension isn't available.
+node tests/e2e/run_multiframe.mjs
 
 # bridge relay only, no Chrome needed (~0.5s, safe alongside a live bridge)
 node --test tests/unit/bridge.test.mjs
+
+# whole-surface audit against ANY live site: calls every read-only action and reports
+# unexpected failures separately from the ones that are the tool doing its job (waiting
+# for absent text, reading a capture that was never started).
+node tests/e2e/audit_tools.mjs https://github.com/microsoft/vscode/issues complex
+node tests/e2e/audit_tools.mjs https://example.com simple
+
+# ground-truth coverage: takes `snapshot --all` as truth, then checks every sampled
+# element is reachable by find() and readable by get_text, and that the viewport census
+# discloses what it withheld.
+node tests/e2e/coverage_check.mjs https://news.ycombinator.com hn
 ```
+
+Run the audit against a site you care about after touching the census, the dispatch table
+or a tool description. The bar is **zero unexpected failures** — the first run of it found
+23 of 42 calls failing on a complex page.
 
 It creates a dedicated tab, exercises nearly all commands (all but `focus_window` and
 `reload_extension`, which steal focus / drop the connection), asserts behaviour

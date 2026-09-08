@@ -37,6 +37,13 @@ const CONTENT_ACTIONS = [
   "dblclick",
   "focus",
   "scrollintoview",
+  // browser_action dispatches any protocol action by name, so every handler in
+  // content.js must be routable here — not just the ones with a dedicated MCP tool.
+  // dismiss/close_modal shipped in content.js without this entry, which made
+  // browser_dismiss_modal fail as "unknown action" while every snapshot advertised it.
+  "dismiss",
+  "close_modal",
+  "element_rect",
 ];
 
 // Recorded interaction steps, accumulated from the content recorder (record_start).
@@ -212,7 +219,48 @@ async function init() {
 }
 
 // Route a command to the right handler. Returns { ok, result } or throws.
+// The tool names an agent sees are not all protocol action names. `browser_get_text` is
+// a tool; `get_text` is `get_property` with `{property: "text"}`. Anyone reaching for the
+// name they just saw — through browser_action, the documented raw-HTTP endpoint, or a
+// script — got a bare "unknown action", which reads as "this capability does not exist"
+// and sends an agent to eval_js. Resolve the alias here so every caller benefits, not
+// just the MCP layer.
+const ACTION_ALIASES = {
+  get_text:        { action: "get_property", params: { property: "text" } },
+  get_value:       { action: "get_property", params: { property: "value" } },
+  get_html:        { action: "get_property", params: { property: "html" } },
+  get_box:         { action: "get_property", params: { property: "box" } },
+  get_attribute:   { action: "get_property", params: { property: "attr" } },
+  get_count:       { action: "get_property", params: { property: "count" } },
+  dismiss_modal:   { action: "dismiss", params: {} },
+  screenshot_fullpage: { action: "screenshot", params: { fullPage: true } },
+};
+
+// Served by the MCP server or the bridge, never by the extension. Naming the right call
+// beats "unknown action", which cannot be told apart from a capability that is missing.
+const NOT_EXTENSION_ACTIONS = {
+  start: "the browser_start tool (the daemon is managed outside the extension)",
+  stop: "the browser_stop tool",
+  load_tools: "the browser_load_tools tool",
+  unload_tools: "the browser_unload_tools tool",
+  list_available_tools: "the browser_list_available_tools tool",
+  action: "browser_action itself — it dispatches other actions and is not one",
+};
+
 async function dispatch({ action, params = {} }) {
+  const alias = ACTION_ALIASES[action];
+  if (alias) {
+    action = alias.action;
+    params = { ...alias.params, ...params };
+  }
+  if (NOT_EXTENSION_ACTIONS[action]) {
+    return {
+      ok: false,
+      error: `'${action}' is not a page action — use ${NOT_EXTENSION_ACTIONS[action]}.`,
+      code: "NOT_A_PAGE_ACTION",
+    };
+  }
+
   // Before anything resolves a target: refuse a content-returning command that would
   // ride a fresh auto-pin onto whatever tab the user is looking at. See freshPinGuard.
   const guard = await freshPinGuard(action, params);
@@ -256,7 +304,11 @@ async function dispatch({ action, params = {} }) {
   // CDP-backed commands (console/network/HAR/eval) operate on the target tab.
   if (CDP_ACTIONS.includes(action)) {
     const tab = await targetTab(params);
-    return await handleCdp(action, params, tab.id);
+    const reply = await handleCdp(action, params, tab.id);
+    if (action === "a11y_snapshot" && reply && reply.ok) {
+      return { ok: true, result: await enrichAxWithRefs(reply.result, tab.id) };
+    }
+    return reply;
   }
 
   // Light network capture (chrome.webRequest, no debugger banner).
@@ -353,6 +405,70 @@ async function dispatch({ action, params = {} }) {
     default:
       throw new Error(`unknown action: ${action}`);
   }
+}
+
+// Chrome's accessibility tree is the browser's own answer to "what controls are on this
+// page and what are they called" — computed to spec, and the thing browserctl's census
+// approximates. Two problems with shipping it raw: its nodes carry no ref, so an agent
+// can see a control and not act on it; and it says nothing about where it disagrees with
+// the census, which is the most useful thing it knows.
+//
+// Both are fixed by pairing each AX node with the census entry of the same name. Matching
+// on the name (rather than a backendDOMNodeId round-trip per node) costs no extra CDP
+// calls, and the leftovers are exactly the diagnostic: a control Chrome names and the
+// census does not is a census gap, and this is how F66/F67/F68 were found.
+async function enrichAxWithRefs(axResult, tabId) {
+  const nodes = (axResult && axResult.nodes) || [];
+  let census = [];
+  try {
+    const snap = await toContent("snapshot", { scope: "all", compact: false, maxText: 0, tabId }, 0);
+    census = (snap && snap.ok && snap.result && snap.result.elements) || [];
+  } catch {}
+
+  const norm = (t) => String(t || "").toLowerCase().replace(/[^a-z0-9\u00c0-\u024f\u1e00-\u1eff]+/g, " ").trim();
+  const byName = new Map();
+  for (const e of census) {
+    const k = norm(e.text);
+    if (!k) continue;
+    if (!byName.has(k)) byName.set(k, e);
+  }
+
+  // Coverage is only meaningful over roles the census is FOR. Counting landmarks,
+  // headings and StaticText — which the census deliberately omits — reported 53% on a
+  // page with no gap at all, and a metric that cries wolf gets ignored. Same measurement
+  // error the label harness made against Chrome's punctuation spacing.
+  const ACTIONABLE = new Set(["button", "link", "textbox", "checkbox", "radio", "combobox",
+    "menuitem", "menuitemradio", "menuitemcheckbox", "tab", "switch", "option", "slider",
+    "searchbox", "spinbutton", "treeitem", "listbox"]);
+
+  let matched = 0;
+  let named = 0;
+  const censusMissing = [];
+  const seenMissing = new Set();
+  for (const n of nodes) {
+    const k = norm(n.name);
+    if (!k) continue;
+    const hit = byName.get(k);
+    // Every node gets a ref where we can find one — a heading's ref is still useful.
+    if (hit) { n.ref = hit.ref; n.tag = hit.tag; }
+    if (!ACTIONABLE.has(String(n.role).toLowerCase())) continue;
+    named++;
+    if (hit) matched++;
+    else if (!seenMissing.has(k) && censusMissing.length < 12) {
+      seenMissing.add(k);
+      censusMissing.push({ role: n.role, name: String(n.name).slice(0, 60) });
+    }
+  }
+  return {
+    ...axResult,
+    matchedToCensus: matched,
+    namedActionableNodes: named,
+    censusCoverage: named ? Math.round((matched / named) * 100) : 100,
+    ...(censusMissing.length ? { notInCensus: censusMissing } : {}),
+    note: censusMissing.length
+      ? `${matched}/${named} of Chrome's named CONTROLS carry a 'ref' you can act on. 'notInCensus' lists controls Chrome names that browser_snapshot did not — usually screen-reader-only text (display:none skip links, shortcut announcements), occasionally a real census gap worth reporting. Non-control nodes (landmarks, headings, StaticText) are excluded from this count by design.`
+      : `${matched}/${named} of Chrome's named controls carry a 'ref' you can act on; the census saw every control Chrome did.`,
+  };
 }
 
 // Reload the whole extension from disk (picks up edited files). Reply is sent
@@ -626,6 +742,9 @@ async function navigate(params = {}) {
   const done = waitForComplete(tab.id); // start listening BEFORE the load begins
   await chrome.tabs.update(tab.id, { url });
   await done;
+  try {
+    await toContent("wait_settle", { timeoutMs: 600, tabId: tab.id });
+  } catch {}
   const updated = await chrome.tabs.get(tab.id);
   return { url: updated.url };
 }
@@ -708,14 +827,32 @@ async function listTabs() {
   };
 }
 
-async function newTab({ url }) {
+async function newTab({ url, wait = true }) {
   // active:false — chrome.tabs.create() defaults to activating (switching the user's
   // view to) the new tab, which is exactly the focus-steal this whole extension is
   // built to avoid. Every other action here is already background-safe; this was the
   // one call site that wasn't.
   const tab = await chrome.tabs.create({ ...(url ? { url } : {}), active: false });
   pinTarget(tab.id); // pin: the agent now drives the tab it just opened
-  return { id: tab.id };
+  if (!url || wait === false) return { id: tab.id };
+
+  // Wait for the page the caller asked for, the way navigate() already does.
+  //
+  // This used to return in ~30ms with nothing loaded, so every agent had to invent its
+  // own follow-up wait — and inventing it is where they lose time: guessing a string
+  // that never appears costs a full timeout (9.4s in one measured run) and still leaves
+  // the agent unsure whether the page arrived. One call that finishes when the page is
+  // ready is both fewer steps and less wall-clock than two that race.
+  try {
+    await waitForComplete(tab.id);
+    await toContent("wait_settle", { timeoutMs: 600, tabId: tab.id });
+  } catch {}
+  let ready = { url, title: "" };
+  try {
+    const updated = await chrome.tabs.get(tab.id);
+    ready = { url: updated.url, title: updated.title || "" };
+  } catch {}
+  return { id: tab.id, ...ready, ready: true };
 }
 
 // Put a tab into a labeled tab group so the user can see which tab the agent drives.
@@ -829,8 +966,11 @@ async function toContent(action, params, frameId = 0) {
 function frameRoute(params = {}) {
   for (const key of ["ref", "ref_id"]) {
     const v = params[key];
-    const m = typeof v === "string" && v.match(/^f(\d+):(.+)$/);
-    if (m) return { frameId: Number(m[1]), params: { ...params, [key]: m[2] } };
+    const m = typeof v === "string" && v.match(/^@?f(\d+):(.+)$/i);
+    if (m) {
+      const innerRef = m[2].startsWith("@") ? m[2].slice(1) : m[2];
+      return { frameId: Number(m[1]), params: { ...params, [key]: innerRef } };
+    }
   }
   return { frameId: 0, params };
 }
@@ -851,23 +991,37 @@ async function contentFrames(tabId) {
 async function crossFrame(action, params) {
   const tab = await targetTab(params);
   const frames = await contentFrames(tab.id);
+  const errors = [];
   const per = await Promise.all(frames.map(async (fr) => {
     try {
       const reply = await toContent(action, params, fr.frameId);
-      return reply && reply.ok ? { fr, result: reply.result } : null;
-    } catch { return null; }
+      if (reply && reply.ok) return { fr, result: reply.result };
+      if (reply && reply.error) errors.push(`f${fr.frameId}: ${reply.error}`);
+      return null;
+    } catch (err) {
+      errors.push(`f${fr.frameId}: ${err && err.message ? err.message : String(err)}`);
+      return null;
+    }
   }));
-  return mergeFrameResults(action, per.filter(Boolean), params);
+  // Keep what the frames actually said. Discarding it turned a content-script exception
+  // into "no frame could handle this (page not accessible)", which reads like a
+  // permissions problem and sent debugging in the wrong direction for an hour.
+  return mergeFrameResults(action, per.filter(Boolean), params, errors);
 }
 
 const qualifyRef = (frameId, ref) => (frameId === 0 || !ref ? ref : `f${frameId}:${ref}`);
 
-function mergeFrameResults(action, parts, params = {}) {
+function mergeFrameResults(action, parts, params = {}, errors = []) {
   // Every frame errored (restricted page, or a ref/ref_id that no frame could resolve) —
   // return an honest error rather than a fabricated empty snapshot-shaped success, which
   // would look to the caller like "the page really is empty".
   if (!parts.length) {
-    return { ok: false, error: "no frame could handle this (page not accessible, or the ref/ref_id was not found in any frame)" };
+    const detail = errors.length ? ` — ${errors.slice(0, 3).join("; ")}` : "";
+    return {
+      ok: false,
+      error: `no frame could handle '${action}' (page not accessible, or the ref/ref_id was not found in any frame)${detail}`,
+      ...(errors.length ? { diagnostics: { frameErrors: errors.slice(0, 5) } } : {}),
+    };
   }
   const top = parts.find((p) => p.fr.frameId === 0) || parts[0];
   if (action === "snapshot") {
@@ -881,18 +1035,61 @@ function mergeFrameResults(action, parts, params = {}) {
           : { ...el, index: undefined, ref: qualifyRef(fr.frameId, el.ref), frame: fr.url });
       }
     }
-    const res = { url: top.result.url, title: top.result.title, elements, text: top.result.text };
-    if (params.compact || top.result.compactView) {
-      const compactLines = elements.map((e) => {
-        let desc = `[@${e.ref || e.index}] <${e.tag}>`;
-        if (e.type) desc += `[type=${e.type}]`;
-        if (e.text) desc += ` "${e.text}"`;
-        if (e.placeholder) desc += ` (placeholder: "${e.placeholder}")`;
-        if (e.value) desc += ` (value: "${e.value}")`;
-        if (e.href) desc += ` -> ${e.href}`;
-        return desc;
-      });
-      res.compactView = compactLines.join("\n");
+    const totalElementsCount = parts.reduce((sum, p) => sum + (p.result.totalElementsCount || p.result.elements?.length || 0), 0);
+    const offscreenCount = parts.reduce((sum, p) => sum + (p.result.offscreenCount || 0), 0);
+
+    const res = {
+      url: top.result.url,
+      title: top.result.title,
+      scope: top.result.scope || params.scope || "viewport",
+      viewport: top.result.viewport,
+      totalElementsCount,
+      offscreenCount,
+      pageState: top.result.pageState,
+      foldedCount: top.result.foldedCount || 0,
+      elements,
+      text: top.result.text,
+    };
+    // The compact view is built in the content script, where the DOM is: landmark
+    // grouping, key inputs hoisted to the top, repetitive runs folded, row context on
+    // colliding labels, shortened hrefs, and the notices that say what was withheld.
+    //
+    // This branch used to REBUILD it from the merged element list whenever a page had
+    // more than one frame — which is every real site — discarding all of that and
+    // emitting a flat list with a notice that only counted elements. Facebook, npm and
+    // MDN all took the degraded path; only single-frame test pages ever saw the good one.
+    //
+    // Now the top frame's view is kept as-is and each sub-frame's own view is appended
+    // with its refs frame-qualified, so nothing is lost and every ref stays addressable.
+    if (top.result.compactView) {
+      const sections = [top.result.compactView];
+      let extraFrames = 0;
+      for (const { fr, result } of parts) {
+        if (fr.frameId === 0 || !result.compactView) continue;
+        // Drop the sub-frame's own footer: one Quick Actions line per page, not per frame,
+        // and a sub-frame's viewport notice is about the sub-frame, not the page.
+        const body = result.compactView
+          .split("\n")
+          .filter((l) => !/^\[(Quick Actions|Next):/.test(l) && !/^\[Notice:/.test(l) && l.trim() !== "---")
+          .join("\n")
+          .trim();
+        if (!body) continue;
+        const qualified = body.replace(
+          /\[@(ref_\d+)\]/g,
+          (_m, r) => `[@${qualifyRef(fr.frameId, r)}]`
+        );
+        const shortUrl = String(fr.url || "").split("?")[0].slice(0, 90);
+        extraFrames++;
+        sections.push(`\n[iframe f${fr.frameId} ${shortUrl}] — refs below are frame-qualified, pass them back verbatim\n${qualified}`);
+      }
+      if (extraFrames > 0) {
+        sections.push(`[Notice: ${extraFrames} sub-frame${extraFrames > 1 ? "s" : ""} listed above with frame-qualified refs. Page totals: ${elements.length} elements, ${offscreenCount} offscreen]`);
+      }
+      res.compactView = sections.join("\n");
+    } else if (params.compact) {
+      // No frame produced a compact view (shouldn't happen); say so rather than
+      // fabricating a flat one that looks like the real thing.
+      res.compactNote = "compact view unavailable from the content script; use the structured `elements` array";
     }
     return { ok: true, result: res };
   }
@@ -901,7 +1098,40 @@ function mergeFrameResults(action, parts, params = {}) {
     for (const { fr, result } of parts)
       for (const m of result.matches || [])
         matches.push(fr.frameId === 0 ? m : { ...m, ref: qualifyRef(fr.frameId, m.ref), frame: fr.url });
-    return { ok: true, result: { count: matches.length, matches } };
+    if (matches.length > 0) return { ok: true, result: { ...(top.result || {}), count: matches.length, matches } };
+
+    // Zero matches page-wide: keep the diagnostics the content script produced instead of
+    // flattening every frame's answer into a bare `count: 0`. Near-miss candidates are
+    // what turn a one-character transcription error into one call instead of four (F34) —
+    // this merge used to discard them, so the fix was invisible on any page with an iframe.
+    const nearest = [];
+    let note = "";
+    let searchedScope = "";
+    for (const { fr, result } of parts) {
+      for (const n of result.nearest || []) {
+        nearest.push(fr.frameId === 0 ? n : { ...n, ref: qualifyRef(fr.frameId, n.ref), frame: fr.url });
+      }
+      if (!note && result.note) note = result.note;
+      if (!searchedScope && result.searchedScope) searchedScope = result.searchedScope;
+    }
+    // Pass the top frame's result through and override only what the merge owns.
+    //
+    // This branch used to enumerate the fields it kept, so every field added to find()
+    // downstream was silently dropped here — `nearest` was lost until it was patched in
+    // by hand, then `pageLabels` was lost the same way. Listing what to keep means the
+    // merge has to be edited every time the content script learns something new, and
+    // forgetting is invisible. Listing what to REPLACE cannot rot.
+    return {
+      ok: true,
+      result: {
+        ...(top.result || {}),
+        count: 0,
+        matches: [],
+        ...(searchedScope ? { searchedScope } : {}),
+        ...(nearest.length ? { nearest: nearest.slice(0, 5) } : {}),
+        ...(note ? { note } : {}),
+      },
+    };
   }
   // read_page: top-frame tree, then each sub-frame tree appended under a frame header,
   // with every ref in that subtree frame-qualified.
@@ -911,7 +1141,20 @@ function mergeFrameResults(action, parts, params = {}) {
     const qualified = result.tree.replace(/\[(ref_\d+)\]/g, (_, r) => `[${qualifyRef(fr.frameId, r)}]`);
     tree += `\n  iframe [f${fr.frameId}] ${fr.url}\n` + qualified.replace(/^/gm, "  ");
   }
-  return { ok: true, result: { url: top.result.url, title: top.result.title, tree, truncated: !!top.result.truncated } };
+  return {
+    ok: true,
+    result: {
+      url: top.result.url,
+      title: top.result.title,
+      tree,
+      truncated: !!top.result.truncated,
+      // An empty tree must say WHY it is empty, or an agent reads it as an empty page (F33).
+      ...(top.result.depthClipped ? { depthClipped: true, deepestReached: top.result.deepestReached } : {}),
+      ...(top.result.depthUsed ? { depthUsed: top.result.depthUsed } : {}),
+      ...(top.result.notices ? { notices: top.result.notices } : {}),
+      ...(top.result.note ? { note: top.result.note } : {}),
+    },
+  };
 }
 
 // Reconnect when the bridge host/port changes on the options page — but only if

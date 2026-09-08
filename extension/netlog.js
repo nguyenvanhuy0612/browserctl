@@ -135,73 +135,75 @@ function getRecord(tabId, requestId) {
 
 const FILTER = { urls: ["<all_urls>"] };
 
-chrome.webRequest.onBeforeRequest.addListener(
-  (details) => {
-    // Always track in-flight requests (independent of `capturing`).
-    incInFlight(details.tabId, details.requestId);
-    if (!capturing.has(details.tabId)) return;
-    const rec = getRecord(details.tabId, details.requestId);
-    rec.method = details.method;
-    rec.url = details.url;
-    rec.type = details.type;
-    rec.tabId = details.tabId;
-    rec.startTime = details.timeStamp;
-    rec.requestBodySize = requestBodySize(details.requestBody);
-  },
-  FILTER,
-  ["requestBody"]
-);
+if (typeof chrome !== "undefined" && chrome?.webRequest) {
+  chrome.webRequest.onBeforeRequest.addListener(
+    (details) => {
+      // Always track in-flight requests (independent of `capturing`).
+      incInFlight(details.tabId, details.requestId);
+      if (!capturing.has(details.tabId)) return;
+      const rec = getRecord(details.tabId, details.requestId);
+      rec.method = details.method;
+      rec.url = details.url;
+      rec.type = details.type;
+      rec.tabId = details.tabId;
+      rec.startTime = details.timeStamp;
+      rec.requestBodySize = requestBodySize(details.requestBody);
+    },
+    FILTER,
+    ["requestBody"]
+  );
 
-chrome.webRequest.onSendHeaders.addListener(
-  (details) => {
-    if (!capturing.has(details.tabId)) return;
-    const rec = getRecord(details.tabId, details.requestId);
-    rec.requestHeaders = headersToMap(details.requestHeaders);
-  },
-  FILTER,
-  ["requestHeaders", "extraHeaders"]
-);
+  chrome.webRequest.onSendHeaders.addListener(
+    (details) => {
+      if (!capturing.has(details.tabId)) return;
+      const rec = getRecord(details.tabId, details.requestId);
+      rec.requestHeaders = headersToMap(details.requestHeaders);
+    },
+    FILTER,
+    ["requestHeaders", "extraHeaders"]
+  );
 
-chrome.webRequest.onHeadersReceived.addListener(
-  (details) => {
-    if (!capturing.has(details.tabId)) return;
-    const rec = getRecord(details.tabId, details.requestId);
-    rec.statusCode = details.statusCode;
-    rec.statusLine = details.statusLine;
-    rec.responseHeaders = headersToMap(details.responseHeaders);
-  },
-  FILTER,
-  ["responseHeaders", "extraHeaders"]
-);
+  chrome.webRequest.onHeadersReceived.addListener(
+    (details) => {
+      if (!capturing.has(details.tabId)) return;
+      const rec = getRecord(details.tabId, details.requestId);
+      rec.statusCode = details.statusCode;
+      rec.statusLine = details.statusLine;
+      rec.responseHeaders = headersToMap(details.responseHeaders);
+    },
+    FILTER,
+    ["responseHeaders", "extraHeaders"]
+  );
 
-chrome.webRequest.onCompleted.addListener(
-  (details) => {
-    // Always track in-flight requests (independent of `capturing`).
-    decInFlight(details.tabId, details.requestId);
-    if (!capturing.has(details.tabId)) return;
-    const rec = getRecord(details.tabId, details.requestId);
-    rec.status = details.statusCode;
-    rec.fromCache = details.fromCache;
-    rec.ip = details.ip;
-    rec.endTime = details.timeStamp;
-    rec.done = true;
-  },
-  FILTER,
-  ["responseHeaders", "extraHeaders"]
-);
+  chrome.webRequest.onCompleted.addListener(
+    (details) => {
+      // Always track in-flight requests (independent of `capturing`).
+      decInFlight(details.tabId, details.requestId);
+      if (!capturing.has(details.tabId)) return;
+      const rec = getRecord(details.tabId, details.requestId);
+      rec.status = details.statusCode;
+      rec.fromCache = details.fromCache;
+      rec.ip = details.ip;
+      rec.endTime = details.timeStamp;
+      rec.done = true;
+    },
+    FILTER,
+    ["responseHeaders", "extraHeaders"]
+  );
 
-chrome.webRequest.onErrorOccurred.addListener(
-  (details) => {
-    // Always track in-flight requests (independent of `capturing`).
-    decInFlight(details.tabId, details.requestId);
-    if (!capturing.has(details.tabId)) return;
-    const rec = getRecord(details.tabId, details.requestId);
-    rec.error = details.error;
-    rec.endTime = details.timeStamp;
-    rec.done = true;
-  },
-  FILTER
-);
+  chrome.webRequest.onErrorOccurred.addListener(
+    (details) => {
+      // Always track in-flight requests (independent of `capturing`).
+      decInFlight(details.tabId, details.requestId);
+      if (!capturing.has(details.tabId)) return;
+      const rec = getRecord(details.tabId, details.requestId);
+      rec.error = details.error;
+      rec.endTime = details.timeStamp;
+      rec.done = true;
+    },
+    FILTER
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Action dispatch
@@ -235,18 +237,18 @@ function briefRecord(rec) {
 // Resolve once the tab has had no in-flight requests for `idleMs` continuous
 // milliseconds, or reject on timeout. Uses the always-on `inFlight` counter, so
 // it works regardless of whether detailed capture (`capturing`) is started.
-function waitNetworkIdle(tabId, idleMs, timeoutMs) {
+export function waitNetworkIdle(tabId, idleMs = 500, timeoutMs = 10000, maxInFlight = 0) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
-    // Timestamp when the tab was last observed fully idle (no in-flight requests).
-    // Reset to null whenever we see in-flight requests.
-    let idleSince = inFlightCount(tabId) === 0 ? start : null;
+    // Timestamp when the tab was last observed idle (<= maxInFlight in-flight requests).
+    // Reset to null whenever in-flight requests exceed maxInFlight.
+    let idleSince = inFlightCount(tabId) <= maxInFlight ? start : null;
 
     const timer = setInterval(() => {
       const now = Date.now();
       const count = inFlightCount(tabId);
 
-      if (count > 0) {
+      if (count > maxInFlight) {
         idleSince = null;
       } else if (idleSince === null) {
         idleSince = now;
@@ -254,21 +256,19 @@ function waitNetworkIdle(tabId, idleMs, timeoutMs) {
 
       if (idleSince !== null && now - idleSince >= idleMs) {
         clearInterval(timer);
-        resolve({ idle: true, waitedMs: now - start });
+        resolve({ idle: true, waitedMs: now - start, inFlight: count });
         return;
       }
 
       if (now - start >= timeoutMs) {
         clearInterval(timer);
-        reject(
-          new Error(
-            "wait_network_idle timed out after " +
-              timeoutMs +
-              "ms (still " +
-              count +
-              " in flight)"
-          )
+        const err = new Error(
+          `wait_network_idle timed out after ${timeoutMs}ms (still ${count} in flight). Tip: SPAs with persistent WebSockets or telemetry never reach 0 in-flight; use 'wait --settle' instead or set maxInFlight: 1.`
         );
+        err.code = "NETWORK_IDLE_TIMEOUT";
+        err.diagnostics = { timeoutMs, inFlight: count, maxInFlight };
+        err.recoveryHint = "Modern SPAs often keep persistent WebSockets or telemetry active. Use 'wait --settle' (or 'browser_wait_settle') instead, or pass maxInFlight: 1.";
+        reject(err);
       }
     }, 100);
   });
@@ -298,6 +298,18 @@ export async function handleNet(action, params, tabId) {
         throw new Error("capture state was reset by a service-worker restart — call net_start again");
       }
       const b = getBuffer(tabId);
+      // "Never started" and "started, and the page made no requests" are different
+      // answers, and an empty array says both. An agent reading the empty array
+      // concludes the page is idle and moves on.
+      if (!capturing.has(tabId) && b.list.length === 0) {
+        const err = new Error(
+          "network capture is not running for this tab, so nothing was recorded — this is NOT the same as the page making no requests"
+        );
+        err.code = "NET_CAPTURE_NOT_STARTED";
+        err.recoveryHint =
+          "Call net_start, then reload or navigate the page (capture only records requests made after it starts), then net_get.";
+        throw err;
+      }
       let records = b.list;
       if (params.urlContains) {
         records = records.filter((r) => (r.url || "").includes(params.urlContains));
@@ -324,7 +336,8 @@ export async function handleNet(action, params, tabId) {
       requireTabId(tabId);
       const idleMs = params.idleMs != null ? params.idleMs : 500;
       const timeoutMs = params.timeoutMs != null ? params.timeoutMs : 10000;
-      const result = await waitNetworkIdle(tabId, idleMs, timeoutMs);
+      const maxInFlight = params.maxInFlight ?? params.tolerance ?? 0;
+      const result = await waitNetworkIdle(tabId, idleMs, timeoutMs, maxInFlight);
       return { ok: true, result };
     }
 

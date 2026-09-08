@@ -6,3 +6,11 @@ tests/
 .DS_Store
 *.tgz
 *.log
+
+# Runtime-written data. These land inside bridge/ and would otherwise be published:
+# calls.jsonl is a log of every action driven through the bridge, telemetry.jsonl records
+# the URLs a benchmark visited. Belt and braces alongside the `files` allowlist.
+*.jsonl
+bridge/calls.jsonl*
+bridge/telemetry.jsonl
+bridge/bridge.log

@@ -1,0 +1,29 @@
+<!doctype html><meta charset="utf-8"><title>Label resolution cases</title>
+<style>body{font:14px system-ui;padding:20px} .row{display:flex;gap:8px;align-items:center;padding:6px}</style>
+<h1>Label resolution cases</h1>
+
+<!-- 1. Facebook shape: bare radio, label in a sibling, wrapper role=none -->
+<div role="none" class="row"><input type="radio" name="aud" value="on"><div><span>Only me</span></div></div>
+<div role="none" class="row"><input type="radio" name="aud" value="on" checked><div><span>Public</span></div></div>
+
+<!-- 2. explicit label[for] -->
+<div class="row"><input type="checkbox" id="tos"><label for="tos">Accept terms</label></div>
+
+<!-- 3. wrapping label -->
+<label class="row"><input type="checkbox"> Subscribe to updates</label>
+
+<!-- 4. aria-labelledby -->
+<span id="lbl-qty">Quantity in cart</span>
+<div class="row"><input type="number" aria-labelledby="lbl-qty" value="3"></div>
+
+<!-- 5. select with no name -->
+<div class="row"><span>Shipping country</span><select><option>Vietnam</option><option>Japan</option></select></div>
+
+<!-- 6. custom toggle: div[role=switch], label in sibling -->
+<div class="row"><div role="switch" aria-checked="false" tabindex="0" style="width:36px;height:20px;background:#ccc;border-radius:10px"></div><span>Dark mode</span></div>
+
+<!-- 7. icon button, label only on a child svg title -->
+<div class="row"><button><svg width="16" height="16"><title>Delete item</title></svg></button></div>
+
+<!-- 8. properly labelled control (control case) -->
+<div class="row"><input type="text" aria-label="Search products" placeholder="Search"></div>

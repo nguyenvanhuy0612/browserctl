@@ -1,6 +1,6 @@
 {
   "name": "browserctl-mcp",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Universal Browser Control Protocol & MCP Server for AI Agents and Developers",
   "type": "module",
   "main": "cli.js",
@@ -11,18 +11,21 @@
   },
   "files": [
     "cli.js",
-    "bridge/",
+    "bridge/server.js",
+    "bridge/state.js",
+    "bridge/package.json",
     "mcp/",
     "extension/",
     "README.md",
     "PROTOCOL.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test tests/unit/bridge.test.mjs tests/unit/cli_and_mcp.test.mjs",
+    "test": "node --test tests/unit/bridge.test.mjs tests/unit/cli_and_mcp.test.mjs tests/unit/content_helpers.test.mjs",
     "start": "node bridge/server.js",
     "mcp": "node mcp/index.js"
   },

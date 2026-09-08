@@ -7,6 +7,13 @@ npm-debug.log*
 *.log
 tests/**/artifacts/
 
+# Written by the bridge at runtime, never source:
+#   calls.jsonl    — opt-in per-call log (BROWSERCTL_CALL_LOG)
+#   telemetry.jsonl — benchmark harness output
+bridge/calls.jsonl*
+bridge/telemetry.jsonl
+test/benchmark/runs/
+
 # OS / IDE
 .DS_Store
 .idea/

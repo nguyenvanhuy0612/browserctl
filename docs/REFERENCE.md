@@ -1,6 +1,6 @@
 # browserctl — complete reference
 
-Version 0.5.1. The extension, bridge, and MCP server are versioned
+Version 0.6.0. The extension, bridge, and MCP server are versioned
 together; `PROTOCOL.md` is the wire-level spec and this document is the operator's guide.
 
 > [!WARNING]
@@ -9,7 +9,7 @@ together; `PROTOCOL.md` is the wire-level spec and this document is the operator
 
 ## What it is
 
-**browserctl** (v0.5.1, 70+ tools) gives an AI agent DOM-level control of a *real*, already-logged-in Chrome
+**browserctl** (v0.6.0, 80 tools) gives an AI agent DOM-level control of a *real*, already-logged-in Chrome
 or Edge, through a neutral HTTP/WebSocket API and an MCP server. It drives one pinned tab
 **in the background**, without stealing focus and without a debugger banner on the common
 path, so you can keep working in your own tab while the agent works in its own.
@@ -22,39 +22,34 @@ framework. See `prior-art.md` § Positioning decision for what that rules out an
 `browserctl` is executable globally and can be invoked directly from anywhere in the terminal:
 
 ```bash
-# Daemon & connectivity
-browserctl status                         # Check bridge and extension connection
-browserctl start                          # Start bridge daemon in background
-browserctl stop                           # Stop bridge daemon (records stopped state)
+# Global flags (--tab <id>, -c, --json, --pretty) can appear anywhere in the command
+browserctl --tab 123 snapshot --compact   # Viewport-scoped DOM with Quick Actions affordance footer
+browserctl snapshot --all                 # Full DOM extraction including offscreen elements
+browserctl tabs                           # List open tabs (alias for tab list)
+browserctl switch 123                     # Switch target tab (alias for tab switch)
 
-# Navigation & History
-browserctl open https://github.com        # Navigate target tab (alias: navigate)
-browserctl back | forward | reload        # History navigation
-
-# Inspection & Fast Property Queries (get)
-browserctl snapshot --compact             # Token-efficient DOM snapshot (saves 75% tokens)
-browserctl read_page                      # Read accessibility tree with refs
-browserctl get title                      # Get page title
-browserctl get url                        # Get page URL
-browserctl get text @e1                   # Get visible text of element
-browserctl get value @e1                  # Get input/textarea value
-browserctl get attr @e1 href              # Get element attribute
+# Inspection & Fast Property Queries (get / describe)
+browserctl get text @ref_1                # Get visible text by ref (alias: get_text)
+browserctl get text ytd-active-account-header-renderer # Direct text query by custom element tag
+browserctl get count <selector>           # Count matching elements (alias: get_count)
+browserctl get value @ref_1               # Get input/textarea value
+browserctl get attr @ref_1 href           # Get element attribute (alias: attribute)
+browserctl get title | get url            # Fast metadata retrieval
+browserctl describe <target>              # Inspect element tag, attributes, rect, visibility
 
 # Interaction & Form Utilities
-browserctl click @e1                      # Click by ref (@e1, ref_1, 0)
-browserctl fill @e1 "my query"            # Clear input and fill text (React/Vue v-model compatible)
-browserctl paste @e1 "markdown content"   # Paste multi-line text into inputs or rich-text editors (ProseMirror/Tiptap)
-browserctl type @e2 "appended text"       # Type into input field
-browserctl clear @e1                      # Clear input field
-browserctl check @e3                      # Check checkbox / radio button
-browserctl uncheck @e3                    # Uncheck checkbox
-browserctl select @e4 "value"             # Select dropdown option
+browserctl click @ref_1                   # Physical click dispatch (pointer + mouse + click)
+browserctl fill @ref_1 "my query"         # Native input value setter + input event
+browserctl paste @ref_1 "markdown"        # Paste text into fields or rich-text editors
+browserctl press Enter                    # Dispatch keyboard event (Enter, Tab, Escape)
+browserctl dismiss [target]               # Dismiss active modal, drawer, or flyout (Escape or close button)
+browserctl scroll down [px] [target]      # Scroll page or container (smart nested container detection)
+browserctl select @ref_1 "value"          # Select dropdown option
 
-# Capture, Export & JavaScript
-browserctl screenshot page.png [-f]       # Capture viewport or fullpage screenshot to file
-browserctl pdf document.pdf               # Print page to PDF file directly
-browserctl eval -r "document.title"       # Run JS and output raw value to stdout
-browserctl tab [list|new|switch|close]    # Manage browser tabs
+# Capture & Export
+browserctl screenshot [file.png] [-f]     # Viewport or fullpage (-f) screenshot
+browserctl pdf [file.pdf]                 # Print page to PDF
+browserctl wait --settle                  # Wait for network idle and DOM mutation debounce
 ```
 
 ## Architecture
@@ -217,6 +212,24 @@ never have to guess which semantics you got.
 Reads pierce **open shadow DOM** and cover **iframes including cross-origin** (all_frames
 injection, frame-qualified refs). Pass a frame-qualified ref back verbatim.
 
+A **stale ref is not a dead end** (0.6.0). Refs remember the label they were assigned to, so if the page
+re-rendered and the same label is still present, the error names its replacement:
+`ref "@ref_2" is stale — the control labelled "Hacker News" is now @ref_199; retry with that ref.`
+No re-snapshot needed. This matters on SPAs, where a menu can re-render between the snapshot and the
+click that follows it.
+
+**Names come from the browser's own resolution** (0.6.0): `aria-label`, `aria-labelledby`, a descendant
+image's `alt`, `title`/`placeholder`, a form control's `<label for>` / wrapping `<label>` / row text,
+then slotted shadow content. A control's `value` is never its name — that had every
+`<input type="radio" value="on">` in a group called "on". Verified at 100% of Chrome's own named
+controls on github.com, booking.com and news.ycombinator.com; check any site yourself with
+`node tests/e2e/label_vs_chrome.mjs <url>`.
+
+Some controls are listed even though they are not plainly visible, each marked so you know why:
+`[via label]` is the standard 1x1 `opacity:0` checkbox operated through a visible `<label>`;
+`[hidden until hover/focus]` is a carousel arrow or skip link. Both are genuinely operable and both are
+in Chrome's accessibility tree.
+
 ## Tools
 
 67 MCP tools over 65 bridge actions — `browser_open_and_read` is a composite
@@ -227,12 +240,15 @@ Every tab-scoped tool also accepts `tabId`.
 
 | Tool | Purpose | Params |
 |---|---|---|
-| `browser_snapshot` | Snapshot page | `maxText` |
+| `browser_snapshot` | Primary tool to inspect UI, controls, notifications & badges | `maxText`, `scope`, `compact`, `format` |
+| `browser_get_text` | Extract innerText from element (selector, ref, or index) without eval_js | `selector`, `ref`, `index`, `placeholder` |
+| `browser_get_attribute` | Read specific DOM attribute (e.g. href, aria-label, src) | `attr`, `selector`, `ref`, `index` |
+| `browser_get_count` | Fast element census count matching CSS selector | `selector` |
 | `browser_read_page` | Read page (accessibility tree) | `mode`, `depth`, `ref_id`, `maxChars` |
 | `browser_find` | Find elements by text | `query`, `max` |
 | `browser_find_text` | Find text on the page | `query`, `regex`, `max`, `contextChars` |
-| `browser_get_page_content` | Get readable page content | — |
-| `browser_describe_element` | Describe one element | `index`, `ref` |
+| `browser_get_page_content` | Get readable article/documentation text (prose only) | `maxChars` |
+| `browser_describe_element` | Describe element tag, attributes, box, and visibility | `selector`, `ref`, `index`, `placeholder` |
 | `browser_a11y_snapshot` | Accessibility snapshot | — |
 | `browser_read_pdf` | Read a PDF tab | — |
 | `browser_open_and_read` | Open (or reuse) a tab and read it in one call | `url`, `wait`, `timeoutMs`, `read`, `maxChars` |
@@ -253,7 +269,8 @@ Every tab-scoped tool also accepts `tabId`.
 | `browser_hover` | Hover element | `ref`, `selector`, `text` |
 | `browser_select_option` | Select dropdown option | `ref`, `selector`, `value`, `label` |
 | `browser_press_key` | Press a key | `key`, `ref`, `modifiers`, `allowSynthetic` |
-| `browser_scroll` | Scroll page | `direction`, `amount` |
+| `browser_scroll` | Scroll page or container (smart nested container detection) | `direction`, `amount`, `ref`, `selector`, `index` |
+| `browser_dismiss_modal` | Dismiss active modal, drawer, or flyout | `ref`, `selector` |
 | `browser_insert_text` | Insert text (CDP) | `text` |
 
 ### Daemon & Dynamic Tool Management
@@ -278,13 +295,13 @@ Every tab-scoped tool also accepts `tabId`.
 
 | Tool | Purpose | Params |
 |---|---|---|
-| `browser_navigate` | Navigate | — |
+| `browser_navigate` | Navigate | `url` |
 | `browser_go_back` | Go back | — |
 | `browser_go_forward` | Go forward | — |
 | `browser_reload` | Reload | — |
 | `browser_wait_for` | Wait for condition | `selector`, `text`, `gone`, `timeoutMs` |
-| `browser_wait_settle` | Wait for page to settle | — |
-| `browser_wait_network_idle` | Wait for network idle | — |
+| `browser_wait_settle` | Wait for page DOM mutations and animations to settle (ideal for SPAs with active WebSockets) | `timeoutMs` |
+| `browser_wait_network_idle` | Wait for network quiet period (supports tolerance for persistent sockets) | `idleMs`, `timeoutMs`, `maxInFlight` |
 
 ### Screenshots & PDF
 
@@ -344,7 +361,7 @@ Every tab-scoped tool also accepts `tabId`.
 |---|---|---|
 | `browser_exec_system_cmd` | Execute system shell command on bridge host | `command`, `cwd`, `env`, `timeoutMs` |
 | `browser_cdp_send` | Send a raw CDP command (power tool) | `method`, `params` |
-| `browser_eval_js` | Evaluate JavaScript | — |
+| `browser_eval_js` | Evaluate JavaScript in page context (auto-bypasses CSP and Trusted Types via CDP) | `expression`, `format` |
 | `browser_audit` | Audit page | — |
 | `browser_record_start` | Start recording | — |
 | `browser_record_stop` | Stop recording | — |
@@ -365,6 +382,19 @@ target before acting.
 
 So: a `warning` means "it ran, but the element did not look actionable — verify the
 effect". An error means "it could not have worked".
+
+**Did it actually take?** (0.6.0) Every action returns an `effect` block: `domMutated`, `mutationCount`,
+`urlChanged`, `targetStillPresent`. For a control carrying `aria-checked`/`selected`/`pressed`/
+`expanded`, it also reports `controlState` — whether the control's *own* state moved:
+
+```
+effect.controlState: { "changed": ["checked: false -> true"], "unchanged": [] }
+```
+
+This distinction is the point. A real audience selector produced 34, then 320, then 34 mutations across
+eight clicks while the selection never committed, and every one of those clicks reported success.
+`domMutated` proves the page reacted; only `controlState` proves the thing you aimed at changed. When
+the page mutates and the control does not, the response says so explicitly.
 
 ## The escape hatch: `browser_cdp_send`
 
@@ -495,17 +525,36 @@ Revisit all of the above before this leaves a trusted machine.
 ## Tests
 
 ```bash
-# unit: bridge relay only, no Chrome needed. ~0.5s, safe to run with a live bridge.
-node --test tests/unit/bridge.test.mjs
+# unit: no Chrome needed. 81 tests, ~2s, safe to run with a live bridge.
+npm test
 
 # e2e: drives the real stack. Bridge must be running and the extension connected.
-node tests/e2e/run.mjs                      # 62 checks; never steals focus
+node tests/e2e/run.mjs                      # 70 checks; never steals focus
 E2E_FOREGROUND=1 node tests/e2e/run.mjs     # + the 2 synthetic-input tests (steals focus)
+node tests/e2e/run_multiframe.mjs           # 19 checks on a page with a real iframe
+node tests/e2e/run_labels.mjs               # 9 label-resolution shapes, all four readers agree
+
+# against ANY live site — these need no fixture and are the ones worth running after
+# touching the census, the dispatch table, or a tool description:
+node tests/e2e/label_vs_chrome.mjs https://github.com/login   # census names vs Chrome's own
+node tests/e2e/audit_tools.mjs https://example.com out        # every read-only action
+node tests/e2e/coverage_check.mjs https://news.ycombinator.com hn  # nothing unreachable
 ```
 
 The e2e runner serves its own page (plus a second origin for a genuinely cross-origin
-iframe), creates its own tabs, exercises 58 of 60 commands, and closes what it opened.
+iframe), creates its own tabs, exercises 59 of 61 commands, and closes what it opened.
 `reload_extension` is never exercised — it drops the connection mid-run by design.
+
+**`run_multiframe.mjs` exists because every other fixture was single-frame**, and that blind spot let a
+severe regression ship invisibly: on any page with an iframe — i.e. every real site — the frame merge
+rebuilt the compact view from scratch and discarded landmark grouping, folding and every notice. All 81
+unit tests stayed green throughout.
+
+**`label_vs_chrome.mjs` is the oracle worth knowing about.** Chrome computes an accessible name for
+every control to spec and exposes it through the accessibility tree, so on any live page that is ground
+truth for what the census *should* have found — no fixture, no guessing what shapes to test. Three
+naming defects came from it that a hand-written fixture had passed clean. The bar is: zero anonymous
+controls, and coverage at 100% of Chrome's named controls.
 
 After editing extension code, reload the extension (`chrome://extensions` → reload, or the
 `reload_extension` command) before re-running, or you will test the old code.
