@@ -12,7 +12,7 @@ them. They are the contract; they are not a tutorial and not a history.
 | `spec/census.md` | you need to know what a snapshot contains, omits, and admits to omitting |
 | `spec/actions.md` | you need to know what "the action worked" means, and how the response says so |
 | `spec/errors.md` | you hit an error code, or you are adding one |
-| `spec/invariants.md` | you are changing the census, the dispatch table, or a tool description |
+| `spec/invariants.md` | you are changing the census, the dispatch table, a tool description, or a number in the docs |
 | `spec/testing.md` | you want to know which suite would have caught your bug |
 
 Adjacent documents, deliberately not specs:

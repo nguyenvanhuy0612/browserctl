@@ -108,3 +108,25 @@ parameter *keys and sizes only*, never values, because `fill`/`type`/`paste` car
 
 *Guarded by:* "the bridge can record a per-call log, and never records parameter values"; and by
 `npm pack --dry-run` before any publish.
+
+## I10 — A number in prose must be one the reader needs
+
+Counts rot. `"~24 tools"`, `"67 MCP tools over 65 bridge actions"`, `"45 of 65 commands"`,
+`"72 findings"`, `"83/83 unit"` — every one was true when written and wrong when read [F75].
+
+The first attempt at fixing them made it worse: the counts were **dated** rather than removed, which
+keeps a useless number and adds a sentence explaining why it is useless.
+
+- **Delete the number, do not date it.** Point at the source that is always right instead:
+  `browserctl --help`, `browser_action` called bare, `debugger-policy.md`'s per-action table, or the
+  suite's own printed output.
+- **Keep it only where the reader needs it to decide something.** `core` (35) vs `all` (80) stays,
+  because that number picks a profile.
+- **A snapshot document may carry as-measured numbers.** `docs/history/` and `CHANGELOG.md` are
+  dated by definition and say so in their headers. A live document may not.
+
+The same reasoning applies one level down, to the numbers a *metric* reports — see [I7], where a
+hand-kept denominator flattered the coverage report for the whole v2 effort.
+
+*Guarded by:* "Docs do not claim a completeness they lack" (F75), which fails if the retired counts
+return.
