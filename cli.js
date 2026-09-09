@@ -42,9 +42,16 @@ browserctl CLI — Fast, Ergonomic Browser Automation for AI Agents & Developers
 
 Usage:
   browserctl status                     Check bridge health, daemon state & extension
-  browserctl start                      Start bridge daemon in background
-  browserctl stop                       Stop running bridge daemon (records stopped state)
+  browserctl start                      Start bridge daemon (RARELY NEEDED — any command
+                                        starts it automatically on first use)
+  browserctl stop                       Stop the daemon. DO NOT run this to tidy up after a
+                                        task: it is shared with the user and other agents,
+                                        and it records a stopped state that blocks restart.
   browserctl restart                    Restart bridge daemon
+
+You do not need to start anything before your first command, and you do not need to leave a
+terminal open. Every MCP tool has a CLI equivalent: browser_snapshot -> snapshot,
+browser_get_text -> get text, browser_click -> click.
 
 Navigation & Tabs:
   browserctl open <url>                 Navigate target tab to url (alias: navigate)

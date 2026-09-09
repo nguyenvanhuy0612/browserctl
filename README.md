@@ -47,6 +47,42 @@ modifiers** cannot work on a hidden tab — they now fail with an actionable err
 silently doing nothing. Everything else, including every DOM action and every screenshot,
 genuinely works in the background. See `docs/REFERENCE.md` for the full matrix.
 
+## Two ways in, same capability
+
+Everything browserctl can do is reachable **either** as MCP tools **or** as shell commands. Same bridge,
+same extension, same actions — pick whichever your agent can actually run.
+
+| | Use when | First command |
+|---|---|---|
+| **MCP** | your client speaks MCP (Claude Code/Desktop, Cursor, Windsurf, Antigravity) | configure it below, then call `browser_snapshot` |
+| **CLI** | your agent can run shell commands but has no MCP — or you are at a terminal | `browserctl status` |
+
+### No MCP? Start here.
+
+If you can run a shell command, you have the whole tool. No MCP client, no config file, no daemon to
+start — the CLI launches the bridge itself on first use.
+
+```bash
+# from a clone (no install at all):
+node cli.js status
+node cli.js snapshot -c
+
+# or without cloning:
+npx -y -p browserctl-mcp browserctl status
+npx -y -p browserctl-mcp browserctl snapshot -c
+
+# or install once, then just `browserctl` / `bctl`:
+npm i -g browserctl-mcp
+browserctl status
+```
+
+You still need the Chrome extension loaded (step 2 below) — that is what the bridge talks to.
+
+Every MCP tool has a CLI equivalent with the same name minus the `browser_` prefix:
+`browser_snapshot` → `browserctl snapshot`, `browser_get_text` → `browserctl get text @ref_1`,
+`browser_click` → `browserctl click @ref_1`. The full list is in
+[CLI Reference](#cli-reference--ai-agent-guide-browserctl) below; `browserctl --help` prints it too.
+
 ## Quickstart & Installation
 
 ### 1. Install & Configure MCP (Zero-Setup via NPX)
@@ -120,7 +156,22 @@ browserctl restart                        # Restart bridge daemon
 
 ## CLI Reference & AI Agent Guide (`browserctl`)
 
-`browserctl` is executable globally and can be invoked directly from anywhere in the terminal or by AI agents via `node cli.js`. Global flags (such as `--tab <id>`, `-c|--compact`, `--json`, `--pretty`) can appear at any position in the command line.
+Three invocations, all identical in behaviour — use whichever is available:
+
+```bash
+browserctl snapshot -c                          # installed globally (aliases: bctl)
+node cli.js snapshot -c                         # from a clone, nothing installed
+npx -y -p browserctl-mcp browserctl snapshot -c # neither
+```
+
+The bridge daemon starts itself on the first command; there is nothing to run beforehand and no
+terminal to leave open. Global flags (`--tab <id>`, `-c|--compact`, `--json`, `--pretty`) may appear at
+any position.
+
+**For an agent:** prefer `-c` (compact) for reads and `--json` when you need to parse the result. The
+compact view carries the same notices the MCP tools return — the structure line, what was left
+offscreen, and any content that only loads on interaction — so nothing is lost by driving the CLI
+instead of MCP.
 
 ### Quick Cheatsheet
 
@@ -302,9 +353,12 @@ Docs:
 - `docs/backlog-capability-gaps.md` — the five tracked gaps, with verified CDP surfaces.
 - `docs/debugger-policy.md` — which commands need `chrome.debugger` (45 of 65 never do),
   what a per-site denial would cost, and the single chokepoint to enforce it at.
-- `docs/fix-plan-v2-verified-2026-09-08.md` — the evidence base for 0.6.0: 69 findings from
-  driving browserctl with fresh-context agents on live sites, each with its repro and how it
-  was verified. Read §19-§20 first if you want the method rather than the list.
+- **`docs/spec/`** — the contract: what an element is *called* and why, what a census contains
+  and admits to omitting, what "the action worked" means, the error taxonomy, the cross-file
+  invariants, and what each test suite exists to catch. Start at `docs/spec/README.md`.
+- `docs/history/` — the investigation logs the specs were extracted from. 72 findings from
+  driving browserctl with fresh-context agents on live sites, each with its repro. Read it
+  when a rule looks arbitrary; the evidence is there.
 
 ## Testing
 

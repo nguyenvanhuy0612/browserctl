@@ -1,7 +1,15 @@
 # browserctl — complete reference
 
-Version 0.6.1. The extension, bridge, and MCP server are versioned
-together; `PROTOCOL.md` is the wire-level spec and this document is the operator's guide.
+Version 0.6.1. The extension, bridge, and MCP server are versioned together.
+
+This is the **operator's guide**: how to install it, what each tool is for, recipes, and the failure
+modes worth recognising. Three neighbours, so you land in the right one:
+
+- `PROTOCOL.md` — the wire format. Message shapes between client, bridge and extension.
+- **`spec/`** — the contract and the reasoning. What an element is called and why, what a census must
+  admit to omitting, what "the action worked" means, the error taxonomy, the cross-file invariants.
+  When this guide says *what*, the spec says *why, and what breaks otherwise*.
+- `history/` — the investigation logs those rules were extracted from.
 
 > [!WARNING]
 > **Safety & Isolation Disclaimer:**

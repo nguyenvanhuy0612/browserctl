@@ -1038,3 +1038,66 @@ test("Activation happens exactly once, everywhere it can be doubled (F71)", asyn
   assert.ok(/submittedByPage/.test(code) && /keydownPrevented/.test(code),
     "press_key must report whether the page handled Enter itself");
 });
+
+test("The specs describe the code that exists", async () => {
+  const fs = await import("node:fs/promises");
+  const read = (...p) => fs.readFile(join(__dirname, "..", "..", ...p), "utf8");
+  const [content, bg, spec] = await Promise.all([
+    read("extension", "content.js"),
+    read("extension", "background.js"),
+    read("docs", "spec", "errors.md"),
+  ]);
+
+  // A spec that drifts from the code is worse than no spec: it is a confident wrong answer.
+  // Every error code the taxonomy documents must exist somewhere in the stack.
+  const documented = [...spec.matchAll(/^\| `([A-Z_]{4,})` \|/gm)].map((m) => m[1]);
+  assert.ok(documented.length >= 10, `expected a real taxonomy, found ${documented.length} codes`);
+  // Every file that can throw a coded error — netlog.js and cdp.js own several, and
+  // leaving them out of the scan made the check report false drift on its first run.
+  const stack = content + bg
+    + (await read("extension", "netlog.js"))
+    + (await read("extension", "cdp.js"))
+    + (await read("mcp", "index.js"))
+    + (await read("bridge", "server.js"));
+  const missing = documented.filter((c) => !stack.includes(`"${c}"`));
+  assert.deepEqual(missing, [], `codes documented in spec/errors.md but absent from the code: ${missing}`);
+
+  // And the reverse: a structured code thrown by the content script must be documented,
+  // or an agent meets an error the taxonomy never told it how to recover from.
+  const thrown = new Set([...content.matchAll(/createStructuredError\([\s\S]{0,200}?"([A-Z_]{4,})"/g)].map((m) => m[1]));
+  const undocumented = [...thrown].filter((c) => !documented.includes(c));
+  assert.deepEqual(undocumented, [], `codes thrown but not in spec/errors.md: ${undocumented}`);
+});
+
+test("Every spec file is reachable from its index", async () => {
+  const fs = await import("node:fs/promises");
+  const dir = join(__dirname, "..", "..", "docs", "spec");
+  const files = (await fs.readdir(dir)).filter((f) => f.endsWith(".md") && f !== "README.md");
+  const index = await fs.readFile(join(dir, "README.md"), "utf8");
+  const orphans = files.filter((f) => !index.includes(f));
+  assert.deepEqual(orphans, [], `spec files not listed in spec/README.md: ${orphans}`);
+});
+
+test("Guidance reaches the CLI, not only MCP (F73)", async () => {
+  const fs = await import("node:fs/promises");
+  const cli = await fs.readFile(join(__dirname, "..", "..", "cli.js"), "utf8");
+  const readme = await fs.readFile(join(__dirname, "..", "..", "README.md"), "utf8");
+
+  // An agent with a shell and no MCP client sees only `--help` and the README. Guidance
+  // added to a tool description does not reach it: browser_stop got a "do not call this to
+  // tidy up" warning after a probe shut down the shared daemon, and the CLI's `stop` kept
+  // its neutral one-liner.
+  const help = cli.slice(cli.indexOf("browserctl CLI —"), cli.indexOf("browserctl CLI —") + 1600);
+  assert.ok(/DO NOT run this to tidy up/.test(help), "F73: cli --help must carry the same browser_stop warning");
+  assert.ok(/RARELY NEEDED|starts it automatically/.test(help),
+    "help must say the daemon auto-starts, or `start` reads as a prerequisite");
+  assert.ok(/browser_snapshot -> snapshot/.test(help),
+    "help must map MCP tool names onto CLI commands for an agent that only knows one surface");
+
+  // The README must offer a CLI-first path before the MCP setup, or an agent that cannot
+  // run MCP concludes the tool is unavailable.
+  const beforeQuickstart = readme.slice(0, readme.indexOf("## Quickstart & Installation"));
+  assert.ok(/No MCP\? Start here/.test(beforeQuickstart), "the CLI path must come before the MCP setup");
+  assert.ok(/node cli\.js/.test(beforeQuickstart), "a clone with nothing installed must be covered");
+  assert.ok(/npx -y -p browserctl-mcp browserctl/.test(beforeQuickstart), "the no-clone path must be covered");
+});

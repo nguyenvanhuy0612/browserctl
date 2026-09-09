@@ -58,7 +58,7 @@ Suites: 83/83 unit · 70/70 e2e · 19/19 multi-frame · 12/12 editors · 9/9 lab
 An accuracy release. Every finding below came from driving browserctl with fresh-context agents on
 live sites (Facebook, GitHub, YouTube, Booking, Amazon, Wikipedia, Hacker News) and then reproducing
 what they hit. Full evidence, repros and verification status in
-`docs/fix-plan-v2-verified-2026-09-08.md` §9-§20.
+`docs/history/fix-plan-v2-verified-2026-09-08.md` §9-§20.
 
 ### The headline
 
