@@ -244,7 +244,8 @@ Part of that we can close via CDP (see `backlog-capability-gaps.md`); the
 
 ### Function-level comparison, browser scope only
 
-Us: 64 MCP tools; extension + bridge + MCP; DOM/a11y-first with CDP opt-in.
+Us: extension + bridge + MCP; DOM/a11y-first with CDP opt-in. (Tool count as surveyed was 64; it
+has grown since — the competitor figures below are as-captured on 2026-06-29 and were not re-run.)
 playwright-mcp: ~70 tools with all `--caps` enabled. chrome-devtools-mcp: 28 tools.
 hangwin/mcp-chrome: ~20 tools.
 

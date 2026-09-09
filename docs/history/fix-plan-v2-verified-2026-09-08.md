@@ -2334,3 +2334,122 @@ per run and never closed one — a day's testing left **54 tabs** in the user's 
 across four consecutive runs.
 
 Suites: unit 83/83 · e2e 70/70 · multi-frame 19/19 · editors 12/12 · labels 9/9.
+
+## 22. The docs audited as a surface an agent reads
+
+A low-tier agent that never installs the MCP server reads the docs the way it reads a tool
+description: literally, once, and without cross-checking. Three defects came out of reading them
+that way. Two of the three are the same shapes already recorded above — guidance that reached one
+surface but not its twin (I3), and a number that was measured once and then drifted (I7).
+
+### F73 — S2 — `--help` carried none of the MCP guidance
+
+`browser_stop`'s description warns an agent not to call it to tidy up; the CLI's `--help` for the
+same command said only what it does. An agent driving the CLI got no warning at all, and the
+premise of the project is that the bridge stays up. `cli.js --help` was rewritten to carry the same
+two warnings the MCP descriptions carry (`start` is "RARELY NEEDED", `stop` is "DO NOT run this to
+tidy up") plus the MCP-tool-to-CLI-command mapping, so one surface is not quietly weaker than the
+other. Guarded by a test that reads both surfaces and compares.
+
+### F74 — S1 — `browserctl find <query>` silently did nothing
+
+The CLI mapped positional arguments per command. `find` and `find_text` had no case, so the query
+fell on the floor and the command ran with empty params — no error, no output worth reading. Both
+are documented in the README cheatsheet, so the first thing an agent copied out of the docs failed
+silently.
+
+Two fixes, because the missing case was the symptom:
+
+```js
+case "find": case "find_text": params.query = rest[0]; break;
+...
+default:
+  if (rest.length) { console.error(`${cmd}: unexpected argument "${rest[0]}"...`); process.exit(2); }
+```
+
+The `default:` branch is the real one. Every future command that forgets its positional mapping now
+fails loudly instead of running empty.
+
+### F75 — S2 — Docs claimed a completeness they did not have
+
+Four claims, all true when written:
+
+| Claim | Where | Reality |
+|---|---|---|
+| "See `PROTOCOL.md` for the full list" | README, raw-HTTP section | it details 24 of 81 actions, and the bridge has no enumeration endpoint — a dead end for the one audience that cannot call `browser_action` |
+| `browser_clear` / `browser_check` / `browser_uncheck` | REFERENCE tool table | not registered tools; they are protocol actions reachable only via `browser_action` or the CLI |
+| "~24 tools / 70+ tools", "67 MCP tools over 65 bridge actions" | REFERENCE | 35 / 80 / 81 |
+| "45 of 65 commands never touch the debugger" | README, REFERENCE | measured against v0.5 when the surface was 65 |
+
+The first two are wrong answers to a question an agent will actually ask. The last two are the
+drift class, and the first attempt at fixing them repeated it: the counts were *dated* rather than
+removed, which preserves a useless number and adds a sentence explaining why it is useless. The
+rule settled on is **a raw count in prose is deleted, not dated, unless the reader needs it to make
+a decision** — `core` (35) vs `all` (80) stays, because that number picks a profile; everything
+else points at the source that is always right (`browserctl --help`, `browser_action` bare, or
+`debugger-policy.md`'s per-action table).
+
+### A flake that had been passing for the wrong reason
+
+`run_labels.mjs` waited a fixed 1200 ms for its fixture, then asserted. Run alone it passed; run
+back-to-back after four other suites it reported **"9/9 labels are missing from at least one
+tool"** — a total failure that was really a page that had not rendered. A suite that fails loudly
+at random teaches you to re-run it, which is how a real regression gets waved through. Replaced
+with a readiness poll (25 × 200 ms on a `get_property count` probe) that SKIPs explicitly if the
+fixture never appears. Three consecutive full-sequence runs clean.
+
+### F76 — S2 — The e2e coverage report counted against a hand-written list
+
+`run.mjs` ended with **"Command coverage: 59 of 61 exercised"**. `ALL_ACTIONS` was a literal, written
+once and never grown; the protocol surface was 80 by then. Nineteen actions were outside the
+denominator entirely — `fill`, `paste`, `find_text`, `dismiss`, `open_and_read` and the whole `get_*`
+family — so no matter what the suite did or stopped doing, they could never be reported as missing.
+
+97% was the number a maintainer read before deciding the suite was thorough. The honest split:
+
+```
+Command coverage: 63/80 exercised, 3 excused, 14 missed
+```
+
+`ALL_ACTIONS` is now derived from the MCP registry at run time, and the three excused actions
+(`reload_extension`, `exec_system_cmd`, `action`) print their reason. The derivation is a regex over
+another file, so it can rot into silence in its own right; a unit test re-runs it and fails if it
+returns an implausibly small surface or loses any of seven named actions.
+
+This is [I7] again, but in the opposite direction from the two cases already recorded there. Those
+lied downward and cost a day of hunting phantom defects. This one flattered, and a flattering metric
+is never questioned — it had been wrong for the entire v2 effort while being quoted in three
+documents.
+
+### F77 — S1 — `dismiss` could not close a native `<dialog>`
+
+Found by the first test ever written for it. `<dialog>` opened with `showModal()` closes on Escape
+only for a **trusted** key event — the browser does that, not the page — so the dispatched
+`KeyboardEvent` never closed one. `dismiss` tried its close-button selectors, then Escape, then
+threw `MODAL_NOT_DISMISSED`. The most standard modal in HTML was the one case it always failed.
+
+It never *lied* about it, which is why this sat unnoticed: the F1-era verification rewrite made
+`dismiss` confirm the modal is actually gone before claiming success, so the failure was honest and
+loud. It was a capability gap, not a false report. One branch, before the Escape fallback:
+
+```js
+if (active instanceof HTMLDialogElement && active.open) { active.close(); ... }
+```
+
+`findActiveModal()` already detected these (`dialog[open]`, `:modal`), so nothing else changed.
+
+### Four actions had never been called by any suite
+
+The derived denominator from [F76] made them visible: `fill`, `dismiss`/`dismiss_modal`,
+`focus_window`, `open_and_read`. Writing the four tests turned up two more things worth recording:
+
+- **`open_and_read` is unreachable from a bridge-level suite.** It is an MCP-layer composite with
+  no protocol action, so `run.mjs` gets `unknown action`. The denominator is derived from *MCP
+  tools* while the suite drives the *bridge* — the two surfaces are not the same, and a composite
+  falls in the gap. Excused with that reason stated, rather than silently dropped.
+- **`focus_window`** only runs under `E2E_FOREGROUND=1`, since it steals OS focus. Also excused.
+
+Coverage now prints `66/80 exercised, 5 excused, 9 missed`; the nine are seven `get_*`
+aliases plus `paste` and `get_property`, all exercised by `run_editors.mjs` and `run_labels.mjs`.
+
+Suites: unit 89/89 · e2e 73/73 · multi-frame 19/19 · editors 12/12 · labels 9/9.

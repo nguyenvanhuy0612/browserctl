@@ -17,8 +17,8 @@ Applied in this order, first non-empty wins. Implemented in `fullElementText()` 
 |---|---|---|
 | 1 | `innerText` / `textContent` — **unless** the tag is in `TEXT_IS_CONTENT` | — |
 | 2 | `aria-label` | — |
-| 3 | `aria-labelledby`, joining every referenced node's text | GitHub labels icon buttons through a hidden tooltip node; twenty controls on one page came back nameless [F66] |
-| 4 | `alt` / `aria-label` of a descendant `img`, `svg`, or `[role=img]` | GitHub avatar links are `<a><img alt="@user profile">`: no text, no aria. All identical, so none could be picked [F67] |
+| 3 | `aria-labelledby`, joining every referenced node's text | icon buttons labelled only through a referenced node come back nameless — twenty on one page, where the node was a hidden tooltip (github.com) [F66] |
+| 4 | `alt` / `aria-label` of a descendant `img`, `svg`, or `[role=img]` | a link whose only content is an image has no text and no aria, so a whole set of them is identical and none can be picked — avatar links, `<a><img alt="@user profile">` (github.com) [F67] |
 | 5 | `title`, own `alt`, `placeholder` | — |
 | 6 | `controlLabelOf()` — a form control's own label (below) | Eleven `<input type="radio">` in one dialog, all nameless [F61] |
 | 7 | `value`, **only** for `input[type=button\|submit\|reset]` | `<input type="radio" value="on">` was NAMED "on". Every radio in a group identical, the label beside it ignored [F63] |

@@ -1101,3 +1101,87 @@ test("Guidance reaches the CLI, not only MCP (F73)", async () => {
   assert.ok(/node cli\.js/.test(beforeQuickstart), "a clone with nothing installed must be covered");
   assert.ok(/npx -y -p browserctl-mcp browserctl/.test(beforeQuickstart), "the no-clone path must be covered");
 });
+
+test("Documented CLI commands can actually be formed (F74)", async () => {
+  const fs = await import("node:fs/promises");
+  const cli = await fs.readFile(join(__dirname, "..", "..", "cli.js"), "utf8");
+
+  // `find <query>` was in the README's command catalog with no case in the CLI, so the
+  // positional argument fell into the key=value parser, matched nothing, and the action
+  // was dispatched empty: "find requires 'query'" — a page-level error for a CLI gap.
+  assert.ok(/case "find":\s*\n\s*case "find_text":/.test(cli),
+    "F74: find/find_text must map their positional argument");
+  assert.ok(/needs a query, e\.g\. browserctl/.test(cli), "a missing query must be rejected, not dispatched");
+
+  // And the general case: a command with no mapping must say so rather than send an empty
+  // action and let the page produce a confusing error.
+  assert.ok(/takes no positional arguments in the CLI/.test(cli),
+    "an unmappable positional argument must be reported, not silently dropped");
+});
+
+test("Docs do not claim a completeness they lack (F75)", async () => {
+  const fs = await import("node:fs/promises");
+  const read = (...p) => fs.readFile(join(__dirname, "..", "..", ...p), "utf8");
+  const [readme, protocol, ref] = await Promise.all([read("README.md"), read("PROTOCOL.md"), read("docs", "REFERENCE.md")]);
+
+  // PROTOCOL.md details 24 of 81 actions. README used to send raw-HTTP callers there "for
+  // the full list" — and the bridge has no enumeration endpoint, so that was a dead end
+  // for the one audience that cannot use browser_action.
+  assert.ok(!/See `PROTOCOL\.md` for the full list/.test(readme),
+    "F75: README must not present PROTOCOL.md as the complete action index");
+  assert.ok(/(\*\*)?not(\*\*)? the action index|does not list all/.test(protocol),
+    "PROTOCOL.md must state its own scope");
+  assert.ok(/browserctl --help/.test(readme.slice(readme.indexOf("raw HTTP"))),
+    "the raw-HTTP section must name a list that is actually complete");
+
+  // REFERENCE listed browser_clear / browser_check / browser_uncheck as MCP tools. They
+  // are protocol actions with no dedicated tool; calling browser_check fails.
+  // Only the TABLE may not list them — prose explaining that they are not tools is the fix,
+  // not a violation of it.
+  const rows = ref.split("\n").filter((l) => /^\|\s*`browser_/.test(l));
+  for (const ghost of ["browser_clear", "browser_check", "browser_uncheck"]) {
+    assert.ok(!rows.some((r) => r.includes("`" + ghost + "`")),
+      `${ghost} is not a registered MCP tool and must not appear as a row in the tool table`);
+  }
+  // ...and the rows that replaced them must be marked, with the marker explained in terms of
+  // how to actually call them. Keyed on the mechanism, not on one phrasing of it.
+  for (const action of ["clear", "check", "uncheck"]) {
+    assert.ok(ref.split("\n").some((l) => new RegExp("^\\|\\s*`" + action + "` ?\u00b9").test(l)),
+      `the ${action} row must be marked as an action with no MCP tool`);
+  }
+  assert.ok(/\u00b9[^\n]*\n?[^\n]*browser_action\(\{\s*action: "check"/.test(ref),
+    "the marker must be explained by showing the browser_action call that reaches those actions");
+
+  // Counts that were measured once and then drifted.
+  assert.ok(!/~24 tools|70\+ tools|67 MCP tools/.test(ref), "stale tool counts must not return");
+});
+
+test("The e2e coverage denominator is derived, not hand-kept (F76)", async () => {
+  const fs = await import("node:fs/promises");
+  const read = (...p) => fs.readFile(join(__dirname, "..", "..", ...p), "utf8");
+  const [run, mcp] = await Promise.all([read("tests", "e2e", "run.mjs"), read("mcp", "index.js")]);
+
+  // A hardcoded ALL_ACTIONS silently stopped counting 19 actions and reported 59/61 against a
+  // surface of 80 — a metric that lies upward is never questioned (I7).
+  assert.ok(!/const ALL_ACTIONS = \[/.test(run),
+    "F76: ALL_ACTIONS must be derived from the registry, not written out as a literal");
+  assert.ok(/function protocolActions\(\)/.test(run), "F76: the derivation must be named and reusable");
+
+  // The derivation is a regex over another file, so it can rot into silence. Re-run it here:
+  // an empty or implausibly small surface means the parse broke, not that the surface shrank.
+  const registered = [...mcp.matchAll(/\btool\(\s*"([a-z_0-9]+)"/g)].map((m) => m[1]);
+  const aliasBlock = mcp.match(/const ACTION_ALIASES\s*=\s*\{([\s\S]*?)\n\};/);
+  const aliases = aliasBlock ? [...aliasBlock[1].matchAll(/^\s*([a-z_0-9]+)\s*:/gm)].map((m) => m[1]) : [];
+  const surface = new Set([...registered, ...aliases]);
+  assert.ok(surface.size > 60, `F76: derivation found only ${surface.size} actions — the parse has broken`);
+  for (const must of ["snapshot", "click", "fill", "paste", "find_text", "get_text", "get_count"]) {
+    assert.ok(surface.has(must), `F76: derivation missed '${must}' — the parse has broken`);
+  }
+
+  // Anything excused from coverage must say why, in the output.
+  const excused = run.match(/const NOT_EXERCISED = \{([\s\S]*?)\n\};/);
+  assert.ok(excused, "F76: excused actions must be declared in one place");
+  for (const line of excused[1].split("\n").filter((l) => l.trim() && !l.trim().startsWith("//"))) {
+    assert.ok(/:\s*"[^"]{10,}"/.test(line), `F76: excused action needs a stated reason -> ${line.trim()}`);
+  }
+});

@@ -766,8 +766,26 @@ async function main() {
         if (args[0]) params.command = args.join(" ");
         break;
 
-      default:
+      // Documented in the README's command catalog, but they had no case here, so the
+      // positional argument fell into the key=value parser below, matched nothing, and the
+      // action was dispatched with empty params: `browserctl find login` returned
+      // "find requires 'query'".
+      case "find":
+      case "find_text":
+        if (args.length) {
+          params.query = args.filter((a) => !a.startsWith("-")).join(" ");
+          const max = rawArgs.indexOf("--max");
+          if (max >= 0 && rawArgs[max + 1]) params.max = parseInt(rawArgs[max + 1], 10);
+        }
+        if (!params.query) {
+          console.error(`${action}: needs a query, e.g. browserctl ${action} "Sign in"`);
+          process.exit(2);
+        }
+        break;
+
+      default: {
         // Parse key=value pairs
+        let mapped = 0;
         for (const arg of args) {
           const eq = arg.indexOf("=");
           if (eq > 0) {
@@ -777,9 +795,24 @@ async function main() {
             else if (v === "false") v = false;
             else if (/^\d+$/.test(v)) v = parseInt(v, 10);
             params[k] = v;
+            mapped++;
           }
         }
+        // A command with no case here and positional arguments that are not key=value
+        // cannot be formed, and dispatching it anyway produced a confusing error from the
+        // page ("X requires 'query'") for what is really a CLI gap. Say so instead.
+        const positional = args.filter((a) => !a.startsWith("-") && a.indexOf("=") < 0);
+        if (positional.length && mapped === 0) {
+          console.error(
+            `${action}: this command takes no positional arguments in the CLI, so ` +
+            `${JSON.stringify(positional[0])} was ignored.\n` +
+            `Pass them explicitly as key=value (e.g. ${action} query="${positional[0]}"), ` +
+            `or run 'browserctl --help' for the commands that do take arguments.`
+          );
+          process.exit(2);
+        }
         break;
+      }
     }
   }
 

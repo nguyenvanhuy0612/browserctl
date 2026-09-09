@@ -18,3 +18,6 @@ test/benchmark/runs/
 .DS_Store
 .idea/
 .vscode/
+
+# third-party improvement plans: internal input, kept out of the public repo
+improvements/

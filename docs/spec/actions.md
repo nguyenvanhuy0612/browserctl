@@ -10,11 +10,11 @@ An action is `click`, `type`, `fill`, `paste`, `press_key`, `hover`, `scroll`, `
 This is the most repeated defect in the codebase. Four instances, all the same shape: dispatch the
 real event, then call the programmatic equivalent as well.
 
-| Site | What ran twice | Consequence |
+| Action | What ran twice | Consequence |
 |---|---|---|
-| `click` | a dispatched `click` event **and** `el.click()` | every page handler fired twice — double submit, double send, double order [F1] |
+| `click` | a dispatched `click` event **and** `el.click()` | every page handler fires twice — double submit, double send, double order [F1] |
 | `type(submit)` | Enter keydown **and** `requestSubmit()` | double form submit |
-| `paste` | `execCommand("insertText")` **and** a `ClipboardEvent` | an email body landed in the composer twice [F70] |
+| `paste` | `execCommand("insertText")` **and** a `ClipboardEvent` | the text is inserted twice in any editor that handles the paste itself [F70] |
 | `press_key(Enter)` | Enter keydown **and** `requestSubmit()` | double submit on any form that handles Enter itself [F71] |
 
 ### How "the first one worked" is decided

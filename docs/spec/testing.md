@@ -7,11 +7,11 @@ for each names that thing, so a suite is never deleted for being quiet.
 
 | Suite | Needs Chrome | Catches |
 |---|---|---|
-| `npm test` (83) | no | contracts, descriptions, cross-file invariants, the pure census helpers |
-| `tests/e2e/run.mjs` (70) | yes | the real stack against a served page; 59 of 61 commands |
-| `tests/e2e/run_multiframe.mjs` (19) | yes | **anything that only breaks when the page has an iframe** |
-| `tests/e2e/run_editors.mjs` (12) | yes | insertion and activation happening **exactly once** |
-| `tests/e2e/run_labels.mjs` (9) | yes | the four readers disagreeing about an element's name |
+| `npm test` | no | contracts, descriptions, cross-file invariants, the pure census helpers |
+| `tests/e2e/run.mjs` | yes | the real stack against a served page; ends with a coverage line against the protocol surface, derived from the MCP registry |
+| `tests/e2e/run_multiframe.mjs` | yes | **anything that only breaks when the page has an iframe** |
+| `tests/e2e/run_editors.mjs` | yes | insertion and activation happening **exactly once** |
+| `tests/e2e/run_labels.mjs` | yes | the four readers disagreeing about an element's name |
 | `tests/e2e/label_vs_chrome.mjs <url>` | yes | the census disagreeing with **Chrome** on any live page |
 | `tests/e2e/audit_tools.mjs <url>` | yes | any read-only action failing, on a site you care about |
 | `tests/e2e/coverage_check.mjs <url>` | yes | something in `snapshot --all` being unreachable by `find`/`get_text` |
@@ -19,7 +19,7 @@ for each names that thing, so a suite is never deleted for being quiet.
 ## Why each of the last five exists
 
 **`run_multiframe.mjs`** — every fixture was single-frame, and that blind spot let the compact view be
-rebuilt from scratch on *every real site* while all 81 unit tests stayed green [F41]. Its fixture
+rebuilt from scratch on *every real site* while every unit test stayed green [F41]. Its fixture
 carries one instance of each shape that produced a round-2 defect: three landmarks, a run of five
 identical buttons, two anchors sharing a destination, a 200+ character label, a side-anchored
 non-blocking dialog, a panel inside a `width:0;height:0` wrapper, and a `menuitemradio` menu.

@@ -24,7 +24,7 @@ Adjacent documents, deliberately not specs:
 - **`../../CHANGELOG.md`** — what changed per release.
 - **`../history/`** — the investigation logs the specs were extracted from. Every rule below was learnt
   by something breaking; when a rule looks arbitrary, the log is where the evidence is. Findings are
-  numbered F1-F72 and referenced from the specs as `[F61]`.
+  numbered `F1` upward and referenced from the specs as `[F61]`.
 
 ## How a rule gets here
 

@@ -1,6 +1,7 @@
 # browserctl v2: AI-Agent Intelligence & Token Optimization
 
-Tracking document and execution plan for upgrading `browserctl` into an AI-agent browser intelligence layer.
+Captured 2026-09-08. The original tracking document and execution plan for upgrading `browserctl`
+into an AI-agent browser intelligence layer. Superseded — see the follow-up below.
 
 > **Follow-up:** the Phase 1-4 items below were implemented, but blind-agent probing afterwards found
 > 25 defects in that work, several of which silently reported success for actions that never happened.
@@ -107,7 +108,7 @@ All improvements are strictly **generic** across modern web applications and do 
 
 ### 3.2. Structured Action Result Schema
 
-As implemented (see `docs/fix-plan-v2-verified-2026-09-08.md` F13/F14 — the shape below was
+As implemented (see `fix-plan-v2-verified-2026-09-08.md` F13/F14 — the shape below was
 aspirational in the first draft of this document and did not exist in code):
 
 ```json

@@ -296,7 +296,18 @@ reads the indexed elements, then `browser_click`.
 
 ## Using it from any other agent (raw HTTP)
 
-Send commands as JSON over HTTP. See `PROTOCOL.md` for the full list.
+Send commands as JSON over HTTP.
+
+**Finding the action you need.** `PROTOCOL.md` gives the wire shape and documents the core actions in
+detail, but it does not list all 81 — so do not treat it as the index. Two complete sources:
+
+- `browserctl --help` lists every command, and each maps to an action of the same name
+  (`get text` → `get_property`, `tab list` → `tab`).
+- From an MCP client, `browser_action` with no arguments returns the full catalogue.
+
+The bridge itself has no enumeration endpoint: `{"action":"action"}` and
+`{"action":"list_available_tools"}` are refused, because those are client-layer names, not page
+actions. If you are on raw HTTP with no shell and no MCP client, the two lists above are the reference.
 
 ```bash
 # Take a snapshot of the current page (interactive elements + text)
@@ -320,7 +331,7 @@ issue `click` / `type` / `scroll` / `navigate` -> `snapshot` again.
 
 ## Status
 
-Working, **v0.6.1**, 80 MCP tools over 81 bridge actions. Control parity with the official
+Working, **v0.6.2**, 80 MCP tools over 81 protocol actions. Control parity with the official
 "Claude in Chrome" surface (open): DOM-index + accessibility-tree (`read_page`) reads with
 stable refs, ref/coordinate interaction, background-tab control, screenshots (incl.
 background tabs), console/network/HAR capture, record/replay, and tab grouping. Reads and
@@ -333,9 +344,10 @@ booking.com and news.ycombinator.com, against 71-89% before. Actions report whet
 control's own state actually moved, not just that the DOM churned. Reads say what they left
 out, and name the kind of thing it was.
 
-Tests: 83/83 unit, 70/70 e2e, 19/19 multi-frame e2e, 12/12 editor insertion, 9/9 label
-parity, 59 of 61 commands exercised, 0 unexpected failures on a whole-surface audit
-against live sites.
+Tests: all suites green — unit, e2e, multi-frame e2e, editor insertion, label parity, and a
+whole-surface audit that calls every read-only command against a live site. `npm test` and the
+harnesses under `tests/e2e/` print the current counts; `docs/spec/testing.md` says what each
+suite exists to catch.
 
 Docs:
 
@@ -347,18 +359,24 @@ Docs:
   and being ignored.
 - **`docs/REFERENCE.md`** — the operator's guide: install, control model, every tool
   grouped with its params, recipes, failure modes, the foreground-input matrix. Start here.
-- `PROTOCOL.md` — wire-level command spec and per-version changelog.
+- `PROTOCOL.md` — the wire format, and the core actions in detail. It documents 24 of the 81
+  actions; `browserctl --help` and `browser_action` (called bare) are the complete lists.
 - `docs/prior-art.md` — how this compares to similar projects, and the positioning
   decision (general-purpose browser control, explicitly not test automation).
 - `docs/backlog-capability-gaps.md` — the five tracked gaps, with verified CDP surfaces.
-- `docs/debugger-policy.md` — which commands need `chrome.debugger` (45 of 65 never do),
+- `docs/debugger-policy.md` — which commands need `chrome.debugger`, per action, with a script
+  to re-derive the table when the command surface changes,
   what a per-site denial would cost, and the single chokepoint to enforce it at.
 - **`docs/spec/`** — the contract: what an element is *called* and why, what a census contains
   and admits to omitting, what "the action worked" means, the error taxonomy, the cross-file
   invariants, and what each test suite exists to catch. Start at `docs/spec/README.md`.
-- `docs/history/` — the investigation logs the specs were extracted from. 72 findings from
-  driving browserctl with fresh-context agents on live sites, each with its repro. Read it
-  when a rule looks arbitrary; the evidence is there.
+- `docs/history/` — the investigation logs the specs were extracted from: findings from driving
+  browserctl with fresh-context agents on live sites, each with its repro and how it was
+  verified. Read it when a rule looks arbitrary; the evidence is there.
+- `docs/backlog-chrome-devtools-parity.md` — deferred work to fold the useful parts of the
+  `chrome-devtools` MCP into browserctl.
+  The v2 work started from two third-party plans; what was adopted from them is §4 of the
+  fix-plan and what was rejected is §8, both in `docs/history/`.
 
 ## Testing
 

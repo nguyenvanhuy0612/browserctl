@@ -2408,6 +2408,16 @@
       }
     }
 
+    // A native <dialog> opened with showModal() closes on Escape only for a TRUSTED key
+    // event — the browser handles it, not the page. A dispatched KeyboardEvent never
+    // closes one, so the most standard modal in HTML fell through to the error below on
+    // every page that used one. close() is the element's own documented way out.
+    if (active instanceof HTMLDialogElement && active.open) {
+      active.close();
+      const ok = await confirm("dialog_close");
+      if (ok) return ok;
+    }
+
     const target = document.activeElement || active || document.body;
     const evOpts = { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true, cancelable: true };
     for (const node of [target, window]) {

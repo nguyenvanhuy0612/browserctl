@@ -73,8 +73,19 @@ Two harnesses lied, in opposite directions, and both would have wasted a day:
 - `a11y_snapshot`'s coverage counted every named AX node, including landmarks and `StaticText` the
   census omits by design, and reported **53%** on a page with no gap.
 
-A metric that cries wolf gets ignored, which is worse than no metric. Scope the denominator to what the
-thing under test is actually for, and say in the response what was counted.
+A third lied **upward**, which is the dangerous direction. `run.mjs` reported *"59 of 61 commands
+exercised"* against a hand-written `ALL_ACTIONS` list. The protocol surface had grown to 80; nineteen
+actions — `fill`, `paste`, `find_text` and the whole `get_*` family [F76] — were not in the denominator at
+all, so they could never be reported as missing. The honest figure was 63 exercised, 3 excused, 14
+missed. The list is now derived from the MCP registry, and the excused ones carry their reason in the
+output.
+
+A metric that cries wolf gets ignored; a metric that flatters is never questioned at all. So:
+
+- **Derive the denominator, never hand-maintain it.** A hand-kept list stops counting silently, and
+  nothing about the number looks wrong when it does.
+- **Scope it to what the thing under test is for**, and say in the response what was counted, what
+  was deliberately excluded, and why.
 
 ## I8 — A harness cleans up after itself
 

@@ -1,6 +1,6 @@
 # browserctl — complete reference
 
-Version 0.6.1. The extension, bridge, and MCP server are versioned together.
+Version 0.6.2. The extension, bridge, and MCP server are versioned together.
 
 This is the **operator's guide**: how to install it, what each tool is for, recipes, and the failure
 modes worth recognising. Three neighbours, so you land in the right one:
@@ -17,7 +17,7 @@ modes worth recognising. Three neighbours, so you land in the right one:
 
 ## What it is
 
-**browserctl** (v0.6.1, 80 tools) gives an AI agent DOM-level control of a *real*, already-logged-in Chrome
+**browserctl** (v0.6.2, 80 tools) gives an AI agent DOM-level control of a *real*, already-logged-in Chrome
 or Edge, through a neutral HTTP/WebSocket API and an MCP server. It drives one pinned tab
 **in the background**, without stealing focus and without a debugger banner on the common
 path, so you can keep working in your own tab while the agent works in its own.
@@ -115,7 +115,7 @@ Add to your `claude_desktop_config.json`, `.mcp.json`, or Antigravity MCP settin
       "args": ["-y", "browserctl-mcp"],
       "env": {
         "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765",
-        "BROWSERCTL_MCP_PROFILE": "core" // 'core' (~24 tools) or 'all' (all 70+ tools)
+        "BROWSERCTL_MCP_PROFILE": "core" // 'core' (35 tools) or 'all' (all 80)
       }
     }
   }
@@ -240,9 +240,21 @@ in Chrome's accessibility tree.
 
 ## Tools
 
-67 MCP tools over 65 bridge actions — `browser_open_and_read` is a composite
-(`new_tab`/`navigate` → wait → `read_pdf` probe → read) with no bridge action of its own.
-Every tab-scoped tool also accepts `tabId`.
+The names below are MCP tool names. Three kinds of row do not map one-to-one onto a protocol
+action, so read them before assuming a name is callable as-is:
+
+- **Composites have no action of their own.** `browser_open_and_read` is `new_tab`/`navigate`
+  → wait → `read_pdf` probe → read.
+- **Some tool names are aliases for one action.** `browser_get_text` is `get_property` with
+  `{property: "text"}`; likewise `get_value`, `get_html`, `get_box`, `get_attribute` and
+  `get_count`. The alias is resolved at the extension's dispatch entry, so either name works
+  everywhere — MCP, CLI and raw HTTP.
+- **Rows marked ¹ are protocol actions with no MCP tool.** Reach them with
+  `browser_action({action: "check", params: {…}})`, or from the CLI as `browserctl check <target>`.
+  There is no `browser_check` tool to call.
+
+For the authoritative list of everything callable, run `browserctl --help` or call
+`browser_action` with no arguments. Every tab-scoped tool also accepts `tabId`.
 
 ### Read the page
 
@@ -269,9 +281,9 @@ Every tab-scoped tool also accepts `tabId`.
 | `browser_fill` | Fill input or rich-text editor (clears & sets instantly) | `ref`, `selector`, `text`, `waitFor`, `submit` |
 | `browser_paste` | Paste large text/Markdown via Clipboard events | `ref`, `selector`, `text`, `waitFor`, `submit` |
 | `browser_type` | Focus element and set text (React/Vue `v-model` compatible) | `ref`, `selector`, `text`, `waitFor`, `submit` |
-| `browser_clear` | Clear input/textarea element | `ref`, `selector` |
-| `browser_check` | Check checkbox or radio button | `ref`, `selector`, `text` |
-| `browser_uncheck` | Uncheck checkbox | `ref`, `selector`, `text` |
+| `clear` ¹ | Clear input/textarea element | `ref`, `selector` |
+| `check` ¹ | Check checkbox or radio button | `ref`, `selector`, `text` |
+| `uncheck` ¹ | Uncheck checkbox | `ref`, `selector`, `text` |
 | `browser_click_selector` | Click by CSS selector | `selector` |
 | `browser_fill_selector` | Fill by CSS selector | `selector`, `value` |
 | `browser_hover` | Hover element | `ref`, `selector`, `text` |
@@ -498,10 +510,11 @@ on its own to work around that.
 Attaching `chrome.debugger` makes Chrome show `"browserctl" started debugging this browser`.
 It **cannot be suppressed** — that is a Chrome security guarantee, not a gap here.
 
-What matters in practice is that most of the tool never attaches: **45 of 65 commands never
-touch the debugger**, and only two acquire a session on their own (`browser_cdp_attach`, which
-is explicit intent, and `browser_spoof_visibility`) plus the background-tab branch of
-`browser_screenshot`. A screenshot of an *active* tab uses `chrome.tabs.captureVisibleTab` and
+What matters in practice is that most commands never touch the debugger, and only two acquire a
+session on their own (`browser_cdp_attach`, which is explicit intent, and
+`browser_spoof_visibility`) plus the background-tab branch of `browser_screenshot`.
+`docs/debugger-policy.md` holds the per-action table, and a script to re-derive it when the
+command surface changes. A screenshot of an *active* tab uses `chrome.tabs.captureVisibleTab` and
 raises nothing.
 
 The banner therefore appears when you opt into CDP — but note it then **stays** until
@@ -552,8 +565,11 @@ node tests/e2e/coverage_check.mjs https://news.ycombinator.com hn  # nothing unr
 ```
 
 The e2e runner serves its own page (plus a second origin for a genuinely cross-origin
-iframe), creates its own tabs, exercises 59 of 61 commands, and closes what it opened.
-`reload_extension` is never exercised — it drops the connection mid-run by design.
+iframe), creates its own tabs, and closes what it opened. It ends with a coverage line —
+`exercised / excused / missed` against the protocol surface, which it derives from the MCP
+registry rather than a hand-kept list. `reload_extension`, `exec_system_cmd` and `action` are
+excused there, with the reason printed. A "missed" action may still be covered by
+`run_editors.mjs` or `run_labels.mjs`; the line only speaks for this suite.
 
 **`run_multiframe.mjs` exists because every other fixture was single-frame**, and that blind spot let a
 severe regression ship invisibly: on any page with an iframe — i.e. every real site — the frame merge

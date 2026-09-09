@@ -24,7 +24,17 @@ const EXPECT = ["Only me", "Public", "Accept terms", "Subscribe to updates", "Qu
 const main = async () => {
   const opened = (await call("new_tab", { url: `http://127.0.0.1:${port}/` })).result;
   const ownTabId = opened && opened.id;
+  // Wait for the fixture to actually be there, not for a fixed number of milliseconds.
+  // A fixed 1200ms passed alone and failed when five suites ran back to back — every one
+  // of the nine labels reported missing, which reads as a total regression rather than a
+  // page that had not painted. A suite that fails spuriously teaches people to ignore it.
   await call("wait_settle", { timeoutMs: 1200 });
+  for (let i = 0; i < 25; i++) {
+    const probe = await call("get_property", { property: "count", selector: "#plain, #smart, input[type=radio]" });
+    if (probe.ok && probe.result && probe.result.value > 0) break;
+    if (i === 24) { console.log("SKIP: fixture never rendered"); srv.close(); process.exit(0); }
+    await new Promise((r) => setTimeout(r, 200));
+  }
 
   const snap = (await call("snapshot", { scope: "all", compact: true, maxText: 0 })).result || {};
   const cv = snap.compactView || "";

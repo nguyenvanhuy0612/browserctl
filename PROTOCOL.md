@@ -1,6 +1,13 @@
 # Command protocol
 
-Current version: **0.6.1** (extension, bridge, and MCP server are versioned together).
+Current version: **0.6.2** (extension, bridge, and MCP server are versioned together).
+
+**Scope of this document.** It specifies the wire format and the 24 actions worth describing in
+detail — the census, the actions, and the shapes their responses take. It is **not** the action index:
+there are 81. For the complete list use `browserctl --help`, or `browser_action` called with no
+arguments from an MCP client. Every action not detailed here follows the same envelope:
+`POST /command  {"action": "<name>", "params": {…}}`, replying `{ok, result}` or
+`{ok: false, error, code?, diagnostics?, recoveryHint?}`.
 
 Agents send commands to the bridge:
 
@@ -360,7 +367,7 @@ tool. Add a redaction pass in `util.js` if pointing it at a shared/untrusted con
 Direction: match the official extension's control model, openly (no blocklist / org-lock /
 gating), agent stays external. Principle: **DOM-first, CDP-fallback** — structured work via
 the content script (no banner), CDP only for pixel input, background-tab capture, protocol
-capture, and CSP-bypass eval. See `docs/2026-06-30-claude-for-chrome-open-design.md`.
+capture, and CSP-bypass eval. See `docs/history/claude-for-chrome-open-design-2026-06-30.md`.
 
 ### Background tab control
 - Target is **pinned on first touch** and held across user tab switches (see the target-tab

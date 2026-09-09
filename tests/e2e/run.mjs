@@ -33,17 +33,29 @@ const INNER = `<!doctype html><meta charset=utf-8><title>inner</title>
   <input id=iinput placeholder="Iframe Input">`;
 
 // ---- full command surface, for a coverage report at the end ----
-const ALL_ACTIONS = [
-  "snapshot","read_page","find","navigate","click","type","scroll","hover","select_option",
-  "press_key","wait_settle","wait_for","get_page_content","click_selector","fill_selector",
-  "storage_get","storage_set","storage_remove","storage_clear","list_tabs","new_tab","group_tab",
-  "ungroup_tab","switch_tab","current_tab","close_tab","go_back","go_forward","reload","list_windows",
-  "focus_window","cdp_attach","cdp_detach","get_console_logs","get_network_requests","export_har",
-  "eval_js","screenshot","capture_screenshot","a11y_snapshot","element_screenshot","print_pdf","audit",
-  "get_cookies","set_cookie","delete_cookies","coordinate_click","coordinate_drag","insert_text",
-  "get_response_body","net_start","net_stop","net_get","net_clear","wait_network_idle",
-  "record_start","record_stop","record_get","replay","reload_extension",
-  "cdp_send",];
+// Derived from the MCP registry, never hand-maintained: a hardcoded list silently
+// stopped counting 19 actions (fill, paste, find_text, the whole get_* family) and
+// reported 59/61 against a surface that was really 80. The denominator is the thing
+// that rots, so it is computed. `npm test` fails if this parse stops finding tools.
+function protocolActions() {
+  const src = readFileSync(new URL("../../mcp/index.js", import.meta.url), "utf8");
+  const registered = [...src.matchAll(/\btool\(\s*"([a-z_0-9]+)"/g)].map((m) => m[1]);
+  const aliasBlock = src.match(/const ACTION_ALIASES\s*=\s*\{([\s\S]*?)\n\};/);
+  const aliases = aliasBlock ? [...aliasBlock[1].matchAll(/^\s*([a-z_0-9]+)\s*:/gm)].map((m) => m[1]) : [];
+  return [...new Set([...registered, ...aliases])].sort();
+}
+
+// Deliberately never exercised here, with the reason. Anything NOT listed and NOT called
+// shows up as a coverage miss, which is the point.
+const NOT_EXERCISED = {
+  reload_extension: "drops the connection mid-run by design",
+  exec_system_cmd: "runs a host command; out of scope for an unattended suite",
+  action: "the escape hatch; every action it can reach is counted on its own",
+  focus_window: "steals OS focus; only runs under E2E_FOREGROUND=1",
+  open_and_read: "an MCP-layer composite (new_tab -> wait -> read_pdf probe -> read); it has no bridge action, so a bridge-level suite cannot reach it",
+};
+
+const ALL_ACTIONS = protocolActions();
 
 const used = new Set();
 async function cmd(action, params = {}) {
@@ -208,6 +220,36 @@ async function main() {
       const v = await cmd("eval_js", { expression: "document.getElementById('controlled').value" });
       assert(v.value === "css2", `fill_selector value=${JSON.stringify(v.value)}`);
     });
+    await test("fill by ref", async () => {
+      const ref = (await cmd("find", { query: "Controlled input" })).matches[0]?.ref;
+      assert(ref, "could not find the controlled input");
+      await cmd("fill", { ref, text: "filled" });
+      const v = await cmd("eval_js", { expression: "document.getElementById('controlled').value" });
+      assert(v.value === "filled", `fill value=${JSON.stringify(v.value)}`);
+    });
+    // A native <dialog> is the standard modal, and it is the case dismiss used to fail:
+    // showModal() closes on Escape only for a TRUSTED event, so the dispatched one never
+    // worked. Leave nothing open — a modal blocks input to the page behind it.
+    const openDialog = () => cmd("eval_js", { expression:
+      "(()=>{let d=document.getElementById('e2edlg');if(!d){d=document.createElement('dialog');" +
+      "d.id='e2edlg';d.textContent='e2e modal';document.body.appendChild(d);}" +
+      "if(!d.open)d.showModal();return d.open;})()" });
+    const dialogOpen = async () =>
+      (await cmd("eval_js", { expression: "!!(document.getElementById('e2edlg')||{}).open" })).value;
+    const closeDialog = () => cmd("eval_js", { expression:
+      "(()=>{const d=document.getElementById('e2edlg');if(d&&d.open)d.close();return true;})()" });
+
+    for (const verb of ["dismiss", "dismiss_modal"]) {
+      await test(`${verb} closes a native <dialog>`, async () => {
+        try {
+          assert((await openDialog()).value === true, "fixture dialog did not open");
+          await cmd(verb, {});
+          assert((await dialogOpen()) === false, `dialog still open after ${verb}`);
+        } finally {
+          await closeDialog();
+        }
+      });
+    }
     await test("select_option by value", async () => {
       const ref = (await cmd("find", { query: "Banana" })).matches[0]?.ref || (await cmd("snapshot", {})).elements.find((e) => e.tag === "select")?.ref;
       await cmd("select_option", { ref, value: "b" });
@@ -491,9 +533,11 @@ async function main() {
   console.log(`\n==== ${passed}/${results.length} checks passed ====`);
   if (failed.length) { console.log("FAILURES:"); for (const f of failed) console.log(`  - ${f.name}: ${f.err}`); }
 
-  const untested = ALL_ACTIONS.filter((a) => !used.has(a));
-  console.log(`\nCommand coverage: ${ALL_ACTIONS.length - untested.length}/${ALL_ACTIONS.length} exercised`);
-  if (untested.length) console.log("NOT exercised (needs visual coords / dev-only / destructive): " + untested.join(", "));
+  const untested = ALL_ACTIONS.filter((a) => !used.has(a) && !NOT_EXERCISED[a]);
+  const excused = ALL_ACTIONS.filter((a) => NOT_EXERCISED[a]);
+  console.log(`\nCommand coverage: ${ALL_ACTIONS.length - untested.length - excused.length}/${ALL_ACTIONS.length} exercised, ${excused.length} excused, ${untested.length} missed`);
+  if (untested.length) console.log("not exercised BY THIS SUITE (some are covered by run_editors/run_labels): " + untested.join(", "));
+  for (const a of excused) console.log(`  excused  ${a} — ${NOT_EXERCISED[a]}`);
 
   process.exit(failed.length ? 1 : 0);
 }

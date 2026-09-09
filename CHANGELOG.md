@@ -1,5 +1,78 @@
 # Changelog
 
+## 0.6.2 — the docs, and what auditing them turned up
+
+No new capability. Two user-facing bugs, one silent metric, and a documentation pass that made the
+project's own numbers checkable.
+
+- **`dismiss` could not close a native `<dialog>`.** A dialog opened with `showModal()` closes on
+  Escape only for a **trusted** key event — the browser handles that, not the page — so the
+  dispatched `KeyboardEvent` never closed one. `dismiss` tried its close-button selectors, then
+  Escape, then threw `MODAL_NOT_DISMISSED`. The most standard modal in HTML was the one case it
+  always failed. It never reported false success, which is why it went unnoticed for so long: the
+  0.6.0 verification rewrite already made `dismiss` confirm the modal is gone before claiming
+  anything. It now calls `close()` on the element before falling back to Escape. [F77]
+
+- **`browserctl find <query>` silently did nothing.** The CLI maps positional arguments per command
+  and `find` / `find_text` had no case, so the query fell on the floor and the command ran with
+  empty params. The missing case is fixed, but the real fix is the new `default:` branch: any
+  command that forgets its positional mapping now exits with an error instead of running empty.
+  [F74]
+
+- **`--help` carried none of the guidance the MCP descriptions carry.** An agent driving the CLI
+  got no warning that `browser_stop` is not for tidying up, which is the one thing that breaks the
+  premise of the project. Both surfaces now say the same things. [F73]
+
+### The coverage report had been flattering for the whole v2 effort
+
+`run.mjs` ended with **"Command coverage: 59 of 61 exercised"**. `ALL_ACTIONS` was a hand-written
+literal; the protocol surface was 80 by then. Nineteen actions — `fill`, `paste`, `find_text` and
+the whole `get_*` family — were outside the denominator entirely, so nothing they did or stopped
+doing could ever be reported. The list is now derived from the MCP registry at run time, excused
+actions print their reason, and a unit test fails if the derivation returns an implausible surface.
+
+This is the invariant on metrics (I7) for the third time, and the first time in the dangerous
+direction. The two cases already recorded there lied *downward* and cost a day hunting defects that
+did not exist. This one flattered, and a flattering metric is never questioned. [F76]
+
+Making the denominator honest exposed four actions no suite had ever called: `fill`, `dismiss` /
+`dismiss_modal`, `focus_window`, `open_and_read`. Tests were written for them, which is how the
+`dismiss` bug above was found. `open_and_read` turns out to be unreachable from a bridge-level
+suite at all — it is an MCP-layer composite with no protocol action — and `focus_window` steals OS
+focus; both are now excused with the reason printed rather than silently missing.
+
+### Documentation
+
+Docs claimed a completeness they did not have, and the numbers in them had drifted [F75]. The
+README pointed raw-HTTP callers at `PROTOCOL.md` "for the full list" — it details 24 of 81 actions,
+and the bridge has no enumeration endpoint, so that was a dead end for the one audience that cannot
+call `browser_action`. `REFERENCE.md` listed `browser_clear` / `browser_check` / `browser_uncheck`
+as tools; they are protocol actions with no dedicated tool, and calling them fails.
+
+The rule settled on: **a raw count in prose is deleted, not dated, unless the reader needs it to
+make a decision.** `core` (35) vs `all` (80) stays, because that number picks a profile. Everything
+else now points at the source that is always right — `browserctl --help`, `browser_action` called
+bare, or `debugger-policy.md`'s per-action table.
+
+Also: every doc now carries an H1, a purpose line, and a date where it is a snapshot; the design
+doc moved into `docs/history/` where the project's own taxonomy puts it; and a finding cited by a
+test is now required to have an entry in the history log, which F73-F77 did not.
+
+Two spec defects of the same shape, one found by a reader: a table column headed `Site` that
+contained actions, and consequence cells that stated a general failure for three rows and a
+one-site anecdote for the fourth (`paste` "an email body landed in the composer twice" — the bug is
+in any editor that handles the paste itself, not in email).
+
+### Tests
+
+`run_labels.mjs` waited a fixed 1200 ms for its fixture and reported "9/9 labels are missing" when
+run back-to-back after other suites — a total failure that was really a page that had not rendered.
+A suite that fails at random teaches you to re-run it, which is how a real regression gets waved
+through. Replaced with a readiness poll that SKIPs explicitly if the fixture never appears.
+
+Suites: unit 89 · e2e 73 (66/80 commands exercised, 5 excused) · multi-frame 19 · editors 12 ·
+labels 9.
+
 ## 0.6.1 — exactly once
 
 Three defects of one shape, found by drafting a real email: **two mechanisms that each do the whole
