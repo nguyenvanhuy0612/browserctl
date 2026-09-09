@@ -1,6 +1,6 @@
 # browserctl — complete reference
 
-Version 0.6.0. The extension, bridge, and MCP server are versioned
+Version 0.6.1. The extension, bridge, and MCP server are versioned
 together; `PROTOCOL.md` is the wire-level spec and this document is the operator's guide.
 
 > [!WARNING]
@@ -9,7 +9,7 @@ together; `PROTOCOL.md` is the wire-level spec and this document is the operator
 
 ## What it is
 
-**browserctl** (v0.6.0, 80 tools) gives an AI agent DOM-level control of a *real*, already-logged-in Chrome
+**browserctl** (v0.6.1, 80 tools) gives an AI agent DOM-level control of a *real*, already-logged-in Chrome
 or Edge, through a neutral HTTP/WebSocket API and an MCP server. It drives one pinned tab
 **in the background**, without stealing focus and without a debugger banner on the common
 path, so you can keep working in your own tab while the agent works in its own.
@@ -533,6 +533,8 @@ node tests/e2e/run.mjs                      # 70 checks; never steals focus
 E2E_FOREGROUND=1 node tests/e2e/run.mjs     # + the 2 synthetic-input tests (steals focus)
 node tests/e2e/run_multiframe.mjs           # 19 checks on a page with a real iframe
 node tests/e2e/run_labels.mjs               # 9 label-resolution shapes, all four readers agree
+node tests/e2e/run_editors.mjs              # 12 checks: text goes in EXACTLY once, and a form
+                                            # submits exactly once, across editor architectures
 
 # against ANY live site — these need no fixture and are the ones worth running after
 # touching the census, the dispatch table, or a tool description:
@@ -549,6 +551,13 @@ iframe), creates its own tabs, exercises 59 of 61 commands, and closes what it o
 severe regression ship invisibly: on any page with an iframe — i.e. every real site — the frame merge
 rebuilt the compact view from scratch and discarded landmark grouping, folding and every notice. All 81
 unit tests stayed green throughout.
+
+**`run_editors.mjs` guards the "exactly once" family.** Insertion and activation are each done by two
+mechanisms that both work — a ClipboardEvent and `execCommand`, an Enter key and `requestSubmit()` —
+and running both is the single most repeated defect in this codebase (F1, F70, F71). The fixture varies
+the two things that actually change the outcome: whether the editor handles the event, and whether it
+commits synchronously. Facebook's Lexical composer is the only case that catches a fix verified against
+Gmail alone.
 
 **`label_vs_chrome.mjs` is the oracle worth knowing about.** Chrome computes an accessible name for
 every control to spec and exposes it through the accessibility tree, so on any live page that is ground

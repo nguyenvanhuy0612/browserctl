@@ -22,7 +22,8 @@ const EXPECT = ["Only me", "Public", "Accept terms", "Subscribe to updates", "Qu
                 "Shipping country", "Dark mode", "Delete item", "Search products"];
 
 const main = async () => {
-  await call("new_tab", { url: `http://127.0.0.1:${port}/` });
+  const opened = (await call("new_tab", { url: `http://127.0.0.1:${port}/` })).result;
+  const ownTabId = opened && opened.id;
   await call("wait_settle", { timeoutMs: 1200 });
 
   const snap = (await call("snapshot", { scope: "all", compact: true, maxText: 0 })).result || {};
@@ -44,6 +45,7 @@ const main = async () => {
   }
   console.log("-".repeat(64));
   console.log(fails === 0 ? "all label paths agree" : `${fails}/${EXPECT.length} labels are missing from at least one tool`);
+  if (ownTabId != null) await call("close_tab", { id: ownTabId });
   srv.close();
   process.exit(fails === 0 ? 0 : 1);
 };

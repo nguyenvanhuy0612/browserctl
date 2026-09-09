@@ -15,7 +15,8 @@ const call = (action, params = {}) => new Promise((resolve) => {
 
 const main = async () => {
   // Own tab, not the pinned one (see audit_tools.mjs).
-  await call("new_tab", { url: URL_ });
+  const opened = (await call("new_tab", { url: URL_ })).result;
+  const ownTabId = opened && opened.id;
   await call("wait_settle", { timeoutMs: 3000 });
 
   const all = (await call("snapshot", { scope: "all", compact: false, maxText: 0 })).result || {};
@@ -53,5 +54,6 @@ const main = async () => {
   console.log(`  viewport discloses withholding: notice=${notice} namesKinds=${namesKinds}`);
   if (misses.length) { console.log("  UNREACHABLE BY find():"); for (const m of misses.slice(0, 8)) console.log(`    <${m.tag}> "${m.text}" (nearest offered: ${m.nearest})`); }
   if (unreadable.length) { console.log("  UNREADABLE BY get_text:"); for (const u of unreadable.slice(0, 8)) console.log(`    @${u.ref}: ${u.err}`); }
+  if (ownTabId != null) await call("close_tab", { id: ownTabId });
 };
 main();

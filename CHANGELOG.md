@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.6.1 — exactly once
+
+Three defects of one shape, found by drafting a real email: **two mechanisms that each do the whole
+job, run one after the other.** Same shape as 0.6.0's double click (F1).
+
+- **`paste` inserted the text twice.** `execCommand("insertText")` ran, succeeded, and the
+  ClipboardEvent was dispatched anyway. Now exactly one path runs — the ClipboardEvent first for paste
+  semantics, `insertText` as the fallback.
+
+  The first fix was wrong on half the editors, and only a second editor revealed it. Success was
+  measured by reading the content back synchronously; Facebook's Lexical composer preventDefaults the
+  paste and commits **asynchronously**, so the read-back saw nothing, the fallback fired, and Lexical
+  then committed too. Gmail commits synchronously and looked fine. The signal is now `preventDefault`
+  — `dispatchEvent` returns false when the editor claims the event — which is synchronous and standard
+  regardless of when the editor commits.
+
+- **`press_key(Enter)` submitted a form twice.** It dispatched keydown and then called
+  `requestSubmit()` unconditionally. That call is a fallback for forms that only submit via their
+  button, never an addition to the Enter key — `type(submit: true)` already guarded this, `press_key`
+  did not. A page that submits from its own keydown handler submitted twice: a double order, a double
+  send. The response now reports `submittedByPage` and `keydownPrevented`.
+
+- **The paste fallback was gated on the box looking empty.** An insertion path that reported success
+  while leaving the previous content in place skipped the fallback, and `paste` returned ok having
+  replaced nothing. Now gated on whether the insertion actually happened. `type` and `paste` also
+  report `effect.textNow` for a contenteditable — the symmetric read-back to `valueNow`.
+
+Also: `browser_get_count`'s description now states that a count of 0 is an answer rather than a
+failure, that malformed CSS is a separate `INVALID_SELECTOR` error, and that ARIA roles seen in a
+snapshot are not CSS tags.
+
+### New suite — `tests/e2e/run_editors.mjs`, 12 checks
+
+Insertion and activation must each happen exactly once, across editor architectures that differ in the
+two ways that change the outcome: whether the editor handles the event, and whether it commits
+synchronously.
+
+```
+paste / type  ×  plain contenteditable · preventDefault+async · preventDefault+sync · textarea · input
+press_key     ×  form that handles Enter itself · form that submits only via its button
+```
+
+Mutation-checked: removing the `preventDefault` signal makes exactly one case fail —
+`preventDefault + async commit`. Every other case, and Gmail, still passed with the bug in place.
+
+### Test harnesses no longer leak tabs
+
+`audit_tools.mjs`, `coverage_check.mjs`, `label_vs_chrome.mjs` and `run_labels.mjs` each opened a tab
+per run and never closed one; a day's testing left 54 tabs in the browser. All four now close what
+they open.
+
+Suites: 83/83 unit · 70/70 e2e · 19/19 multi-frame · 12/12 editors · 9/9 labels.
+
 ## 0.6.0 — agent accuracy
 
 An accuracy release. Every finding below came from driving browserctl with fresh-context agents on

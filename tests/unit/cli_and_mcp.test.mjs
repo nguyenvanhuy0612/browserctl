@@ -988,3 +988,53 @@ test("The accessibility tree is exposed as an actionable second opinion (F69)", 
   assert.ok(/debugging this browser|banner/i.test(d), "the debugger banner cost must be stated up front");
   assert.ok(/browser_snapshot first|not a replacement/i.test(d), "it is a diagnostic, not the default reader");
 });
+
+test("Exactly one insertion path runs on paste (F70)", async () => {
+  const fs = await import("node:fs/promises");
+  const content = await fs.readFile(join(__dirname, "..", "..", "extension", "content.js"), "utf8");
+
+  // `execCommand("insertText")` and a ClipboardEvent each insert the whole payload. The
+  // old condition `if (!inserted || paste)` ran insertText, saw it succeed, and dispatched
+  // the ClipboardEvent anyway — a pasted email body landed in Gmail's composer TWICE.
+  // Same shape as F1's double click.
+  // Strip comments first: the fix's own comment quotes the old condition verbatim, and a
+  // test that matches its own explanation is a test that can never pass.
+  const code = content.replace(/^\s*\/\/.*$/gm, "");
+  assert.ok(!/if \(!inserted \|\| paste\)/.test(code),
+    "F70: the unconditional second insertion must not return");
+  assert.ok(/if \(paste\) inserted = tryClipboardEvent\(\) \|\| tryInsertText\(\);/.test(code),
+    "paste semantics must try the ClipboardEvent first, with insertText as the fallback");
+  assert.ok(/else inserted = tryInsertText\(\) \|\| tryClipboardEvent\(\);/.test(code),
+    "typing semantics must try insertText first, with the ClipboardEvent as the fallback");
+  // Short-circuit alone is not enough: execCommand can report true without changing
+  // anything in a custom editor, which would suppress a fallback that was actually needed.
+  assert.ok(/const changed = \(\) =>/.test(code),
+    "success must be measured by the content actually changing, not by the command's return value");
+});
+
+test("Activation happens exactly once, everywhere it can be doubled (F71)", async () => {
+  const fs = await import("node:fs/promises");
+  const content = await fs.readFile(join(__dirname, "..", "..", "extension", "content.js"), "utf8");
+  const code = content.replace(/^\s*\/\/.*$/gm, "");
+
+  // The recurring shape: dispatch the real event, then call the programmatic equivalent
+  // as well. click had it (F1), type was fixed, paste had it (F70) — press_key still did:
+  // `if (key === "Enter" && target.form) target.form.requestSubmit?.()` right after
+  // dispatching keydown, so a page that submits from its own handler submitted twice.
+  assert.ok(!/if \(key === "Enter" && target\.form\) target\.form\.requestSubmit/.test(code),
+    "F71: press_key must not call requestSubmit unconditionally after dispatching Enter");
+
+  // Every place that may fall back to requestSubmit must first observe whether the page
+  // already submitted, and must respect preventDefault on keydown.
+  for (const fn of ["async function type(", "function press_key("]) {
+    const idx = content.indexOf(fn);
+    assert.ok(idx > 0, `${fn} must exist`);
+    const body = content.slice(idx, idx + 3000);
+    if (!/requestSubmit/.test(body)) continue;
+    assert.ok(/submittedByKey/.test(body), `${fn}: must observe whether the page already submitted`);
+    assert.ok(/addEventListener\("submit"/.test(body), `${fn}: must listen for the page's own submit`);
+  }
+  // press_key additionally reports who handled it, so a caller can tell.
+  assert.ok(/submittedByPage/.test(code) && /keydownPrevented/.test(code),
+    "press_key must report whether the page handled Enter itself");
+});

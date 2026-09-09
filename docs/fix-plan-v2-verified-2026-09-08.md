@@ -2249,3 +2249,88 @@ own answer — a permanent oracle rather than a fixture that only tests what its
 naming defect in §19 came from it.
 
 Suites: unit 81/81 · e2e 70/70 · multi-frame 19/19 · labels 9/9 · audit 0 unexpected failures.
+
+## 21. The "exactly once" family, audited to the end
+
+Found while drafting a real Gmail reply: `paste` put the message in the composer **twice**. That is
+F1's shape again — two mechanisms that each do the whole job, run one after the other — so the rest of
+the codebase was audited for it rather than patching the one site.
+
+### F70 — S1 — `paste` inserted the text twice, and the first fix only worked on half the editors
+
+```js
+inserted = document.execCommand("insertText", false, text);
+if (!inserted || paste) { …dispatch ClipboardEvent… }   // both succeed
+```
+
+When paste semantics were asked for, `insertText` ran, succeeded, **and** the ClipboardEvent was
+dispatched anyway. Fixed by running exactly one path — ClipboardEvent first for paste semantics
+(it is what an editor's own handler listens for), `insertText` as the fallback.
+
+**The first fix was wrong on Lexical**, and only a second editor revealed it. Success was measured by
+reading the content back synchronously. Facebook's composer preventDefaults the paste and commits
+**asynchronously**, so the read-back saw no change, the fallback fired, and Lexical's handler then
+committed too — two copies. Gmail commits synchronously and looked perfectly fine.
+
+The correct signal is synchronous and standard: `dispatchEvent` returns `false` when the handler called
+`preventDefault()`, which is the editor saying *I own this*. Available immediately, whenever the editor
+actually commits. `execCommand`'s own return value is used the same way, instead of re-reading the DOM.
+
+```
+before fix   Facebook (Lexical) occurrences=2   Gmail occurrences=1
+after fix    Facebook (Lexical) occurrences=1   Gmail occurrences=1
+```
+
+### F71 — S1 — `press_key(Enter)` submitted a form twice
+
+The audit's real prize, found by grepping for the pattern rather than by hitting it:
+
+```js
+target.dispatchEvent(new KeyboardEvent("keydown", opts));
+…
+if (key === "Enter" && target.form) target.form.requestSubmit?.();
+```
+
+`requestSubmit()` is a fallback for forms that only submit via their button — never an addition to the
+Enter key. `type(submit: true)` already guarded this and carried a comment saying so; `press_key` did
+not. A page that submits from its own keydown handler submitted **twice**: a double order, a double
+send. It survived because nothing exercised Enter-on-a-form through `press_key`.
+
+Fixed with the same guard `type` uses — observe the page's own submit, respect `preventDefault` on
+keydown — and the response now names who handled it:
+
+```
+page handles Enter itself     submits=1   submittedByPage: true,  keydownPrevented: true
+form submits via button only  submits=1   submittedByPage: false, keydownPrevented: false
+```
+
+### F72 — S2 — The paste fallback was gated on the box looking empty
+
+`if (!el.textContent && text) el.textContent = text;` — so an insertion path that reported success
+while leaving the previous content in place skipped the fallback, and `paste` returned ok having
+replaced nothing. Now gated on whether the insertion actually happened. `type` and `paste` also report
+`effect.textNow` for a contenteditable, the symmetric read-back to `valueNow`.
+
+### The new suite: `tests/e2e/run_editors.mjs`, 12 checks
+
+Insertion and activation must each happen **exactly once**, across editor architectures that differ in
+the two ways that matter: whether they handle the event, and whether they commit synchronously.
+
+```
+paste / type  ×  plain contenteditable · preventDefault+async · preventDefault+sync · textarea · input
+press_key     ×  form that handles Enter itself · form that submits only via its button
+```
+
+Mutation-checked: removing the `preventDefault` signal makes exactly one case fail —
+`preventDefault + async commit` → occurrences=2. Every other case, and Gmail, still passed with the bug
+in place. **That one row is the whole reason this fixture exists**: a fix verified against one editor
+is not verified.
+
+### Harnesses were leaking the user's tabs
+
+`audit_tools.mjs`, `coverage_check.mjs`, `label_vs_chrome.mjs` and `run_labels.mjs` each opened a tab
+per run and never closed one — a day's testing left **54 tabs** in the user's browser. (`run.mjs` and
+`run_multiframe.mjs` had always cleaned up.) All four now close what they open; verified at zero leak
+across four consecutive runs.
+
+Suites: unit 83/83 · e2e 70/70 · multi-frame 19/19 · editors 12/12 · labels 9/9.

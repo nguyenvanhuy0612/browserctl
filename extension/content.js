@@ -2076,33 +2076,65 @@
         selection.addRange(range);
       } catch {}
 
-      // 2. Try native insertText command (which triggers editor AST transactions natively)
-      let inserted = false;
-      try {
-        inserted = document.execCommand("insertText", false, text);
-      } catch {}
+      // Exactly ONE insertion path runs.
+      //
+      // This used to be `execCommand("insertText")` and then, when the caller asked for
+      // paste semantics, a ClipboardEvent on top — `if (!inserted || paste)`. Both
+      // succeed on a rich-text editor, so a pasted message landed in the box TWICE.
+      // Same shape as the double-click defect (F1): two mechanisms that each do the whole
+      // job, run one after the other.
+      //
+      // When paste semantics are asked for, the ClipboardEvent is the correct path (it is
+      // what the editor's own paste handler listens for, and it preserves structure), so
+      // it goes first and insertText becomes the fallback — not the other way round.
+      const contentBefore = el.isContentEditable ? el.textContent : String(el.value ?? "");
+      const changed = () => (el.isContentEditable ? el.textContent : String(el.value ?? "")) !== contentBefore;
 
-      // 3. If insertText was unsupported or if paste was explicitly requested, dispatch ClipboardEvent
-      if (!inserted || paste) {
+      let inserted = false;
+
+      // Whether the editor took the insertion, decided SYNCHRONOUSLY.
+      //
+      // Measuring `changed()` right after the dispatch is not enough: Lexical (Facebook's
+      // composer) commits its paste asynchronously, so the content had not moved yet, the
+      // fallback fired, and the text landed twice once Lexical's own handler caught up.
+      // Gmail commits synchronously and looked fine — which is why a single editor is
+      // never enough to test this against.
+      //
+      // `preventDefault()` on the paste event is the editor saying "I own this", and
+      // dispatchEvent returns false when it was called. That is the signal, available
+      // immediately, regardless of when the editor actually commits.
+      const tryClipboardEvent = () => {
         try {
           const dt = new DataTransfer();
           dt.setData("text/plain", text);
-          const pasteEvent = new ClipboardEvent("paste", {
-            clipboardData: dt,
-            bubbles: true,
-            cancelable: true,
-          });
-          el.dispatchEvent(pasteEvent);
-        } catch {}
-      }
+          const ev = new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true });
+          const notPrevented = el.dispatchEvent(ev);
+          if (!notPrevented) return true;   // the editor handled it
+        } catch { return false; }
+        return changed();
+      };
+      // Likewise: execCommand returning true means the browser accepted and performed the
+      // edit. Re-checking the DOM on top of that re-introduces the same async race.
+      const tryInsertText = () => {
+        try { return document.execCommand("insertText", false, text) === true; } catch { return false; }
+      };
 
-      // 4. Fallback: if element is still empty after commands, assign textContent
-      if (!el.textContent && text) {
-        el.textContent = text;
+      if (paste) inserted = tryClipboardEvent() || tryInsertText();
+      else inserted = tryInsertText() || tryClipboardEvent();
+
+      // Hard fallback, keyed on whether the insertion ACTUALLY happened rather than on
+      // the box looking empty. The old guard was `!el.textContent`: if a path reported
+      // success but left the previous content in place, the box was non-empty, the
+      // fallback was skipped, and paste returned ok having replaced nothing.
+      if (!inserted && text) {
+        try { el.textContent = text; } catch {}
       }
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
-      return;
+      // Let the caller check rather than trust: an editor that swallows every insertion
+      // path is a real outcome, and silence about it is how a "successful" empty send
+      // happens.
+      return { textNow: String(el.textContent || "").slice(0, 200), inserted: inserted || !!text };
     }
 
     if ("value" in el) {
@@ -2170,6 +2202,9 @@
       effect: buildEffect({ urlBefore, el, mutationCount: typeMutations, measured: autoSettle && settleMs > 0 }),
     };
     if ("value" in el) out.effect.valueNow = String(el.value ?? "").slice(0, 200);
+    // A contenteditable has no `value`, so callers had nothing to verify against — the
+    // symmetric read-back for a rich-text editor.
+    else if (el.isContentEditable) out.effect.textNow = String(el.textContent ?? "").slice(0, 200);
     if (warning) out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
     return out;
   }
@@ -2211,6 +2246,9 @@
       effect: buildEffect({ urlBefore, el, mutationCount: pasteMutations, measured: autoSettle && settleMs > 0 }),
     };
     if ("value" in el) out.effect.valueNow = String(el.value ?? "").slice(0, 200);
+    // A contenteditable has no `value`, so callers had nothing to verify against — the
+    // symmetric read-back for a rich-text editor.
+    else if (el.isContentEditable) out.effect.textNow = String(el.textContent ?? "").slice(0, 200);
     if (warning) out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
     return out;
   }
@@ -2458,11 +2496,32 @@
       metaKey: set.has("meta") || set.has("command") || set.has("cmd"),
       shiftKey: set.has("shift"),
     };
-    target.dispatchEvent(new KeyboardEvent("keydown", opts));
+    // requestSubmit() is a FALLBACK for forms that only submit via their button, not an
+    // addition to the Enter key. `type(submit: true)` already guards this; press_key did
+    // not, so pressing Enter on a form whose own keydown handler submits fired the submit
+    // twice — a double order, a double send. Same class as the double click (F1), and it
+    // survived because nothing exercised Enter-on-a-form through press_key.
+    const form = key === "Enter" ? target.form : null;
+    let submittedByKey = false;
+    const noteSubmit = () => { submittedByKey = true; };
+    if (form) form.addEventListener("submit", noteSubmit, { capture: true });
+
+    const keydownNotPrevented = target.dispatchEvent(new KeyboardEvent("keydown", opts));
     target.dispatchEvent(new KeyboardEvent("keypress", opts));
     target.dispatchEvent(new KeyboardEvent("keyup", opts));
-    if (key === "Enter" && target.form) target.form.requestSubmit?.();
-    return { pressed: key, modifiers: modifiers || [], via: "dom" };
+
+    if (form) {
+      form.removeEventListener("submit", noteSubmit, { capture: true });
+      // Only if the page did not already handle it, and did not deliberately swallow the
+      // key (preventDefault on keydown is a page saying "I own Enter here").
+      if (!submittedByKey && keydownNotPrevented) form.requestSubmit?.();
+    }
+    return {
+      pressed: key,
+      modifiers: modifiers || [],
+      via: "dom",
+      ...(form ? { submittedByPage: submittedByKey, keydownPrevented: !keydownNotPrevented } : {}),
+    };
   }
 
   // Text matching is case- and whitespace-insensitive by default.

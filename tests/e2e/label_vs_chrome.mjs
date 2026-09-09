@@ -41,7 +41,8 @@ const PAIR_JS = `(function(){
 })()`;
 
 async function auditSite(url) {
-  await call("new_tab", { url });
+  const opened = (await call("new_tab", { url })).result;
+  const ownTabId = opened && opened.id;
   await call("wait_settle", { timeoutMs: 3500 });
 
   const snap = (await call("snapshot", { scope: "all", compact: false, maxText: 0 })).result || {};
@@ -71,6 +72,7 @@ async function auditSite(url) {
   }
 
   await call("cdp_detach", {});
+  if (ownTabId != null) await call("close_tab", { id: ownTabId });
   return {
     url,
     bctlTotal: bctl.length,

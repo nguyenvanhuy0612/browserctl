@@ -337,7 +337,7 @@ before reporting. Never conclude a capability is missing without checking browse
 - Daemon & Zero-Terminal Execution: The local bridge server daemon is automatically started and maintained in the background by this MCP server. You DO NOT need to run a background terminal command, dev server, or long-running process to start or keep the bridge running. If the daemon is ever reported stopped, simply invoke the 'browser_start' tool.
 - Full protocol capability & browser_action tool: In default (core) mode, dedicated tools are registered for primary operations. ALL other protocol capabilities (including cdp_send, cdp_attach, get_console_logs, get_network_requests, export_har, get_cookies, set_cookie, delete_cookies, storage_get, storage_set, read_pdf, record_start, record_stop, replay, describe_element, etc.) are 100% available by calling the 'browser_action' tool with { action: "<action_name>", params: { ... } } or via the host CLI 'browserctl <action>'.`;
 
-const SERVER_VERSION = "0.6.0";
+const SERVER_VERSION = "0.6.1";
 
 const server = new McpServer(
   { name: "browserctl", version: SERVER_VERSION },
@@ -1500,7 +1500,8 @@ server.registerTool(
   {
     title: "Count matching elements",
     description:
-      "Count the number of elements matching a CSS selector across the page and open Shadow DOM (e.g. 'button', 'a[href]', 'ytd-video-renderer'). Fast census tool.",
+      "Count the number of elements matching a CSS selector across the page and open Shadow DOM (e.g. 'button', 'a[href]', 'ytd-video-renderer'). Fast census tool.\n" +
+      "A count of 0 is an ANSWER, not a failure — the response says so, and the selector was valid. Genuinely malformed CSS is a separate INVALID_SELECTOR error, so you can tell 'nothing matches' from 'I mistyped'. Note that roles you see in a snapshot or read_page (link, button, textbox) are ARIA roles, not CSS tags: use 'a', 'button', '[role=textbox]' — or browser_find, which searches by label instead of by selector.",
     inputSchema: {
       selector: z.string().describe("CSS selector to count (e.g. 'button', 'a[href]', '[aria-expanded=\"false\"]')"),
     },

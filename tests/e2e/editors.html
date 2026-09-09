@@ -1,0 +1,45 @@
+<!doctype html><meta charset="utf-8"><title>Editor insertion cases</title>
+<style>body{font:14px system-ui;padding:20px} .box{border:1px solid #ccc;min-height:40px;padding:6px;margin:6px 0}</style>
+<h1>Editor insertion cases</h1>
+
+<h3>1. Plain contenteditable — no paste handler, so the fallback must supply the text</h3>
+<div id="plain" contenteditable="true" class="box"></div>
+
+<h3>2. Editor that calls preventDefault and inserts ASYNCHRONOUSLY</h3>
+<p>Lexical (Facebook's composer) behaves this way. A synchronous read-back sees no change
+yet, so a fallback keyed on "did the content move" fires and the text lands twice.</p>
+<div id="smart" contenteditable="true" class="box"></div>
+
+<h3>3. Editor that calls preventDefault and inserts SYNCHRONOUSLY</h3>
+<div id="sync" contenteditable="true" class="box"></div>
+
+<h3>4. Plain textarea</h3>
+<textarea id="ta" rows="3" cols="60"></textarea>
+
+<h3>5. Plain input</h3>
+<input id="inp" type="text" size="50">
+
+<h3>6. Form whose OWN keydown handler submits — the double-submit trap</h3>
+<form id="f1" class="box"><input id="i1" size="40" placeholder="press Enter here"></form>
+
+<h3>7. Form that only submits via its button</h3>
+<form id="f2" class="box"><input id="i2" size="40"> <button type="submit">Go</button></form>
+
+<script>
+  window.n1 = 0; window.n2 = 0;
+  document.getElementById('f1').addEventListener('submit', function (e) { e.preventDefault(); window.n1++; });
+  document.getElementById('f2').addEventListener('submit', function (e) { e.preventDefault(); window.n2++; });
+  document.getElementById('i1').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); document.getElementById('f1').requestSubmit(); }
+  });
+  document.getElementById('smart').addEventListener('paste', function (e) {
+    e.preventDefault();
+    var t = (e.clipboardData || window.clipboardData).getData('text/plain');
+    setTimeout(function () { document.getElementById('smart').textContent += t; }, 40);
+  });
+  document.getElementById('sync').addEventListener('paste', function (e) {
+    e.preventDefault();
+    var t = (e.clipboardData || window.clipboardData).getData('text/plain');
+    document.getElementById('sync').textContent += t;
+  });
+</script>

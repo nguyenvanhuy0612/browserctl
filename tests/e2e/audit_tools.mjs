@@ -47,7 +47,10 @@ const SKIP = new Set([
 async function main() {
   // Open our OWN tab. Navigating the pinned target hijacks whatever tab the user is
   // on — it redirected a YouTube tab mid-session twice.
-  await call("new_tab", { url: SITE_URL });
+  // Own tab, and CLOSE it. Four harnesses opened a tab per run and never closed one;
+  // a day's testing left 54 tabs in the user's browser.
+  const opened = (await call("new_tab", { url: SITE_URL })).result;
+  const ownTabId = opened && opened.id;
   await call("wait_settle", { timeoutMs: 3000 });
 
   // Ground truth: the full-DOM census.
@@ -136,6 +139,7 @@ async function main() {
 
   const unexpected = results.filter((r) => !r.ok && !r.expectFail);
   const expected = results.filter((r) => !r.ok && r.expectFail);
+  if (ownTabId != null) await call("close_tab", { id: ownTabId });
   console.log(`${LABEL}: ${results.length} calls | ${unexpected.length} UNEXPECTED failures | ${expected.length} expected failures`);
   for (const r of unexpected) console.log(`   x ${r.name}: ${String(r.error).slice(0, 90)}`);
 }

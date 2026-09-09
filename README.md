@@ -269,7 +269,7 @@ issue `click` / `type` / `scroll` / `navigate` -> `snapshot` again.
 
 ## Status
 
-Working, **v0.6.0**, 80 MCP tools over 73 bridge actions. Control parity with the official
+Working, **v0.6.1**, 80 MCP tools over 81 bridge actions. Control parity with the official
 "Claude in Chrome" surface (open): DOM-index + accessibility-tree (`read_page`) reads with
 stable refs, ref/coordinate interaction, background-tab control, screenshots (incl.
 background tabs), console/network/HAR capture, record/replay, and tab grouping. Reads and
@@ -282,8 +282,9 @@ booking.com and news.ycombinator.com, against 71-89% before. Actions report whet
 control's own state actually moved, not just that the DOM churned. Reads say what they left
 out, and name the kind of thing it was.
 
-Tests: 81/81 unit, 70/70 e2e, 19/19 multi-frame e2e, 9/9 label parity, 59 of 61 commands
-exercised, 0 unexpected failures on a whole-surface audit against live sites.
+Tests: 83/83 unit, 70/70 e2e, 19/19 multi-frame e2e, 12/12 editor insertion, 9/9 label
+parity, 59 of 61 commands exercised, 0 unexpected failures on a whole-surface audit
+against live sites.
 
 Docs:
 
@@ -322,6 +323,12 @@ E2E_FOREGROUND=1 node tests/e2e/run.mjs   # + the 2 synthetic-input tests (steal
 # the single-frame content script) is exercised. SKIPs cleanly (exit 0) if the bridge or
 # extension isn't available.
 node tests/e2e/run_multiframe.mjs
+
+# insertion and activation must each happen EXACTLY ONCE. Varies the two things that
+# change the outcome: whether the editor handles the event, and whether it commits
+# synchronously. Facebook's Lexical composer is the case that catches a fix verified
+# against Gmail alone.
+node tests/e2e/run_editors.mjs
 
 # bridge relay only, no Chrome needed (~0.5s, safe alongside a live bridge)
 node --test tests/unit/bridge.test.mjs

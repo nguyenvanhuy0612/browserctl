@@ -1,6 +1,6 @@
 # Command protocol
 
-Current version: **0.6.0** (extension, bridge, and MCP server are versioned together).
+Current version: **0.6.1** (extension, bridge, and MCP server are versioned together).
 
 Agents send commands to the bridge:
 
