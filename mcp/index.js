@@ -177,7 +177,67 @@ async function callBridge(action, params = {}) {
   throw new Error(`cannot reach bridge at ${BRIDGE_URL}: ${lastErr?.message || "connection failed"}`);
 }
 
+// The extension writes its inline hints in CLI syntax — `get text @ref_4`,
+// `snapshot --all`, `find "label"`. The CLI can run those verbatim; an MCP client cannot:
+// it has `browser_get_text`, `browser_snapshot({scope:"all"})`, `browser_find`. The
+// mapping does exist in this server's INSTRUCTIONS, but an agent reads that once at
+// session start and reads the hint inline forty messages later, and the inline one wins.
+//
+// Measured: a Gmail session drove 28 of its 44 calls through eval_js, hand-rolling reads
+// that `browser_get_text` answers exactly (`el.innerText`), with zero calls to get_text,
+// get_page_content or find_text and six snapshots that never widened past the viewport.
+// The comment above the hint footer in content.js predicted this failure precisely — the
+// footer was added to prevent it, and then written in the syntax the reader cannot call.
+// That is invariant I3: guidance that reaches one surface but not its twin.
+//
+// Rewriting here rather than in content.js keeps ONE emitter: the bridge does not know
+// whether its caller is the CLI or MCP, but this server does.
+const CLI_TO_MCP = [
+  // Longest / most specific first: `find text "x"` must not be eaten by `find "x"`.
+  [/\bfind text "([^"]*)"/g, 'browser_find_text({query:"$1"})'],
+  // `@ref` with no number is the footer's placeholder, not a real ref; keep it a placeholder.
+  [/\bget text @ref\b(?!_)/g, 'browser_get_text({ref:"<ref>"})'],
+  [/\bget attr @ref\b(?!_) (\S+)/g, 'browser_get_attribute({ref:"<ref>",name:"$1"})'],
+  [/\bget text @(\w+)/g, 'browser_get_text({ref:"$1"})'],
+  [/\bget attr @(\w+) (\S+)/g, 'browser_get_attribute({ref:"$1",name:"$2"})'],
+  [/\bget count <css>/g, "browser_get_count({selector:\"<css>\"})"],
+  [/\bget count (\S+)/g, 'browser_get_count({selector:"$1"})'],
+  [/\bfind "([^"]*)"/g, 'browser_find({query:"$1"})'],
+  [/'find <text>'/g, "browser_find({query:\"<text>\"})"],
+  [/'?\bsnapshot --all'?/g, 'browser_snapshot({scope:"all"})'],
+  [/\bscroll down\b/g, 'browser_scroll({direction:"down"})'],
+  [/\bclick\/type @ref\b/g, "browser_click / browser_type by ref"],
+];
+
+// Bounded to bracketed hint spans. Page text also flows through here — an element label
+// or an email body could contain "snapshot --all" — and rewriting a page's own words
+// would be reporting something the page did not say.
+function mcpifyHints(s) {
+  if (typeof s !== "string" || s.indexOf("[") === -1) return s;
+  return s.replace(/\[[^\]]*\]/g, (span) => {
+    let out = span;
+    for (const [re, to] of CLI_TO_MCP) out = out.replace(re, to);
+    return out;
+  });
+}
+
+function withMcpHints(res) {
+  for (const part of res.content || []) {
+    if (part.type === "text") part.text = mcpifyHints(part.text);
+  }
+  return res;
+}
+
 function text(obj, format = "smart") {
+  // `fullTextVia` is a hint carried as a plain field, so it never reaches the bracketed
+  // rewrite below. It is the one an agent follows to read a truncated body.
+  if (obj && typeof obj === "object" && typeof obj.fullTextVia === "string") {
+    obj = { ...obj, fullTextVia: mcpifyHints("[" + obj.fullTextVia + "]").slice(1, -1) };
+  }
+  return withMcpHints(textRaw(obj, format));
+}
+
+function textRaw(obj, format = "smart") {
   if (typeof obj === "string") {
     return { content: [{ type: "text", text: obj }] };
   }
@@ -337,7 +397,7 @@ before reporting. Never conclude a capability is missing without checking browse
 - Daemon & Zero-Terminal Execution: The local bridge server daemon is automatically started and maintained in the background by this MCP server. You DO NOT need to run a background terminal command, dev server, or long-running process to start or keep the bridge running. If the daemon is ever reported stopped, simply invoke the 'browser_start' tool.
 - Full protocol capability & browser_action tool: In default (core) mode, dedicated tools are registered for primary operations. ALL other protocol capabilities (including cdp_send, cdp_attach, get_console_logs, get_network_requests, export_har, get_cookies, set_cookie, delete_cookies, storage_get, storage_set, read_pdf, record_start, record_stop, replay, describe_element, etc.) are 100% available by calling the 'browser_action' tool with { action: "<action_name>", params: { ... } } or via the host CLI 'browserctl <action>'.`;
 
-const SERVER_VERSION = "0.6.2";
+const SERVER_VERSION = "0.6.3";
 
 const server = new McpServer(
   { name: "browserctl", version: SERVER_VERSION },
@@ -891,6 +951,7 @@ server.registerTool(
     title: "Read page (accessibility tree)",
     description:
       "SPECIALISED reader — reach for browser_snapshot first unless you specifically need NESTING (which control sits inside which group, form or region). Returns the accessibility tree as indented text — roles, accessible names, ARIA state, and a stable 'ref' on each interactive element (e.g. textbox \"Email\" [ref_5]). Unlike snapshot it has a depth limit, and it does NOT report open dialogs, what it left out, or content that loads on demand — so it cannot tell you when your answer is incomplete.\n" +
+      "Called bare on a large app it returns the whole page at default depth, which is rarely what you want. Narrow it: pass 'ref_id' to read one subtree (a thread, a panel, a form) and mode='all' to include non-interactive nodes. If what you actually want is that region's TEXT rather than its structure, browser_get_text on the same ref is the shorter answer.\n" +
       "mode='interactive' (default) lists actionable elements and headings; mode='all' includes every element except script/style. Pass ref_id to focus a subtree. 'depth' defaults to 60: a React/Comet SPA nests content 25-45 levels deep, and a walk that stops short returns an almost empty tree — the response now says 'depthClipped' and reports 'deepestReached' when that happens, so an empty result is never mistaken for an empty page.\n" +
       "iframe contents are appended under an 'iframe [f<id>] <url>' header with frame-qualified refs (e.g. f3:ref_5).",
     inputSchema: {
@@ -1443,7 +1504,7 @@ server.registerTool(
   "browser_get_page_content",
   {
     title: "Get readable page content",
-    description: "Extract the main readable prose/article text of the page (title, url, cleaned text). Good for reading articles and documentation. NOTE: Only extracts article prose text. For web app UI, headers, icon buttons, badges, unread counts, and notifications, use browser_snapshot instead.",
+    description: "Extract the main readable prose/article text of the page (title, url, cleaned text). Good for reading articles and documentation. NOTE: Only extracts article prose. For web app UI — headers, icon buttons, badges, unread counts, notifications — use browser_snapshot. For the full text of ONE region of an app (an email thread, a chat log, a message body), use browser_get_text on that region's container or ref; that is the read this tool declines, and it is not a reason to fall back to eval_js.",
     inputSchema: { maxChars: z.number().int().optional().describe("Max characters of text (default 8000)") },
   },
   tool("get_page_content", async ({ maxChars }) =>
@@ -1456,7 +1517,9 @@ server.registerTool(
   {
     title: "Read an element's text, value, HTML or box",
     description:
-      "Read one property of an element identified by CSS 'selector' (e.g. '.price', '#status', 'h1'), 'ref' (e.g. '@ref_1'), or 'index'. Pierces open Shadow DOM and works on custom Web Components. property: 'text' (default, visible innerText) | 'value' (current form-field value, including what a page set itself) | 'html' (the element's outerHTML markup) | 'box' (position and size). Prefer this over eval_js for all four. Returns the FIRST match: when a selector matches several elements the response says so in 'matchCount' — pass a ref to pick a specific one.",
+      "Read one property of an element identified by CSS 'selector' (e.g. '.price', '#status', 'h1'), 'ref' (e.g. '@ref_1'), or 'index'. Pierces open Shadow DOM and works on custom Web Components. property: 'text' (default, visible innerText) | 'value' (current form-field value, including what a page set itself) | 'html' (the element's outerHTML markup) | 'box' (position and size). Prefer this over eval_js for all four.\n" +
+      "ALSO READS A WHOLE REGION, not just one field: point it at a container and you get that container's entire visible text. This is the tool for a long article, an email thread, a chat log, a comment list, or any body that browser_snapshot truncated with '[+N chars: ...]' — browser_get_text({selector: 'div[role=\"main\"]'}) returns exactly what element.innerText would, without writing any JS. Reach for it before eval_js whenever you want text off the page.\n" +
+      "Returns the FIRST match: when a selector matches several elements the response says so in 'matchCount' — pass a ref to pick a specific one.",
     inputSchema: z.object({
       selector: z.string().optional().describe("CSS selector (e.g. 'ytd-active-account-header-renderer', '.header-title')"),
       ref: z.string().optional().describe("Stable element ref (e.g. '@ref_1', 'ref_5')"),

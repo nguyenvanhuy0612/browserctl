@@ -11,7 +11,7 @@ tests/**/artifacts/
 #   calls.jsonl    — opt-in per-call log (BROWSERCTL_CALL_LOG)
 #   telemetry.jsonl — benchmark harness output
 bridge/calls.jsonl*
-bridge/telemetry.jsonl
+bridge/telemetry.jsonl*
 test/benchmark/runs/
 
 # OS / IDE
@@ -21,3 +21,6 @@ test/benchmark/runs/
 
 # third-party improvement plans: internal input, kept out of the public repo
 improvements/
+
+# session case study: quotes a real person's contact details from the mail it read
+docs/history/case-study-gmail-*.md

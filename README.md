@@ -331,7 +331,7 @@ issue `click` / `type` / `scroll` / `navigate` -> `snapshot` again.
 
 ## Status
 
-Working, **v0.6.2**, 80 MCP tools over 81 protocol actions. Control parity with the official
+Working, **v0.6.3**, 80 MCP tools over 81 protocol actions. Control parity with the official
 "Claude in Chrome" surface (open): DOM-index + accessibility-tree (`read_page`) reads with
 stable refs, ref/coordinate interaction, background-tab control, screenshots (incl.
 background tabs), console/network/HAR capture, record/replay, and tab grouping. Reads and

@@ -1,6 +1,6 @@
 {
   "name": "browserctl-mcp",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Universal Browser Control Protocol & MCP Server for AI Agents and Developers",
   "type": "module",
   "main": "cli.js",

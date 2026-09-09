@@ -2452,4 +2452,84 @@ The derived denominator from [F76] made them visible: `fill`, `dismiss`/`dismiss
 Coverage now prints `66/80 exercised, 5 excused, 9 missed`; the nine are seven `get_*`
 aliases plus `paste` and `get_property`, all exercised by `run_editors.mjs` and `run_labels.mjs`.
 
-Suites: unit 89/89 · e2e 73/73 · multi-frame 19/19 · editors 12/12 · labels 9/9.
+## 23. A tier-1 agent on Gmail: 28 of 44 calls were eval_js
+
+A Gemini 3.8 Flash session drove Gmail through browserctl and wrote its own post-mortem. (That
+write-up is kept out of this repo — it quotes a real person's address and phone number from the
+mail it was reading.) The bridge call log recorded the same session, so for once the self-report
+can be checked against what actually happened. It does not survive the check.
+
+| | Self-report | Call log (tab 414176306, 04:09:39–04:14:30Z) |
+|---|---|---|
+| eval_js | "over-reliance ... in places" | **28 of 44 calls, 64%** |
+| Drafting the reply | three attempts, A/B/C | **22 consecutive eval_js** before one `paste` |
+| `read_page` | "dumped AX nodes, but Gmail nested bodies in folded elements" | called **once, with no parameters** — no `ref_id`, no `mode:'all'` |
+| `browser_get_text` | named as what it should have used | **zero calls** |
+| `get_page_content`, `find_text` | not mentioned | **zero calls** |
+| `snapshot` | | 6 calls, **every one `scope:'viewport'`** |
+| Failures | STALE_REF recovery | correct — **1 failed call in 44** |
+
+Even the final "draft saved" check went through eval_js. This is the self-report finding recorded
+in §19 holding for the sixth time: an agent's account of its own tool use is not evidence.
+
+### F78 — S1 — Inline hints were written in a syntax the reader cannot call
+
+The case study blames the agent: *"instinctively fell back"*, *"assumed"*, *"forgetting"*. That
+framing lets the tool off. A capable model reaching for eval_js in 64% of calls, with zero uses of
+three purpose-built read tools, is a discoverability defect.
+
+When the census truncates a body it emits `[+168 chars: get text @ref_48]`, and every compact view
+ends with `[Next: ... read one value: get text @ref · ... · more of the page: snapshot --all]`.
+Those are **CLI verbs**. An MCP client has `browser_get_text` and
+`browser_snapshot({scope:"all"})`; it has nothing called `get text`. The mapping exists in this
+server's INSTRUCTIONS, but an agent reads that once at session start and reads the hint inline
+forty messages later, and the inline one wins.
+
+The comment directly above the footer in `content.js` states the failure mode exactly:
+
+> `// the mapping is not in front of it, a low-tier model reaches for eval_js and hand-rolls the`
+> `// read, which costs far more tokens and loses every diagnostic.`
+
+The footer was added to prevent that, and then written in the syntax the reader cannot call. [I3]
+again, inside the mitigation for I3.
+
+Fixed in `text()`, the single funnel every MCP response passes through — the bridge cannot know
+whether its caller is the CLI or MCP, but the MCP server can. The rewrite is bounded to bracketed
+hint spans: page text also flows through that function, and rewriting an email that happens to
+contain "snapshot --all" would report words the page never said.
+
+### F79 — S2 — The three read tools each pointed away from the read that was wanted
+
+The agent wanted one thing all session: *the full text of this region*. Every tool that could give
+it said no.
+
+- **`get_text`** returns `el.innerText`, so it reads a whole container — it is an exact replacement
+  for the `document.querySelector('div[role="main"]').innerText` the agent hand-rolled. Its
+  description sold it as *"Read one property of an element ... Returns the FIRST match"*: a field
+  getter.
+- **`get_page_content`** ended with *"For web app UI ... use browser_snapshot instead."* Gmail is a
+  web app, and snapshot truncates. Snapshot → truncated → hint in unusable syntax →
+  get_page_content declines → eval_js. A closed loop with one exit.
+- **`read_page`** opened with *"SPECIALISED reader — reach for browser_snapshot first"* and never
+  mentioned `ref_id`, the parameter that answers the folded-subtree problem it was blamed for.
+
+All three now name the region read and each other.
+
+### F80 — S3 — Runtime logs had a bound, but nothing said so
+
+`calls.jsonl` rotates at 8 MB keeping one `.1`, so it was already capped at 2× — verified, not
+assumed. What was wrong around it:
+
+- A `statSync` on **every command** to check the size. Now tracked in memory.
+- The cap was a constant; now `BROWSERCTL_CALL_LOG_MAX_MB`.
+- Nothing announced that a record of everything driven through the bridge was being written. The
+  bridge now says so at startup, and `status` reports current size against the cap.
+- `telemetry.jsonl` had no bound at all. Same rotation now.
+- `.gitignore` had `bridge/telemetry.jsonl` **without the trailing star**, so a rotated
+  `telemetry.jsonl.1` would have appeared as untracked and could have been committed. That is [I9]
+  by a one-character gap.
+
+`bridge.log` (191 bytes, dated 2026-08-07) is a leftover: the daemon launcher uses `stdio: "ignore"`
+and nothing writes it any more.
+
+Suites: unit 92/92 · e2e 73/73 · multi-frame 19/19 · editors 12/12 · labels 9/9.

@@ -14,6 +14,7 @@ checkable.
 | `plan-browserctl-v2-agent-intelligence.md` | The original v2 plan. Some of it shipped, some was measured and dropped; the fix-plan's §8 records which. |
 | `review-findings-2026-07-03.md` | An earlier code review. |
 | `rename-plan.md` | The rename to `browserctl`, completed. |
+| *(the Gmail case study, kept locally)* | A Gemini 3.8 Flash session driving Gmail, written by that agent about itself — a worked example of the self-report problem, since the bridge call log for the same session contradicts it. Not published: it quotes a real person's address and phone number from the mail it was reading. The measured numbers and the analysis are §23 of the fix-plan, which carries neither. |
 | `claude-for-chrome-open-design-2026-06-30.md` | The original design: what this project set out to be, next to the closed "Claude in Chrome" surface it was measured against. Phase numbering there is historical. |
 
 ## Reading these safely

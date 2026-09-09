@@ -1185,3 +1185,96 @@ test("The e2e coverage denominator is derived, not hand-kept (F76)", async () =>
     assert.ok(/:\s*"[^"]{10,}"/.test(line), `F76: excused action needs a stated reason -> ${line.trim()}`);
   }
 });
+
+test("Inline hints reach an MCP agent in a syntax it can call (F78)", async () => {
+  const fs = await import("node:fs/promises");
+  const src = await fs.readFile(join(__dirname, "..", "..", "mcp", "index.js"), "utf8");
+
+  // A Gmail session spent 28 of 44 calls on eval_js, hand-rolling reads that
+  // browser_get_text answers exactly. The snapshot footer that exists to prevent that
+  // was written in CLI syntax ("get text @ref", "snapshot --all") — names no MCP client
+  // has. Invariant I3: guidance reaching one surface but not its twin.
+  const mod = src.slice(src.indexOf("const CLI_TO_MCP"), src.indexOf("function text(obj"));
+  assert.ok(mod.includes("CLI_TO_MCP"), "F78: the hint rewriter must exist");
+  const { mcpifyHints } = new Function(mod + "; return {mcpifyHints};")();
+
+  const footer =
+    '[Next: click/type @ref · read one value: get text @ref · one attribute: get attr @ref href · ' +
+    'count: get count <css> · locate a control: find "label" · a value in plain text: find text "label" ' +
+    '· more of the page: scroll down or snapshot --all]';
+  const out = mcpifyHints(footer);
+  for (const cli of ["get text @", "get attr @", "get count <", "snapshot --all", 'find "label"', "scroll down"]) {
+    assert.ok(!out.includes(cli), `F78: CLI syntax "${cli}" still reaches an MCP client`);
+  }
+  for (const tool of ["browser_get_text", "browser_get_attribute", "browser_get_count",
+                      "browser_find({", "browser_find_text({", "browser_snapshot({scope:\"all\"})",
+                      "browser_scroll({"]) {
+    assert.ok(out.includes(tool), `F78: rewritten footer must name ${tool}`);
+  }
+
+  // A real ref keeps its number; the bare placeholder stays a placeholder.
+  assert.ok(mcpifyHints("[+168 chars: get text @ref_48]").includes('browser_get_text({ref:"ref_48"})'),
+    "F78: a concrete ref must survive the rewrite");
+  assert.ok(mcpifyHints("[read: get text @ref]").includes('{ref:"<ref>"}'),
+    "F78: the bare @ref placeholder must not become a literal ref named 'ref'");
+
+  // Page text is not a hint. Rewriting outside brackets would report words the page
+  // never said.
+  const pageText = 'link "Read our snapshot --all guide" · heading "get text @ref tips"';
+  assert.equal(mcpifyHints(pageText), pageText, "F78: content outside brackets must be untouched");
+
+  // Every response goes through one funnel, so no tool can bypass the rewrite.
+  assert.ok(/function text\(obj[^)]*\)\s*\{[\s\S]{0,600}?withMcpHints\(textRaw\(/.test(src),
+    "F78: text() must route every response through withMcpHints");
+});
+
+test("The tools that answer 'read this region' say so (F79)", async () => {
+  const fs = await import("node:fs/promises");
+  const src = await fs.readFile(join(__dirname, "..", "..", "mcp", "index.js"), "utf8");
+
+  // get_text returns el.innerText, so it reads a whole container — but it was described
+  // as "read one property of an element", and the agent that wanted a thread body never
+  // recognised it.
+  const getText = src.slice(src.indexOf("Read one property of an element"), src.indexOf("Read one property of an element") + 1600);
+  assert.ok(/WHOLE REGION|whole region/.test(getText), "F79: get_text must say it reads a container, not just a field");
+  assert.ok(/eval_js/.test(getText), "F79: get_text must name the fallback it replaces");
+
+  // get_page_content used to send web-app readers to snapshot, which truncates — a loop
+  // whose only exit was eval_js.
+  const gpc = src.slice(src.indexOf("Extract the main readable prose"), src.indexOf("Extract the main readable prose") + 900);
+  assert.ok(/browser_get_text/.test(gpc), "F79: get_page_content must point at the tool that does answer");
+
+  // read_page was called once, bare, then blamed for what ref_id fixes.
+  const rp = src.slice(src.indexOf("SPECIALISED reader"), src.indexOf("SPECIALISED reader") + 1600);
+  assert.ok(/ref_id/.test(rp), "F79: read_page must name ref_id for narrowing to a subtree");
+});
+
+test("Runtime logs are bounded and never escape the repo (F80)", async () => {
+  const fs = await import("node:fs/promises");
+  const read = (...p) => fs.readFile(join(__dirname, "..", "..", ...p), "utf8");
+  const [server, bench, ignore] = await Promise.all([
+    read("bridge", "server.js"), read("test", "benchmark", "run_benchmark.js"), read(".gitignore"),
+  ]);
+
+  // Both appenders rotate, so each is capped at 2x its limit rather than growing forever.
+  for (const [name, sourceText] of [["call log", server], ["telemetry", bench]]) {
+    assert.ok(/MAX_BYTES/.test(sourceText), `F80: the ${name} needs a size cap`);
+    assert.ok(/renameSync\(/.test(sourceText), `F80: the ${name} must rotate at the cap`);
+  }
+
+  // The cap must be reachable without editing source.
+  assert.ok(/BROWSERCTL_CALL_LOG_MAX_MB/.test(server), "F80: the call-log cap must be configurable");
+
+  // Size tracked in memory: a stat() per command is a syscall per command.
+  assert.ok(!/statSync\(CALL_LOG_PATH\)[\s\S]{0,120}appendFileSync/.test(server),
+    "F80: do not stat the log on every call");
+
+  // A recorder of the user's browsing announces itself.
+  assert.ok(/call log ON/.test(server), "F80: the bridge must say when the call log is on");
+
+  // Rotated files must be ignored too — 'telemetry.jsonl' without the star let
+  // 'telemetry.jsonl.1' show up as untracked, which is how runtime data reaches a commit.
+  for (const line of ["bridge/calls.jsonl*", "bridge/telemetry.jsonl*"]) {
+    assert.ok(ignore.split("\n").includes(line), `F80: .gitignore must contain ${line}`);
+  }
+});

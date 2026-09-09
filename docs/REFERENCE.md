@@ -1,6 +1,6 @@
 # browserctl — complete reference
 
-Version 0.6.2. The extension, bridge, and MCP server are versioned together.
+Version 0.6.3. The extension, bridge, and MCP server are versioned together.
 
 This is the **operator's guide**: how to install it, what each tool is for, recipes, and the failure
 modes worth recognising. Three neighbours, so you land in the right one:
@@ -17,7 +17,7 @@ modes worth recognising. Three neighbours, so you land in the right one:
 
 ## What it is
 
-**browserctl** (v0.6.2, 80 tools) gives an AI agent DOM-level control of a *real*, already-logged-in Chrome
+**browserctl** (v0.6.3, 80 tools) gives an AI agent DOM-level control of a *real*, already-logged-in Chrome
 or Edge, through a neutral HTTP/WebSocket API and an MCP server. It drives one pinned tab
 **in the background**, without stealing focus and without a debugger banner on the common
 path, so you can keep working in your own tab while the agent works in its own.

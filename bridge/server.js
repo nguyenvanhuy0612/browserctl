@@ -195,7 +195,22 @@ const CALL_LOG_PATH = !CALL_LOG_ENV || CALL_LOG_ENV === "0" || CALL_LOG_ENV === 
       : CALL_LOG_ENV);
 const RUN_ID = randomUUID().slice(0, 8);
 const RUN_STARTED_AT = new Date().toISOString();
-const CALL_LOG_MAX_BYTES = 8 * 1024 * 1024;
+
+// Bounded on purpose. The log holds a record of everything driven through the bridge, so
+// it must not grow until someone notices: at the cap the current file becomes `.1`
+// (replacing any previous `.1`) and a fresh one starts. Two files, so the ceiling on disk
+// is 2x the cap and never more.
+//
+// Size is tracked in memory rather than stat()ed per call — one syscall per command is
+// pure waste, and the count only has to be right to within one entry.
+const CALL_LOG_MAX_BYTES = (() => {
+  const mb = Number(process.env.BROWSERCTL_CALL_LOG_MAX_MB);
+  return Number.isFinite(mb) && mb > 0 ? Math.round(mb * 1024 * 1024) : 8 * 1024 * 1024;
+})();
+let callLogBytes = 0;
+if (CALL_LOG_PATH) {
+  try { callLogBytes = statSync(CALL_LOG_PATH).size; } catch { callLogBytes = 0; }
+}
 let callSeq = 0;
 
 function paramShape(params) {
@@ -214,11 +229,14 @@ function paramShape(params) {
 function logCall(entry) {
   if (!CALL_LOG_PATH) return;
   try {
-    try {
-      const st = statSync(CALL_LOG_PATH);
-      if (st.size > CALL_LOG_MAX_BYTES) renameSync(CALL_LOG_PATH, CALL_LOG_PATH + ".1");
-    } catch {}
-    appendFileSync(CALL_LOG_PATH, JSON.stringify(entry) + "\n");
+    const line = JSON.stringify(entry) + "\n";
+    if (callLogBytes + line.length > CALL_LOG_MAX_BYTES) {
+      // rename() over an existing path replaces it, so this keeps exactly one old file.
+      try { renameSync(CALL_LOG_PATH, CALL_LOG_PATH + ".1"); } catch {}
+      callLogBytes = 0;
+    }
+    appendFileSync(CALL_LOG_PATH, line);
+    callLogBytes += line.length;
   } catch (err) {
     // Logging must never take the bridge down.
   }
@@ -240,6 +258,8 @@ function handleCommand(body, res) {
         extensionConnected: extensionSocket != null,
         runId: RUN_ID,
         callLog: CALL_LOG_PATH || null,
+        callLogBytes: CALL_LOG_PATH ? callLogBytes : null,
+        callLogMaxBytes: CALL_LOG_PATH ? CALL_LOG_MAX_BYTES : null,
       },
     });
   }
@@ -417,6 +437,13 @@ process.on("unhandledRejection", (err) => {
 server.listen(PORT, HOST, () => {
   log(`bridge listening on http://${HOST}:${PORT}`);
   log(`extension should connect to ws://${HOST}:${PORT}/extension`);
+  if (CALL_LOG_PATH) {
+    const mb = (n) => (n / 1024 / 1024).toFixed(1);
+    log(
+      `call log ON -> ${CALL_LOG_PATH} (${mb(callLogBytes)}MB, rotates at ${mb(CALL_LOG_MAX_BYTES)}MB, ` +
+      `keeps one .1 file; parameter values are never written). Unset BROWSERCTL_CALL_LOG to stop.`
+    );
+  }
   if (PORT !== 0) {
     try {
       markDaemonRunning({ pid: process.pid, port: PORT, url: `http://${HOST}:${PORT}` });

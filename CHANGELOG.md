@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.6.3 — the hint an agent cannot call
+
+A tier-1 agent drove Gmail through browserctl and spent **28 of its 44 calls on `eval_js`**,
+hand-rolling reads that `browser_get_text` answers exactly. It never called `get_text`,
+`get_page_content` or `find_text` once, and never widened a snapshot past the viewport. The agent
+wrote its own post-mortem blaming itself. The bridge call log for the same session says the tool
+surface was at fault.
+
+- **Inline hints were written in CLI syntax.** When the census truncates a body it prints
+  `[+168 chars: get text @ref_48]`, and every compact view ends with
+  `[Next: ... read one value: get text @ref · ... · more of the page: snapshot --all]`. An MCP
+  client has `browser_get_text` and `browser_snapshot({scope:"all"})` — nothing called `get text`.
+  The mapping lives in the server's instructions, read once at session start, while the hint
+  arrives inline forty messages later; the inline one wins.
+
+  The comment directly above that footer in `content.js` predicted this exactly — *"a low-tier
+  model reaches for eval_js and hand-rolls the read"* — so the mitigation for the problem was
+  written in the syntax that causes it. Hints are now rewritten to real tool calls in `text()`,
+  the single funnel every MCP response passes through, bounded to bracketed hint spans so a page
+  whose own text contains `snapshot --all` is never altered. [F78]
+
+- **All three read tools pointed away from the read that was wanted.** `get_text` returns
+  `el.innerText` and reads a whole container, but was described as *"Read one property of an
+  element"* — a field getter. `get_page_content` ended with *"For web app UI ... use
+  browser_snapshot instead"*, and snapshot truncates, closing a loop whose only exit was
+  `eval_js`. `read_page` opened by discouraging itself and never mentioned `ref_id`, the parameter
+  that answers the folded-subtree case it gets blamed for. All three now name the region read and
+  each other. [F79]
+
+### Runtime logs
+
+`calls.jsonl` already rotated at 8 MB keeping one `.1`, so it was capped at 2× — verified rather
+than assumed. What was wrong around it: a `statSync` on **every command** to check the size (now
+tracked in memory), a cap that could only be changed by editing source (now
+`BROWSERCTL_CALL_LOG_MAX_MB`), and nothing anywhere saying that a record of everything driven
+through the bridge was being written. The bridge now announces it at startup and `status` reports
+current size against the cap.
+
+`telemetry.jsonl` had no bound at all and now rotates the same way. `.gitignore` listed
+`bridge/telemetry.jsonl` **without the trailing star**, so a rotated `.1` would have shown up as
+untracked and could have been committed — invariant I9 by a one-character gap. [F80]
+
+Suites: unit 92 · e2e 73 · multi-frame 19 · editors 12 · labels 9.
+
 ## 0.6.2 — the docs, and what auditing them turned up
 
 No new capability. Two user-facing bugs, one silent metric, and a documentation pass that made the

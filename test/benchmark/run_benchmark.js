@@ -168,12 +168,19 @@ const TEST_SITES = [
 const RUN_ID = `run_${new Date().toISOString().replace(/[:.]/g, "-")}_${Math.random().toString(36).slice(2, 8)}`;
 const RUN_STARTED_AT = new Date().toISOString();
 
+// Same bound as the bridge's call log, for the same reason: a file nothing ever prunes
+// is a file that grows until someone finds it. One rotation, so the ceiling is 2x.
+const TELEMETRY_MAX_BYTES = 8 * 1024 * 1024;
+
 function logTelemetry(record) {
   try {
-    fs.appendFileSync(
-      TELEMETRY_FILE,
-      JSON.stringify({ runId: RUN_ID, runStartedAt: RUN_STARTED_AT, ...record }) + "\n"
-    );
+    const line = JSON.stringify({ runId: RUN_ID, runStartedAt: RUN_STARTED_AT, ...record }) + "\n";
+    try {
+      if (fs.statSync(TELEMETRY_FILE).size + line.length > TELEMETRY_MAX_BYTES) {
+        fs.renameSync(TELEMETRY_FILE, TELEMETRY_FILE + ".1");
+      }
+    } catch {}
+    fs.appendFileSync(TELEMETRY_FILE, line);
   } catch {}
 }
 

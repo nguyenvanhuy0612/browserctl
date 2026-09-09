@@ -1,6 +1,6 @@
 # Command protocol
 
-Current version: **0.6.2** (extension, bridge, and MCP server are versioned together).
+Current version: **0.6.3** (extension, bridge, and MCP server are versioned together).
 
 **Scope of this document.** It specifies the wire format and the 24 actions worth describing in
 detail — the census, the actions, and the shapes their responses take. It is **not** the action index:
