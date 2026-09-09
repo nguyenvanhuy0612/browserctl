@@ -82,7 +82,7 @@ const pending = new Map();
 
 const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url === "/status") {
-    return sendJson(res, 200, { extensionConnected: extensionSocket != null });
+    return sendJson(res, 200, statusPayload());
   }
 
   if (req.method === "POST" && req.url === "/command") {
@@ -242,6 +242,21 @@ function logCall(entry) {
   }
 }
 
+// GET /status (the CLI) and action:"status" (MCP) answer the same question, and used to
+// answer it differently: the GET returned only { extensionConnected }, so the CLI could
+// not report the call log even after the bridge started tracking it. One builder, so a
+// field added for one caller cannot go missing for the other.
+function statusPayload() {
+  return {
+    bridgeUrl: `http://${HOST === "0.0.0.0" ? "127.0.0.1" : HOST}:${PORT}`,
+    extensionConnected: extensionSocket != null,
+    runId: RUN_ID,
+    callLog: CALL_LOG_PATH || null,
+    callLogBytes: CALL_LOG_PATH ? callLogBytes : null,
+    callLogMaxBytes: CALL_LOG_PATH ? CALL_LOG_MAX_BYTES : null,
+  };
+}
+
 function handleCommand(body, res) {
   const { action, params } = body || {};
   if (!action || typeof action !== "string") {
@@ -251,17 +266,7 @@ function handleCommand(body, res) {
   // The bridge can answer this itself, so an agent that reaches for the name it saw on
   // the browser_status tool gets the status rather than a redirect to another endpoint.
   if (action === "status") {
-    return sendJson(res, 200, {
-      ok: true,
-      result: {
-        bridgeUrl: `http://${HOST === "0.0.0.0" ? "127.0.0.1" : HOST}:${PORT}`,
-        extensionConnected: extensionSocket != null,
-        runId: RUN_ID,
-        callLog: CALL_LOG_PATH || null,
-        callLogBytes: CALL_LOG_PATH ? callLogBytes : null,
-        callLogMaxBytes: CALL_LOG_PATH ? CALL_LOG_MAX_BYTES : null,
-      },
-    });
+    return sendJson(res, 200, { ok: true, result: statusPayload() });
   }
 
   // Handle local system execution command directly on the bridge host

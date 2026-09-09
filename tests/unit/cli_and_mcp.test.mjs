@@ -1278,3 +1278,25 @@ test("Runtime logs are bounded and never escape the repo (F80)", async () => {
     assert.ok(ignore.split("\n").includes(line), `F80: .gitignore must contain ${line}`);
   }
 });
+
+test("Both status surfaces answer from one builder (F81)", async () => {
+  const fs = await import("node:fs/promises");
+  const read = (...p) => fs.readFile(join(__dirname, "..", "..", ...p), "utf8");
+  const [server, cli] = await Promise.all([read("bridge", "server.js"), read("cli.js")]);
+
+  // GET /status (the CLI) and action:"status" (MCP) answer the same question. The GET
+  // returned only { extensionConnected }, so the CLI could not report the call log even
+  // after the bridge tracked it — and the startup notice that was supposed to announce
+  // the log is discarded, because the daemon is spawned with stdio "ignore". I3 twice
+  // over: the fix for an invisible log was written on a surface nobody reads.
+  assert.ok(/function statusPayload\(\)/.test(server), "F81: status must come from one builder");
+  assert.ok(/req\.url === "\/status"\)\s*\{\s*return sendJson\(res, 200, statusPayload\(\)\)/.test(server),
+    "F81: GET /status must use the shared builder, not its own field list");
+  assert.ok(/action === "status"[\s\S]{0,120}result: statusPayload\(\)/.test(server),
+    "F81: action:status must use the shared builder too");
+
+  // Whatever the builder carries has to be reachable by a person, not only by an agent.
+  assert.ok(/Call log: ON/.test(cli), "F81: browserctl status must report the call log");
+  assert.ok(/stdio: "ignore"/.test(cli),
+    "F81: if the daemon ever stops discarding stdout, revisit where this notice belongs");
+});

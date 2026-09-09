@@ -42,7 +42,14 @@ current size against the cap.
 `bridge/telemetry.jsonl` **without the trailing star**, so a rotated `.1` would have shown up as
 untracked and could have been committed — invariant I9 by a one-character gap. [F80]
 
-Suites: unit 92 · e2e 73 · multi-frame 19 · editors 12 · labels 9.
+The notice added above was then found to be invisible: the daemon is spawned with
+`stdio: "ignore"`, so a startup line reaches nobody in the mode everyone runs. `browserctl status`
+is the surface a person looks at, and it could not print the log because the CLI calls
+`GET /status`, which returned `{ extensionConnected }` alone while `action: "status"` returned six
+fields — two endpoints answering one question from two hand-kept lists. One `statusPayload()` now
+serves both. [F81]
+
+Suites: unit 93 · e2e 73 · multi-frame 19 · editors 12 · labels 9.
 
 ## 0.6.2 — the docs, and what auditing them turned up
 

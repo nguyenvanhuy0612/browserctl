@@ -2532,4 +2532,25 @@ assumed. What was wrong around it:
 `bridge.log` (191 bytes, dated 2026-08-07) is a leftover: the daemon launcher uses `stdio: "ignore"`
 and nothing writes it any more.
 
-Suites: unit 92/92 · e2e 73/73 · multi-frame 19/19 · editors 12/12 · labels 9/9.
+### F81 — S2 — The notice about the invisible log was itself invisible
+
+[F80] added a startup line saying the call log is on and where it lives. The daemon is spawned
+with `stdio: "ignore"`, so that line reaches nobody in the mode everyone actually runs. The fix for
+an unannounced recorder was written on a surface no one reads — [I3] a third time in two days, and
+the second time inside a fix for I3.
+
+`browserctl status` is the surface a person looks at, and it printed two lines. It could not print
+more: the CLI calls `GET /status`, which returned `{ extensionConnected }` alone, while
+`action: "status"` returned six fields. Two endpoints answering the same question from two
+hand-kept field lists, drifting apart exactly as [I5] describes.
+
+One `statusPayload()` now serves both, verified identical on the wire, and the CLI prints:
+
+```
+Call log: ON  .../bridge/calls.jsonl (1.6MB, rotates at 8.0MB; parameter values never written)
+```
+
+The in-memory byte counter was checked against the file rather than trusted: after three commands,
+`callLogBytes` and `stat().size` agreed exactly.
+
+Suites: unit 93/93 · e2e 73/73 · multi-frame 19/19 · editors 12/12 · labels 9/9.

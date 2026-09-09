@@ -448,6 +448,15 @@ async function main() {
       } else {
         console.log(`Bridge: RUNNING (${BRIDGE_URL})`);
         console.log(`Extension: ${data.extensionConnected ? "CONNECTED" : "DISCONNECTED"}`);
+        // The bridge announces the call log at startup, but the daemon is spawned with
+        // stdio "ignore" — that line reaches nobody in the mode everyone actually runs.
+        // This is the surface a person looks at, so the notice belongs here too.
+        if (data.callLog) {
+          const mb = (n) => (n / 1024 / 1024).toFixed(1);
+          const size = data.callLogBytes != null ? `${mb(data.callLogBytes)}MB` : "?";
+          const cap = data.callLogMaxBytes != null ? `, rotates at ${mb(data.callLogMaxBytes)}MB` : "";
+          console.log(`Call log: ON  ${data.callLog} (${size}${cap}; parameter values never written)`);
+        }
       }
     } catch (err) {
       const statusObj = { ok: false, daemonState: stateInfo.state || "stopped", error: err.message };
