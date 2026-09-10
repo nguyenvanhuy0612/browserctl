@@ -51,7 +51,7 @@ Usage:
 
 You do not need to start anything before your first command, and you do not need to leave a
 terminal open. Every MCP tool has a CLI equivalent: browser_snapshot -> snapshot,
-browser_get_text -> get text, browser_click -> click.
+browser_get_property -> get text, browser_click -> click.
 
 Navigation & Tabs:
   browserctl open <url>                 Navigate target tab to url (alias: navigate)

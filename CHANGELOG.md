@@ -1,5 +1,97 @@
 # Changelog
 
+## 0.7.0 — one name per capability, a census that answers, gates that derive
+
+Breaking. `core` is **23 tools**, down from 35. Every capability the removed names carried
+is a parameter on a tool that remains, no aliases were kept, and every underlying protocol
+action still runs — `browser_action({action, params})` reaches them and its catalogue lists
+them.
+
+| Removed | Call instead |
+|---|---|
+| `browser_get_text`, `browser_get_attribute`, `browser_get_count` | **`browser_get_property`** with `property: "text" \| "value" \| "html" \| "box" \| "attr" \| "count"` |
+| `browser_type`, `browser_paste`, `browser_select_option` | `browser_fill` with `method: "type" \| "paste"` or `option` |
+| `browser_navigate`, `browser_new_tab`, `browser_open_and_read` | **`browser_open_url`** with `target: "current" \| "new" \| <tabId>`, `wait`, `read` |
+| `browser_find_text` | `browser_find({query, in: "text"})` |
+| `browser_screenshot_fullpage` | `browser_screenshot({fullPage: true})` |
+| `browser_wait_settle` | `browser_wait_for({for: "settle"})` |
+| `browser_dismiss_modal` | click the dialog's own close control, or `browser_action({action: "dismiss"})` |
+| `browser_click_selector`, `browser_fill_selector` | `browser_click({selector})` / `browser_fill({selector})` |
+
+The measurements behind it: 43 real agent sessions across two clients used a median of 5.5
+to 7 distinct tools out of the 35 that were loaded, and 43 of 80 registered tools were never
+called once. Every failure observed in that window was parameter-level — four out of four —
+and not one was a wrong-tool choice.
+
+### The element read is one tool now
+
+`browser_get_property` reads one element, a whole region, every match, or a whole row-shaped
+list:
+
+```
+browser_get_property({selector: 'div[role="main"]'})                       // a region's text
+browser_get_property({selector: 'a', property: 'attr', attr: 'href', all: true})
+browser_get_property({selector: 'li.result', all: true, fields: {
+  title: 'h3', url: {selector: 'a', attr: 'href'}, price: '.price' }})     // a row at a time
+```
+
+Three MCP names on one protocol action is what produced the bug that started this: `all` was
+added to one of the three faces and the other two silently stayed narrower, so the tool whose
+NAME matched "read every href" was the one that could not do it. `fields` closes the last
+read an agent had a good reason to write in JavaScript — a probe used `eval_js` exactly once
+on the previous build, for exactly this, and said why.
+
+Field selectors resolve INSIDE each row. A value that sits in a sibling of the row is a
+separate read, and the response names the fields that matched nothing instead of returning
+silent nulls.
+
+### The census answers instead of just reporting
+
+- **Paged, not truncated.** `browser_snapshot` lists `limit` elements (default 200) and
+  returns `next`; pass it back as `cursor`. Indices and refs stay valid across pages.
+- **Regions and dialogs carry refs.** `[Structure: … aside 19 (@ref_32)]` and
+  `[Open dialog: "Notifications" 360x722 (@ref_35) — read it with 'get text @ref_35']`.
+  Reading a right rail used to mean guessing `[role=complementary]`.
+- **The counts reconcile.** In-scope, whole-page and offscreen now add up; paging states its
+  own numbers separately.
+- **`browser_find` takes a CSS `selector`** and returns the same refs — the cheap way to get
+  a ref for something that just appeared, without re-reading the page.
+
+### Parameters are checked, not guessed
+
+- `tab_id` is declared on every tab-scoped tool and normalised to `tabId`. It used to be
+  accepted by three tools and silently stripped by the other 76.
+- Unknown parameters are refused with the legal set, a did-you-mean, and a redirect for the
+  measured wrong-tool tells. `read_page {format:"markdown"}` used to return an accessibility
+  tree and report success, so an agent concluded the reader was broken and hand-rolled the
+  read in `eval_js` for the rest of the session.
+
+### Fixes
+
+- **A click that navigates is no longer reported as a stale ref.** Submitting a form worked,
+  changed the URL, and returned `STALE_REF`: the content script running the action died with
+  the old document and the retry ran against the new one. It reports the navigation now, and
+  deliberately does not retry — a retry is a double submit.
+- **`browser_open_url` cannot hijack the tab the user is looking at.** With nothing pinned,
+  `target: "current"` opens a new tab and says so.
+- The cross-frame snapshot merge passes the top frame's result through instead of listing the
+  fields it keeps — it had silently dropped every field added to the census after it was
+  written, twice.
+- Hints name calls that exist: the inline footer, the dialog notices, `wait_network_idle`'s
+  timeout hint and the CLI help all pointed at tools that had been deleted.
+
+### Releasing
+
+`npm run preflight -- --e2e` runs ten gates: versions, unit tests, the generated tool table,
+documentation coverage for every tool and every parameter, dead pointers to removed tools,
+end-to-end action coverage, the agent-facing intent index, the npm tarball, and the live
+suite. They **derive** what they check from the tool registry and the parameter schemas, so a
+new tool or parameter is checked from the moment it exists. See
+[docs/RELEASING.md](docs/RELEASING.md); the full tool surface is generated into
+[docs/TOOLS.md](docs/TOOLS.md).
+
+Unit 121/121. End-to-end 85/85 against a live browser.
+
 ## 0.6.3 — the hint an agent cannot call
 
 A tier-1 agent drove Gmail through browserctl and spent **28 of its 44 calls on `eval_js`**,

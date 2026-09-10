@@ -17,7 +17,7 @@ The suite was 30/30 green throughout.
 ## I2 — Every tool name dispatches
 
 The MCP tool surface and the protocol action surface are not the same list, and an agent only ever sees
-the first. `browser_get_text` is a tool; `get_text` is `get_property` with `{property:"text"}`. Reaching
+the first. `browser_get_property` is the tool; `get_text` is a legacy action alias for it. Reaching
 for the name you just saw returned `unknown action` [F49].
 
 Aliases live at the **extension's dispatch entry**, not in the MCP layer, so the CLI and the documented

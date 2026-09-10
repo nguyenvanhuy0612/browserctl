@@ -274,9 +274,14 @@
   // agent whether it is looking at a list, a form, an article or an app shell.
   function summarizeStructure(nodes) {
     const byLandmark = new Map();
+    const landmarkNodes = new Map();
     for (const el of nodes) {
       const lm = getLandmark(el) || "body";
       byLandmark.set(lm, (byLandmark.get(lm) || 0) + 1);
+      if (!landmarkNodes.has(lm)) {
+        const node = getLandmarkNode(el);
+        if (node) landmarkNodes.set(lm, node);
+      }
     }
 
     // A repeated row: a container whose direct children repeat the same tag 4+ times and
@@ -307,7 +312,8 @@
 
     const parts = [];
     for (const [lm, n] of [...byLandmark.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4)) {
-      parts.push(`${lm} ${n}`);
+      const node = landmarkNodes.get(lm);
+      parts.push(node ? `${lm} ${n} (@${getOrAssignRef(node)})` : `${lm} ${n}`);
     }
     const out = { regions: parts };
     if (best && best.g.members.size >= 4) {
@@ -499,6 +505,31 @@
       curr = curr.parentElement || (curr.getRootNode && curr.getRootNode().host);
     }
     return "main";
+  }
+
+  // The same walk as getLandmark, but returning the container itself. A census that names
+  // regions ("aside 19") and gives no way to address them makes the tool's own headline
+  // read — point browser_get_property at a container and get its whole text — depend on
+  // the agent guessing a CSS selector. Driving Facebook by hand, the right rail and the
+  // notifications popover both had to be guessed at ([role=complementary], [role=dialog]).
+  function getLandmarkNode(el) {
+    let curr = el;
+    while (curr && curr !== document.body && curr !== document.documentElement) {
+      if (curr.matches && curr.matches('dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]')) return curr;
+      const role = curr.getAttribute && curr.getAttribute("role");
+      const t = curr.tagName;
+      if (role === "banner" || t === "HEADER" ||
+          role === "navigation" || t === "NAV" ||
+          role === "main" || t === "MAIN" ||
+          role === "contentinfo" || t === "FOOTER" ||
+          role === "complementary" || t === "ASIDE") return curr;
+      curr = curr.parentElement || (curr.getRootNode && curr.getRootNode().host);
+    }
+    // getLandmark() labels landmark-less content "main", so the node for that label is the
+    // page's own content root. Without this the census counted a region ("main 11") that
+    // had no element behind it and therefore no ref — a count with nothing to act on,
+    // which is the exact shape this change exists to remove.
+    return document.body || null;
   }
 
   // Does `ancestor` contain `node` when shadow boundaries are followed? Walks up through
@@ -782,6 +813,14 @@
     const maxText = params.maxText ?? 4000;  // ?? so maxText:0 (elements only, no page text) is honoured
     const compact = !!params.compact;
     const scope = params.scope || "viewport"; // "viewport" (default) or "all"
+    // A census of a dense page used to arrive as one wall with a count of what it left
+    // out and no way to ask for the rest — which is the shape agents avoid: they stop
+    // reading the page and start writing querySelectorAll in eval_js. `limit`/`cursor`
+    // make the remainder ASKABLE. The cursor is an offset into this call's element
+    // ordering, so it is only valid while the page has not changed underneath it; the
+    // response says so rather than pretending otherwise.
+    const limit = Number.isFinite(params.limit) && params.limit > 0 ? Math.floor(params.limit) : 200;
+    const offset = Number.isFinite(params.cursor) && params.cursor > 0 ? Math.floor(params.cursor) : 0;
 
     const allInteractives = deepQueryAll(INTERACTIVE_SELECTOR).filter(isCensusVisible);
     let nodes = scope === "viewport" ? allInteractives.filter(isInViewport) : allInteractives;
@@ -830,7 +869,11 @@
     const scrollHeight = document.documentElement.scrollHeight || document.body.scrollHeight || 1;
     const scrollPercent = Math.min(100, Math.round((scrollY / Math.max(1, scrollHeight - vh)) * 100));
 
-    const elements = nodes.map((el, index) => {
+    // Stamping and index addressing stay over the FULL list above, so an index from any
+    // page of this census still resolves; only what is RENDERED is paged.
+    const pagedNodes = nodes.slice(offset, offset + limit);
+    const elements = pagedNodes.map((el, i) => {
+      const index = offset + i;
       const ref = getOrAssignRef(el);
       const tag = el.tagName.toLowerCase();
       const info = elementTextInfo(el);
@@ -887,6 +930,10 @@
       },
       totalElementsCount: allInteractives.length,
       offscreenCount,
+      window: { offset, shown: elements.length, inScope: nodes.length },
+      ...(offset + elements.length < nodes.length
+        ? { next: offset + elements.length }
+        : {}),
       pageState: {
         isBusy: false,
         hasActiveModal: !!activeModal,
@@ -978,18 +1025,21 @@
       // "[Structure: main 1]" above a single link is pure noise.
       if (shapeBits.length > 0 || nodes.length >= 8) {
         shapeBits.push(shape.regions.join(", "));
-        lines.push(`[Structure: ${shapeBits.join(" · ")}]`);
+        const regionHint = /\(@/.test(shape.regions.join("")) ? " — read a whole region with 'get text @ref'" : "";
+        lines.push(`[Structure: ${shapeBits.join(" · ")}${regionHint}]`);
       }
       if (activeModal) {
         const modalTitle = (activeModal.getAttribute("aria-label") || activeModal.querySelector("h1, h2, h3, [class*='title' i]")?.innerText || activeModal.tagName.toLowerCase()).trim().replace(/\s+/g, " ").slice(0, 80);
-        lines.push(`[Active Modal/Drawer: ${modalTitle} — Press 'Escape' or use 'dismiss' to close]`);
+        const modalRef = getOrAssignRef(activeModal);
+        lines.push(`[Active Modal/Drawer: ${modalTitle} (@${modalRef}) — read it with 'get text @${modalRef}'; close it with 'dismiss' (Escape, or its own close control)]`);
       } else if (openDialogs.length > 0) {
         // Open but not blocking: a right-rail notifications popover owns the interaction
         // without covering the viewport centre, so the modal gate rightly ignores it —
         // and used to leave the agent nothing at all (F27).
         const d = openDialogs[0];
         const extra = openDialogs.length > 1 ? ` (+${openDialogs.length - 1} more open)` : "";
-        lines.push(`[Open dialog: "${d.label}" ${d.width}x${d.height}, does not block the page${extra} — use 'dismiss' to close]`);
+        const dialogRef = getOrAssignRef(d.node);
+        lines.push(`[Open dialog: "${d.label}" ${d.width}x${d.height} (@${dialogRef}), does not block the page${extra} — read it with 'get text @${dialogRef}'; close it with 'dismiss']`);
       }
 
       // Preserve key editable inputs and search fields at top of compact view
@@ -1083,7 +1133,7 @@
         const missing = allInteractives.filter((el) => !shown.has(el));
         const kinds = describeElements(missing, 3);
         const detail = kinds.length ? `, including ${kinds.join(", ")}` : "";
-        lines.push(`[Notice: ${elements.length}/${allInteractives.length} elements visible in viewport. ${offscreenCount} offscreen${detail}. Call 'snapshot --all' to see them, or scroll down]`);
+        lines.push(`[Notice: ${nodes.length}/${allInteractives.length} elements visible in viewport. ${offscreenCount} offscreen${detail}. Call 'snapshot --all' to see them, or scroll down]`);
       }
       // 'all' used to say nothing at all about its own folding, so the mode an agent
       // escalates to for completeness was silently incomplete as well (F38).
@@ -1092,6 +1142,19 @@
       }
       if (duplicateCount > 0) {
         lines.push(`[Notice: ${duplicateCount} duplicate link${duplicateCount > 1 ? "s" : ""} suppressed (same destination and label as a row already listed)]`);
+      }
+
+      // The remainder is askable, so say the call that asks. A count of what was withheld
+      // with no way to request it is the line that sends an agent to eval_js.
+      if (offset + elements.length < nodes.length) {
+        const rest = nodes.length - (offset + elements.length);
+        lines.push(
+          `[More: elements ${offset + 1}-${offset + elements.length} of ${nodes.length} listed. ` +
+          `${rest} not shown — call snapshot with cursor: ${offset + elements.length} for the next page ` +
+          `(the cursor is an offset into THIS ordering; re-snapshot from the start if the page has changed)]`
+        );
+      } else if (offset > 0) {
+        lines.push(`[More: elements ${offset + 1}-${offset + elements.length} of ${nodes.length} listed — this is the last page]`);
       }
 
       // Content that no scope setting can reveal, because it is not in the DOM yet (F39).
@@ -1706,8 +1769,57 @@
     return out;
   }
 
-  function find({ query, max = 20 } = {}) {
-    if (!query) throw new Error("find requires 'query'");
+  function find({ query, selector, max = 20 } = {}) {
+    if (!query && !selector) throw new Error("find requires 'query' or 'selector'");
+    // A CSS selector is not a label, so it can never match through matchesByText. An agent
+    // that had one and no other way to spend it (Gmail, 2026-09-09) sent it as `query`,
+    // got nothing, and hand-rolled the rest of the session in eval_js — the ref it needed
+    // for fill/paste was only ever minted by snapshot, which it had already given up on as
+    // too large. Selector mode mints the same ref for the same element, in one call.
+    if (selector) {
+      let els;
+      try {
+        els = deepQueryAll(selector);
+      } catch {
+        return {
+          count: 0,
+          matches: [],
+          searchedScope: "top frame, open Shadow DOM and iframes",
+          note: `'${selector}' is not a valid CSS selector.`,
+        };
+      }
+      const visible = els.filter((el) => isVisible(el));
+      const chosen = (visible.length ? visible : els).slice(0, max);
+      const out = chosen.map((el) => ({
+        ref: getOrAssignRef(el),
+        role: roleOf(el) || el.tagName.toLowerCase(),
+        name: accessibleName(el),
+        tag: el.tagName.toLowerCase(),
+        matchedBy: "selector",
+        // Same meaning as in text mode: whether browser_click would accept this ref.
+        clickable: (() => { try { return el.matches(INTERACTIVE_SELECTOR); } catch { return false; } })(),
+        ...(() => {
+          const cut = elementTextInfo(el).truncatedBy;
+          return cut ? { truncatedBy: cut, fullTextVia: `get text @${getOrAssignRef(el)}` } : {};
+        })(),
+      }));
+      if (out.length === 0) {
+        return {
+          count: 0,
+          matches: [],
+          searchedScope: "top frame, open Shadow DOM and iframes",
+          note: "No element matched that CSS selector. It may not have rendered yet, or it may live in a closed shadow root.",
+        };
+      }
+      return {
+        count: out.length,
+        matches: out,
+        ...(visible.length && els.length > visible.length
+          ? { note: `${els.length - visible.length} further match(es) are hidden and are not listed.` }
+          : {}),
+        ...(visible.length === 0 ? { note: "Every match is currently hidden; refs are still returned." } : {}),
+      };
+    }
     const hits = matchesByText(query, { max });
     const out = hits.map(({ el, step }) => ({
       ref: getOrAssignRef(el),
@@ -2461,26 +2573,41 @@
     return out;
   }
 
-  function select_option({ index, ref, value, label }) {
-    const el = resolveTarget({ index, ref });
+  function select_option({ index, ref, selector, value, label, option }) {
+    const el = resolveTarget({ index, ref, selector });
     const warning = actionability(el);
     if (el.tagName !== "SELECT") throw new Error("target element is not a select");
-    const which = ref != null ? `ref ${ref}` : `index ${index}`;
+    const which = ref != null ? `ref ${ref}` : selector != null ? `selector ${selector}` : `index ${index}`;
+    // An agent holding one string does not know whether the page calls it a value or a
+    // label, and being told "no option with value X" when X is the label it can see on
+    // screen is the kind of dead end that ends in eval_js. `option` tries both and, when
+    // it fails, says what the select actually offers.
+    const optionsOf = () => Array.from(el.options).map((o) => `${o.text.trim()} (value=${o.value})`);
     let matched = null;
-    if (value !== undefined) {
+    if (option !== undefined) {
+      matched =
+        Array.from(el.options).find((opt) => opt.value === option) ||
+        Array.from(el.options).find((opt) => opt.text.trim() === option) ||
+        null;
+      if (!matched) {
+        throw new Error(
+          `no option matching "${option}" in select (${which}) — available: ${optionsOf().join(", ") || "(none)"}`
+        );
+      }
+    } else if (value !== undefined) {
       matched = Array.from(el.options).find((opt) => opt.value === value) || null;
-      if (!matched) throw new Error(`no option with value "${value}" in select (${which})`);
+      if (!matched) throw new Error(`no option with value "${value}" in select (${which}) — available: ${optionsOf().join(", ")}`);
     } else if (label !== undefined) {
       matched = Array.from(el.options).find((opt) => opt.text.trim() === label) || null;
-      if (!matched) throw new Error(`no option with label "${label}" in select (${which})`);
+      if (!matched) throw new Error(`no option with label "${label}" in select (${which}) — available: ${optionsOf().join(", ")}`);
     } else {
-      throw new Error("select_option requires value or label");
+      throw new Error("select_option requires 'option' (value or label), or the explicit 'value'/'label'");
     }
     el.value = matched.value;
     matched.selected = true;
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
-    const out = { selected: value !== undefined ? value : label };
+    const out = { selected: option !== undefined ? option : value !== undefined ? value : label };
     if (warning) out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
     return out;
   }
@@ -2903,7 +3030,7 @@
     return { recording: false };
   }
 
-  function get_property({ property, ref, index, selector, text, placeholder, attr } = {}) {
+  function get_property({ property, ref, index, selector, text, placeholder, attr, all, max = 50, fields } = {}) {
     if (property === "title") return { property: "title", value: document.title };
     if (property === "url") return { property: "url", value: location.href };
 
@@ -2935,6 +3062,80 @@
       return out;
     }
 
+    // "Every match, not just the first" — the one read this protocol had no answer for.
+    // An agent that wanted the href of every Apply link (LinkedIn, 2026-09-09) could get
+    // a count from get_count and the first value from get_property, and nothing else, so
+    // it wrote Array.from(document.querySelectorAll('a')).map(...) in eval_js. That was
+    // the single eval_js call in that session no tool could have replaced.
+    if (fields && !all) {
+      throw new Error("'fields' reads several values per ROW, so it needs all:true and a row 'selector' (e.g. selector:'li.result', fields:{title:'h3', url:{selector:'a', attr:'href'}})");
+    }
+    if (all) {
+      if (selector === undefined) {
+        throw new Error("'all' reads every match of a CSS 'selector' — pass one (a ref or index is a single element by definition)");
+      }
+      let invalid = false;
+      try { document.createDocumentFragment().querySelector(selector); } catch { invalid = true; }
+      if (invalid) {
+        const err = new Error(`'${selector}' is not a valid CSS selector`);
+        err.code = "INVALID_SELECTOR";
+        throw err;
+      }
+      const els = deepQueryAll(selector);
+      const prop = property || "text";
+      const capped = els.slice(0, Math.max(1, max));
+
+      // Several fields per row, in one call. Reading ONE property across many elements
+      // still left the common shape — a list of rows, each with a title, a link and a
+      // number — as one call per field, so an agent with three fields to collect wrote
+      // querySelectorAll(...).map(...) in eval_js instead. Measured on a Haiku probe:
+      // that was the single eval_js call in the run, and its reasoning was explicit.
+      // Field selectors resolve INSIDE each row (shadow-piercing); a value that lives in
+      // a sibling of the row is a separate read, and the response says so.
+      const fieldSpecs = fields && typeof fields === "object" && !Array.isArray(fields) ? fields : null;
+      const missingByField = new Map();
+      const matches = capped.map((node) => {
+        if (!fieldSpecs) return { ref: getOrAssignRef(node), ...readOneProperty(node, prop, attr) };
+        const row = { ref: getOrAssignRef(node) };
+        for (const [name, spec] of Object.entries(fieldSpecs)) {
+          const f = typeof spec === "string" ? { selector: spec } : (spec || {});
+          const target = f.selector ? deepQuery(f.selector, node) : node;
+          if (!target) {
+            row[name] = null;
+            missingByField.set(name, (missingByField.get(name) || 0) + 1);
+            continue;
+          }
+          const read = readOneProperty(target, f.property || (f.attr ? "attr" : "text"), f.attr);
+          // A URL is read to answer "where does this go", so hand back the absolute form.
+          row[name] = read.resolved !== undefined ? read.resolved : read.value;
+        }
+        return row;
+      });
+      const res = { property: fieldSpecs ? undefined : prop, all: true, selector, count: els.length, matches };
+      // One note field, several things worth saying. These used to be three assignments to
+      // res.note in a row, so whichever ran last silently erased the others — the
+      // "this field matched nothing" warning was wiped by the paging line every time.
+      const notes = [];
+      if (fieldSpecs) {
+        res.fields = Object.keys(fieldSpecs);
+        if (missingByField.size) {
+          notes.push(
+            `no match inside the row for: ${[...missingByField].map(([n, c]) => `${n} (${c}/${capped.length} rows)`).join(", ")}. ` +
+            `Field selectors resolve INSIDE each row — a value that sits in a SIBLING of the row (a separate <tr>, the next <div>) ` +
+            `is not reachable this way; read it with its own selector in a second call.`
+          );
+        }
+      }
+      if (els.length > capped.length) {
+        notes.push(`${els.length} elements matched; the first ${capped.length} are listed. Raise 'max' or narrow the selector.`);
+      }
+      if (els.length === 0) {
+        notes.push("0 matches. This is an answer, not a failure — the selector is valid and nothing on the page matches it.");
+      }
+      if (notes.length) res.note = notes.join(" ");
+      return res;
+    }
+
     const hasTarget = ref !== undefined || index !== undefined || selector !== undefined || text !== undefined || placeholder !== undefined;
     const el = hasTarget ? resolveTarget({ ref, index, selector, text, placeholder }) : document.documentElement;
 
@@ -2953,13 +3154,23 @@
       return out;
     };
 
+    const out = readOneProperty(el, property, attr);
+    return MATCH_COUNTED.has(property) ? withMatchCount(out) : out;
+  }
+
+  // Which properties report "your selector matched more than one element": the reads whose
+  // answer would otherwise look like the whole truth. A box or a form value is obviously
+  // about one element; a text or href silently about the first of five is not.
+  const MATCH_COUNTED = new Set(["text", "html", "attr", "attribute"]);
+
+  function readOneProperty(el, property, attr) {
     switch (property) {
       case "text":
-        return withMatchCount({ property: "text", value: (el.innerText || el.textContent || "").trim() });
+        return { property: "text", value: (el.innerText || el.textContent || "").trim() };
       case "value":
         return { property: "value", value: el.value !== undefined ? el.value : (el.innerText || "") };
       case "html":
-        return withMatchCount({ property: "html", value: el.outerHTML || "" });
+        return { property: "html", value: el.outerHTML || "" };
       case "attr":
       case "attribute": {
         // `present` disambiguates the three cases an absent/empty attribute collapsed
@@ -2968,7 +3179,7 @@
         // render the absent one as no output at all.
         const has = !!(attr && el.hasAttribute && el.hasAttribute(attr));
         const raw = has ? el.getAttribute(attr) : null;
-        const out = { property: "attr", name: attr, present: has, value: raw };
+        const attrOut = { property: "attr", name: attr, present: has, value: raw };
         // A URL attribute is usually read to answer "where does this go", and the raw
         // value answers that only if it happens to be absolute. Reading href on a link
         // returned a bare "front", which the caller could not tell from a truncated or
@@ -2977,17 +3188,15 @@
         if (has && raw && /^(href|src|action|poster|cite|formaction|data|srcset)$/i.test(attr)) {
           try {
             const abs = new URL(raw, document.baseURI).href;
-            if (abs !== raw) out.resolved = abs;
+            if (abs !== raw) attrOut.resolved = abs;
           } catch {}
         }
-        return withMatchCount(out);
+        return attrOut;
       }
       case "box": {
         const r = el.getBoundingClientRect();
         return { property: "box", x: r.x, y: r.y, width: r.width, height: r.height };
       }
-      case "count": // handled above, before target resolution
-        return { property: "count", value: selector ? deepQueryAll(selector).length : 1 };
       default:
         throw new Error(`unknown property "${property}"`);
     }

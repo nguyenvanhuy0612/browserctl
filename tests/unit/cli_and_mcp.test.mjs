@@ -119,13 +119,16 @@ test("CLI: prints full subcommands in help output", async () => {
   assert.ok(stdout.includes("--auto-daemon"));
 });
 
-test("MCP: core profile registers get_* tools and browser_dismiss_modal", async () => {
+test("MCP: core registers the readers, and the names it dropped stay dropped", async () => {
   const script = `
     import { TOOL_CATEGORIES } from "./mcp/index.js";
-    if (!TOOL_CATEGORIES.core.includes("browser_get_text")) throw new Error("missing browser_get_text in core");
-    if (!TOOL_CATEGORIES.core.includes("browser_get_attribute")) throw new Error("missing browser_get_attribute in core");
-    if (!TOOL_CATEGORIES.core.includes("browser_get_count")) throw new Error("missing browser_get_count in core");
-    if (!TOOL_CATEGORIES.core.includes("browser_dismiss_modal")) throw new Error("missing browser_dismiss_modal in core");
+    if (!TOOL_CATEGORIES.core.includes("browser_get_property")) throw new Error("missing browser_get_property in core");
+    for (const gone of ["browser_get_text", "browser_get_attribute", "browser_get_count"]) {
+      if (TOOL_CATEGORIES.core.includes(gone)) throw new Error(gone + " came back — it is browser_get_property now");
+    }
+    for (const gone of ["browser_dismiss_modal", "browser_find_text", "browser_navigate", "browser_new_tab", "browser_open_and_read"]) {
+      if (TOOL_CATEGORIES.core.includes(gone)) throw new Error(gone + " came back into core");
+    }
     console.log("CORE_GET_TOOLS_OK");
     process.exit(0);
   `;
@@ -226,10 +229,11 @@ test("MCP: schemas and descriptions document SPA settle, tolerance, and CSP fall
     const netShape = waitNet.inputSchema.shape;
     if (!netShape.maxInFlight) throw new Error("Missing maxInFlight parameter in wait_network_idle schema");
 
-    // 2. Check browser_wait_settle description
-    const waitSettle = server._registeredTools["browser_wait_settle"];
-    if (!waitSettle) throw new Error("browser_wait_settle not registered");
-    if (!waitSettle.description.includes("SPAs")) throw new Error("Missing SPAs in wait_settle description");
+    // 2. The settle guidance now lives on browser_wait_for({for:"settle"})
+    const waitFor = server._registeredTools["browser_wait_for"];
+    if (!waitFor) throw new Error("browser_wait_for not registered");
+    if (!waitFor.description.includes("SPA")) throw new Error("Missing SPA guidance in wait_for description");
+    if (!waitFor.inputSchema.shape.for) throw new Error("wait_for lost the 'for' parameter that absorbed wait_settle");
 
     // 3. Check browser_eval_js description
     const evalJs = server._registeredTools["browser_eval_js"];
@@ -408,8 +412,8 @@ test("MCP: get_text forwards the property enum, and qualifiers survive formattin
     const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
 
     // property is forwarded, not hardcoded to "text"
-    const getText = server._registeredTools["browser_get_text"].handler;
-    const htmlRes = await getText({ selector: "h1", property: "html" });
+    const getProp = server._registeredTools["browser_get_property"].handler;
+    const htmlRes = await getProp({ selector: "h1", property: "html" });
     const sent = seen.filter((s) => s.action === "get_property").pop();
     if (sent.params.property !== "html") throw new Error("property not forwarded: " + JSON.stringify(sent.params));
     const htmlText = htmlRes.content[0].text;
@@ -417,8 +421,7 @@ test("MCP: get_text forwards the property enum, and qualifiers survive formattin
     if (!htmlText.includes("matched 3 elements")) throw new Error("dropped multi-match note: " + htmlText);
 
     // an absent attribute must not render as empty output
-    const getAttr = server._registeredTools["browser_get_attribute"].handler;
-    const attrText = (await getAttr({ selector: "dialog", attr: "open" })).content[0].text;
+    const attrText = (await getProp({ selector: "dialog", property: "attr", attr: "open" })).content[0].text;
     if (!/not present/.test(attrText)) throw new Error("absent attribute rendered as: " + JSON.stringify(attrText));
 
     console.log("MCP_PROPERTY_OK");
@@ -485,12 +488,14 @@ test("MCP: unloaded capabilities are advertised, and browser_action lists its ca
 // The v2 working tree had shortened these two descriptions, deleting the scope facts an
 // agent needs to interpret an empty result, in exchange for a "parameter is REQUIRED"
 // nag the schema already enforces. Pin the facts so that cannot silently happen again.
-test("MCP: find and find_text descriptions state their real scope", async () => {
+test("MCP: find states the real scope of BOTH indexes it searches", async () => {
   const script = `
     process.env.BROWSERCTL_MCP_PROFILE = "core";
     const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
-    const ft = server._registeredTools["browser_find_text"].description || "";
+    // find_text was folded into find({in:"text"}) — its scope facts had to come with it,
+    // or an empty result becomes uninterpretable again.
     const f = server._registeredTools["browser_find"].description || "";
+    const ft = f;
     const checks = [
       [ft, "NOT iframes", "find_text must say it does not search iframes"],
       [ft, "Shadow DOM", "find_text must say it searches shadow DOM"],
@@ -601,8 +606,14 @@ test("Snapshot notices name what was withheld and flag load-on-demand content", 
 
   // F30: the offscreen notice must describe kinds, not only a count.
   assert.ok(/describeElements/.test(content), "F30: notice must summarise what is offscreen");
-  const notice = content.match(/\[Notice: \$\{elements\.length\}[^`]*`/);
-  assert.ok(notice, "viewport notice must still be emitted");
+  // The count in this notice is how many are IN SCOPE, not how many this page of a paged
+  // census listed. They were the same number until the census learned to page, and the
+  // notice then started reporting the page size as the viewport count — three numbers in
+  // one response with the wrong one in front.
+  const notice = content.match(/\[Notice: \$\{nodes\.length\}[^`]*`/);
+  assert.ok(notice, "viewport notice must still be emitted, counting what is in scope");
+  assert.ok(!/\[Notice: \$\{elements\.length\}/.test(content),
+    "the viewport notice must not count the paged slice");
   assert.ok(/including \$\{kinds/.test(content) || /\$\{detail\}/.test(content),
     "F30: the notice must interpolate a description of the withheld elements");
 
@@ -693,9 +704,15 @@ test("Tool surface is navigable by intent, not just by name (F51)", async () => 
   // The server instructions are read once at connect, before any tool description, so
   // they are the only place an intent->tool mapping is guaranteed to be seen.
   assert.ok(/WHAT YOU WANT -> WHAT TO CALL/.test(src), "instructions must carry an intent index");
-  for (const t of ["browser_get_count", "browser_get_attribute", "browser_find_text", "browser_load_tools"]) {
-    assert.ok(new RegExp(`${t}`).test(src.split("WHAT YOU WANT")[1].slice(0, 2000)),
-      `intent index must name ${t}`);
+  const intentIndex = src.split("WHAT YOU WANT")[1].slice(0, 2500);
+  for (const t of ["browser_find", "browser_get_property", "browser_get_page_content", "browser_load_tools"]) {
+    assert.ok(new RegExp(`${t}`).test(intentIndex), `intent index must name ${t}`);
+  }
+  // The intents that became parameters in 0.6.4 must still be findable BY INTENT — an
+  // agent looking for "count these" or "read this attribute" has no reason to guess that
+  // both now live on browser_get_property unless the index spells the call out.
+  for (const call of ['property: "count"', 'property: "attr"', "all: true", "selector"]) {
+    assert.ok(intentIndex.includes(call), `intent index must show the ${call} form`);
   }
   assert.ok(/browser_eval_js\s*\n?[^\n]*costs far more tokens|instead costs far more tokens/.test(src),
     "instructions must say why eval_js is the expensive fallback");
@@ -1172,7 +1189,12 @@ test("The e2e coverage denominator is derived, not hand-kept (F76)", async () =>
   const registered = [...mcp.matchAll(/\btool\(\s*"([a-z_0-9]+)"/g)].map((m) => m[1]);
   const aliasBlock = mcp.match(/const ACTION_ALIASES\s*=\s*\{([\s\S]*?)\n\};/);
   const aliases = aliasBlock ? [...aliasBlock[1].matchAll(/^\s*([a-z_0-9]+)\s*:/gm)].map((m) => m[1]) : [];
-  const surface = new Set([...registered, ...aliases]);
+  // Actions the bridge runs that no longer have a tool of their own (0.6.4/0.7.0 merges).
+  // browser_action's catalogue declares them, and that declaration is what keeps them
+  // reachable AND countable — if it rots, this derivation shrinks and the test says so.
+  const extraBlock = mcp.match(/const extra = \[([\s\S]*?)\];/);
+  const extra = extraBlock ? [...extraBlock[1].matchAll(/"([a-z_0-9]+)"/g)].map((m) => m[1]) : [];
+  const surface = new Set([...registered, ...aliases, ...extra]);
   assert.ok(surface.size > 60, `F76: derivation found only ${surface.size} actions — the parse has broken`);
   for (const must of ["snapshot", "click", "fill", "paste", "find_text", "get_text", "get_count"]) {
     assert.ok(surface.has(must), `F76: derivation missed '${must}' — the parse has broken`);
@@ -1206,14 +1228,22 @@ test("Inline hints reach an MCP agent in a syntax it can call (F78)", async () =
   for (const cli of ["get text @", "get attr @", "get count <", "snapshot --all", 'find "label"', "scroll down"]) {
     assert.ok(!out.includes(cli), `F78: CLI syntax "${cli}" still reaches an MCP client`);
   }
-  for (const tool of ["browser_get_text", "browser_get_attribute", "browser_get_count",
-                      "browser_find({", "browser_find_text({", "browser_snapshot({scope:\"all\"})",
+  for (const tool of ["browser_get_property({", "property:\"attr\"", "property:\"count\"",
+                      "browser_find({", 'in:"text"', "browser_snapshot({scope:\"all\"})",
                       "browser_scroll({"]) {
     assert.ok(out.includes(tool), `F78: rewritten footer must name ${tool}`);
   }
 
+  // The dialog notices are hints too, and they named a CLI verb for a tool that no longer
+  // exists in any form. Driving Facebook by hand hit exactly this: "[Open dialog:
+  // \"Notifications\" ... — use 'dismiss' to close]" with no browser_dismiss to call.
+  const dialogHint = mcpifyHints(`[Open dialog: "Notifications" 360x722 (@ref_57), does not block the page — read it with 'get text @ref_57'; close it with 'dismiss']`);
+  assert.ok(dialogHint.includes('browser_action({action:"dismiss"})'), "F78: the dialog hint must name a callable close");
+  assert.ok(dialogHint.includes('browser_get_property({ref:"ref_57"})'), "F78: the dialog hint must name the region read, by ref");
+  assert.ok(!/use 'dismiss'|with 'dismiss'/.test(dialogHint), "F78: the CLI verb must not survive the rewrite");
+
   // A real ref keeps its number; the bare placeholder stays a placeholder.
-  assert.ok(mcpifyHints("[+168 chars: get text @ref_48]").includes('browser_get_text({ref:"ref_48"})'),
+  assert.ok(mcpifyHints("[+168 chars: get text @ref_48]").includes('browser_get_property({ref:"ref_48"})'),
     "F78: a concrete ref must survive the rewrite");
   assert.ok(mcpifyHints("[read: get text @ref]").includes('{ref:"<ref>"}'),
     "F78: the bare @ref placeholder must not become a literal ref named 'ref'");
@@ -1232,17 +1262,18 @@ test("The tools that answer 'read this region' say so (F79)", async () => {
   const fs = await import("node:fs/promises");
   const src = await fs.readFile(join(__dirname, "..", "..", "mcp", "index.js"), "utf8");
 
-  // get_text returns el.innerText, so it reads a whole container — but it was described
+  // The reader returns el.innerText, so it reads a whole container — but it was described
   // as "read one property of an element", and the agent that wanted a thread body never
   // recognised it.
-  const getText = src.slice(src.indexOf("Read one property of an element"), src.indexOf("Read one property of an element") + 1600);
-  assert.ok(/WHOLE REGION|whole region/.test(getText), "F79: get_text must say it reads a container, not just a field");
-  assert.ok(/eval_js/.test(getText), "F79: get_text must name the fallback it replaces");
+  const reader = src.slice(src.indexOf("THE element read."), src.indexOf("THE element read.") + 2200);
+  assert.ok(/WHOLE REGION|whole region/.test(reader), "F79: the reader must say it reads a container, not just a field");
+  assert.ok(/eval_js/.test(reader), "F79: the reader must name the fallback it replaces");
+  assert.ok(/all=true|all: true/.test(reader), "F79: the reader must say it can answer for every match");
 
   // get_page_content used to send web-app readers to snapshot, which truncates — a loop
   // whose only exit was eval_js.
   const gpc = src.slice(src.indexOf("Extract the main readable prose"), src.indexOf("Extract the main readable prose") + 900);
-  assert.ok(/browser_get_text/.test(gpc), "F79: get_page_content must point at the tool that does answer");
+  assert.ok(/browser_get_property/.test(gpc), "F79: get_page_content must point at the tool that does answer");
 
   // read_page was called once, bare, then blamed for what ref_id fixes.
   const rp = src.slice(src.indexOf("SPECIALISED reader"), src.indexOf("SPECIALISED reader") + 1600);
@@ -1299,4 +1330,376 @@ test("Both status surfaces answer from one builder (F81)", async () => {
   assert.ok(/Call log: ON/.test(cli), "F81: browserctl status must report the call log");
   assert.ok(/stdio: "ignore"/.test(cli),
     "F81: if the daemon ever stops discarding stdout, revisit where this notice belongs");
+});
+
+// Every failure observed in the 2026-09-07..09 agent window was parameter-level, and two of
+// the four were swallowed in silence: `read_page {format:"markdown"}` returned an
+// accessibility tree and reported success, so the agent decided the reader was broken and
+// hand-rolled the read in eval_js for the rest of the session. Unknown keys must be refused
+// with the legal set, and the snake_case names an LLM types must resolve, not vanish.
+test("MCP: unknown params are refused with a redirect, aliases resolve to the real name", async () => {
+  const script = `
+    import http from "node:http";
+    const calls = [];
+    const stub = http.createServer((req, res) => {
+      if (req.url === "/status") { res.writeHead(200, {"content-type":"application/json"}); return res.end(JSON.stringify({ ok: true })); }
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        calls.push(JSON.parse(body));
+        res.writeHead(200, {"content-type":"application/json"});
+        res.end(JSON.stringify({ ok: true, result: { tree: "" } }));
+      });
+    });
+    await new Promise((r) => stub.listen(0, "127.0.0.1", r));
+    process.env.BROWSERCTL_BRIDGE_URL = "http://127.0.0.1:" + stub.address().port;
+    process.env.BROWSERCTL_MCP_PROFILE = "core";
+    const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
+    const readPage = server._registeredTools["browser_read_page"].handler;
+
+    // 1. A parameter that belongs to a different tool: refused, not stripped.
+    const bad = await readPage({ format: "markdown" });
+    if (!bad.isError) throw new Error("unknown param was accepted");
+    if (!bad.content[0].text.includes("browser_get_page_content")) throw new Error("no redirect to the reader that does return prose");
+    if (!bad.content[0].text.includes("valid params:")) throw new Error("legal set not listed");
+
+    // 2. A typo: did-you-mean.
+    const typo = await readPage({ dept: 3 });
+    if (!typo.content[0].text.includes("did you mean 'depth'")) throw new Error("no did-you-mean: " + typo.content[0].text);
+
+    // 3. snake_case tab id resolves to tabId instead of being dropped.
+    await readPage({ tab_id: 4242 });
+    const sent = calls.at(-1);
+    if (sent.params.tabId !== 4242) throw new Error("tab_id did not become tabId: " + JSON.stringify(sent.params));
+    if ("tab_id" in sent.params) throw new Error("tab_id leaked through to the bridge");
+
+    // 4. read_page's odd one out: ref/refId both mean ref_id.
+    await readPage({ ref: "ref_5" });
+    if (calls.at(-1).params.ref_id !== "ref_5") throw new Error("ref did not become ref_id");
+
+    // 5. find takes a CSS selector, and forwards it — this is the call that hands
+    // fill/paste a ref without a full re-read of the page.
+    const find = server._registeredTools["browser_find"].handler;
+    await find({ selector: 'div[role="textbox"][contenteditable]' });
+    if (calls.at(-1).params.selector !== 'div[role="textbox"][contenteditable]') {
+      throw new Error("find did not forward selector: " + JSON.stringify(calls.at(-1).params));
+    }
+    const findBad = await find({ selectors: "div" });
+    if (!findBad.isError || !findBad.content[0].text.includes("did you mean 'selector'")) {
+      throw new Error("find did not suggest 'selector' for 'selectors'");
+    }
+
+    console.log("PARAM_GUARD_OK");
+    process.exit(0);
+  `;
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]);
+  assert.ok(stdout.includes("PARAM_GUARD_OK"));
+});
+
+// The merges of 0.6.4: four tools for one intent became one tool with a parameter. What
+// must not change is which protocol action ends up running — the surface got smaller, the
+// capability did not.
+test("MCP: merged tools dispatch to the same protocol actions", async () => {
+  const script = `
+    import http from "node:http";
+    const calls = [];
+    const stub = http.createServer((req, res) => {
+      if (req.url === "/status") { res.writeHead(200, {"content-type":"application/json"}); return res.end(JSON.stringify({ ok: true })); }
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        calls.push(JSON.parse(body));
+        res.writeHead(200, {"content-type":"application/json"});
+        res.end(JSON.stringify({ ok: true, result: { dataUrl: "data:image/jpeg;base64,AAAA", value: 1 } }));
+      });
+    });
+    await new Promise((r) => stub.listen(0, "127.0.0.1", r));
+    process.env.BROWSERCTL_BRIDGE_URL = "http://127.0.0.1:" + stub.address().port;
+    process.env.BROWSERCTL_MCP_PROFILE = "core";
+    const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
+    const call = (n, a) => server._registeredTools[n].handler(a);
+    const lastAction = () => calls.at(-1).action;
+
+    await call("browser_fill", { ref: "ref_1", text: "hi" });
+    if (lastAction() !== "fill") throw new Error("default method is not fill: " + lastAction());
+    await call("browser_fill", { ref: "ref_1", text: "hi", method: "type" });
+    if (lastAction() !== "type") throw new Error("method=type did not reach the type action");
+    await call("browser_fill", { ref: "ref_1", text: "hi", method: "paste" });
+    if (lastAction() !== "paste") throw new Error("method=paste did not reach the paste action");
+    await call("browser_fill", { ref: "ref_1", option: "Vietnam" });
+    if (lastAction() !== "select_option" || calls.at(-1).params.option !== "Vietnam") {
+      throw new Error("option did not reach select_option: " + JSON.stringify(calls.at(-1)));
+    }
+
+    await call("browser_screenshot", {});
+    if (lastAction() !== "screenshot") throw new Error("viewport screenshot changed action");
+    await call("browser_screenshot", { fullPage: true });
+    if (lastAction() !== "capture_screenshot") throw new Error("fullPage did not reach capture_screenshot");
+
+    await call("browser_wait_for", { selector: "#x" });
+    if (lastAction() !== "wait_for") throw new Error("wait_for changed action");
+    await call("browser_wait_for", { for: "settle" });
+    if (lastAction() !== "wait_settle") throw new Error("for=settle did not reach wait_settle");
+
+    await call("browser_get_property", { selector: "a", property: "attr", attr: "href", all: true });
+    const p = calls.at(-1).params;
+    if (lastAction() !== "get_property" || p.all !== true || p.attr !== "href" || p.property !== "attr") {
+      throw new Error("all-matches read did not forward: " + JSON.stringify(p));
+    }
+
+    // The attribute-shaped name must not be narrower than the text-shaped one: an agent
+    // that reaches for the reader to get every href has to get every href.
+    await call("browser_get_property", { selector: "a", property: "attr", attr: "href", all: true, max: 20 });
+    const attrParams = calls.at(-1).params;
+    if (attrParams.all !== true || attrParams.max !== 20 || attrParams.property !== "attr") {
+      throw new Error("get_attribute did not forward all/max: " + JSON.stringify(attrParams));
+    }
+
+    console.log("MERGE_DISPATCH_OK");
+    process.exit(0);
+  `;
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]);
+  assert.ok(stdout.includes("MERGE_DISPATCH_OK"));
+});
+
+// The consolidated surface is opt-in until it is measured. Both numbers are asserted so a
+// tool added to core without a decision shows up as a failing test, not as a drifting count.
+test("MCP: core is exactly 23 tools, and the merged-away names stay gone", async () => {
+  const script = `
+    const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
+    const on = Object.entries(server._registeredTools).filter(([, t]) => t.enabled !== false).map(([n]) => n);
+    console.log(JSON.stringify(on.sort()));
+    process.exit(0);
+  `;
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...process.env, BROWSERCTL_MCP_PROFILE: "core" },
+  });
+  const core = JSON.parse(stdout.trim().split("\n").at(-1));
+
+  // A tool added to core without a decision shows up here as a failing count, not as drift.
+  assert.equal(core.length, 23);
+
+  // Eight names became parameters on five survivors in 0.6.4/0.7.0. They must not creep back.
+  for (const gone of [
+    "browser_get_text", "browser_get_attribute", "browser_get_count",
+    "browser_type", "browser_paste", "browser_select_option",
+    "browser_screenshot_fullpage", "browser_wait_settle",
+    "browser_click_selector", "browser_fill_selector",
+    "browser_navigate", "browser_new_tab", "browser_open_and_read",
+    "browser_find_text", "browser_dismiss_modal",
+  ]) {
+    assert.ok(!core.includes(gone), `${gone} came back into core`);
+  }
+  for (const kept of ["browser_get_property", "browser_fill", "browser_screenshot", "browser_wait_for",
+                      "browser_open_url", "browser_find", "browser_reload"]) {
+    assert.ok(core.includes(kept), `${kept} must be in core — it is what absorbed the others`);
+  }
+});
+
+test("Versions do not drift: package.json, the MCP server and the extension manifest agree", async () => {
+  const fs = await import("node:fs/promises");
+  const root = join(__dirname, "..", "..");
+  const pkg = JSON.parse(await fs.readFile(join(root, "package.json"), "utf8"));
+  const manifest = JSON.parse(await fs.readFile(join(root, "extension", "manifest.json"), "utf8"));
+  assert.equal(manifest.version, pkg.version, "extension/manifest.json version must match package.json");
+
+  // The server must READ the version, not restate it.
+  const src = await fs.readFile(join(root, "mcp", "index.js"), "utf8");
+  assert.ok(
+    /const SERVER_VERSION = \(\(\) => \{[\s\S]*?package\.json/.test(src),
+    "SERVER_VERSION must be derived from package.json, not hardcoded"
+  );
+});
+
+// The census is paged now, and two things have to hold for that to be usable: the tool has
+// to forward the parameters, and the cross-frame merge has to stop dropping fields it was
+// never taught about. The merge enumerated the fields it kept, so `window`/`next` vanished
+// on every multi-frame page the day they were added — the same rot that once cost `find`
+// its `nearest` and `pageLabels`.
+test("Snapshot is paged, and the frame merge cannot drop what it was not taught (F90)", async () => {
+  const fs = await import("node:fs/promises");
+  const bg = await fs.readFile(join(__dirname, "..", "..", "extension", "background.js"), "utf8");
+  const merge = bg.slice(bg.indexOf('if (action === "snapshot") {'), bg.indexOf('if (action === "find") {'));
+  assert.ok(/const res = \{\s*\n\s*\.\.\.top\.result,/.test(merge),
+    "F90: the snapshot merge must pass the top frame's result through, not list what it keeps");
+  assert.ok(!/url: top\.result\.url/.test(merge), "F90: enumerating kept fields is what rots");
+
+  const content = await fs.readFile(join(__dirname, "..", "..", "extension", "content.js"), "utf8");
+  assert.ok(/params\.limit/.test(content) && /params\.cursor/.test(content),
+    "F90: the census must accept limit/cursor");
+  assert.ok(/\[More: elements /.test(content),
+    "F90: the compact view must say the remainder is askable, not just that it exists");
+
+  const script = `
+    import http from "node:http";
+    const calls = [];
+    const stub = http.createServer((req, res) => {
+      if (req.url === "/status") { res.writeHead(200, {"content-type":"application/json"}); return res.end(JSON.stringify({ ok: true })); }
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        calls.push(JSON.parse(body));
+        res.writeHead(200, {"content-type":"application/json"});
+        res.end(JSON.stringify({ ok: true, result: { compactView: "x", window: { offset: 8, shown: 8, inScope: 226 }, next: 16 } }));
+      });
+    });
+    await new Promise((r) => stub.listen(0, "127.0.0.1", r));
+    process.env.BROWSERCTL_BRIDGE_URL = "http://127.0.0.1:" + stub.address().port;
+    const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
+    await server._registeredTools["browser_snapshot"].handler({ scope: "all", limit: 8, cursor: 8 });
+    const p = calls.at(-1).params;
+    if (p.limit !== 8 || p.cursor !== 8) throw new Error("snapshot dropped limit/cursor: " + JSON.stringify(p));
+    console.log("SNAPSHOT_PAGING_OK");
+    process.exit(0);
+  `;
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]);
+  assert.ok(stdout.includes("SNAPSHOT_PAGING_OK"));
+});
+
+// browser_open_url replaced navigate + new_tab + open_and_read. The one mistake in it that
+// the USER pays for is navigating whatever tab they are looking at, so the default must not
+// be able to do that: with nothing pinned, 'current' opens a new tab.
+test("open_url never hijacks an unpinned tab, and reads in the same call (F91)", async () => {
+  const script = `
+    import http from "node:http";
+    const calls = [];
+    let pinned = null;
+    const stub = http.createServer((req, res) => {
+      if (req.url === "/status") { res.writeHead(200, {"content-type":"application/json"}); return res.end(JSON.stringify({ ok: true })); }
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const call = JSON.parse(body);
+        calls.push(call);
+        const result =
+          call.action === "list_tabs" ? { tabs: [], pinned } :
+          call.action === "new_tab" ? { id: 99 } :
+          call.action === "read_pdf" ? { isPdf: false } :
+          call.action === "get_page_content" ? { title: "T", url: "u", text: "body" } : {};
+        res.writeHead(200, {"content-type":"application/json"});
+        res.end(JSON.stringify({ ok: true, result }));
+      });
+    });
+    await new Promise((r) => stub.listen(0, "127.0.0.1", r));
+    process.env.BROWSERCTL_BRIDGE_URL = "http://127.0.0.1:" + stub.address().port;
+    const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
+    const open = server._registeredTools["browser_open_url"].handler;
+
+    // 1. Nothing pinned -> a new tab, never the focused one.
+    await open({ url: "https://x.test", wait: "none" });
+    const actions = calls.map((c) => c.action);
+    if (actions.includes("navigate")) throw new Error("navigated with nothing pinned: " + actions.join(","));
+    if (!actions.includes("new_tab")) throw new Error("did not open a tab: " + actions.join(","));
+    if (actions.includes("current_tab")) throw new Error("used current_tab, which PINS the active tab as a side effect");
+
+    // 2. Something pinned -> that tab, not a new one.
+    pinned = 42;
+    calls.length = 0;
+    const res = await open({ url: "https://x.test", wait: "none" });
+    if (!calls.some((c) => c.action === "navigate" && c.params.tabId === 42)) {
+      throw new Error("did not navigate the pinned tab: " + JSON.stringify(calls.map((c) => c.action)));
+    }
+    if (!res.content[0].text.includes("pinned tab")) throw new Error("did not report which tab it drove");
+
+    // 3. read= folds the old open_and_read into one round trip.
+    calls.length = 0;
+    const read = await open({ url: "https://x.test", wait: "none", read: "text" });
+    if (!calls.some((c) => c.action === "get_page_content")) throw new Error("read:'text' did not read");
+    if (!read.content[0].text.includes("body")) throw new Error("read:'text' lost the text");
+
+    console.log("OPEN_URL_OK");
+    process.exit(0);
+  `;
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]);
+  assert.ok(stdout.includes("OPEN_URL_OK"));
+});
+
+// A click that navigates used to come back as a failure. toContent() caught the dead
+// content script, re-injected into the NEW document and retried there — where the ref no
+// longer exists — so submitting a form reported STALE_REF for an action that had worked.
+// Measured on selenium.dev/web-form.html: the form submitted, the URL changed, and the
+// tool said `ref "ref_14" not found or stale`. The agent that saw it concluded the click
+// had never happened. A retry is also a double-submit risk, which is worse.
+test("An action that navigates reports the navigation, not a stale ref (F92)", async () => {
+  const fs = await import("node:fs/promises");
+  const bg = await fs.readFile(join(__dirname, "..", "..", "extension", "background.js"), "utf8");
+  const fn = bg.slice(bg.indexOf("async function toContent("), bg.indexOf("// Cross-frame refs are exposed"));
+
+  assert.ok(/const urlBefore = tab\.url/.test(fn), "F92: toContent must remember the URL it started on");
+  assert.ok(/after\.url !== urlBefore/.test(fn), "F92: the catch must tell navigation apart from a missing content script");
+  assert.ok(/navigated: true/.test(fn), "F92: a navigation must be reported as a result, not an error");
+  assert.ok(/urlChanged: true/.test(fn), "F92: it must carry the effect shape every other action returns");
+
+  // The retry must stay reachable for the case it was written for — a page that simply
+  // has no content script yet.
+  assert.ok(/executeScript\(/.test(fn) && fn.indexOf("executeScript(") > fn.indexOf("navigated: true"),
+    "F92: the inject-and-retry path must remain, AFTER the navigation check");
+});
+
+// Doing a real Facebook task by hand surfaced three ways the census confused its reader.
+// All three are about the same thing: the response described the page but did not hand
+// over the call that acts on the description.
+test("The census hands over calls, not just counts (F93)", async () => {
+  const fs = await import("node:fs/promises");
+  const content = await fs.readFile(join(__dirname, "..", "..", "extension", "content.js"), "utf8");
+
+  // 1. Regions were named ("aside 19") with no way to address them, so reading the right
+  //    rail meant guessing [role=complementary]. Every region now carries a ref.
+  assert.ok(/function getLandmarkNode\(/.test(content), "F93: the landmark CONTAINER must be reachable, not just its name");
+  assert.ok(/\$\{lm\} \$\{n\} \(@\$\{getOrAssignRef\(node\)\}\)/.test(content),
+    "F93: each region in the structure line must carry a ref");
+  assert.ok(/read a whole region with 'get text @ref'/.test(content),
+    "F93: the structure line must say what the region refs are for");
+
+  // 2. An open dialog is the most common region read of all.
+  assert.ok(/Open dialog: .*\(@\$\{dialogRef\}\)/.test(content), "F93: an open dialog must carry its own ref");
+  assert.ok(/read it with 'get text @\$\{dialogRef\}'/.test(content), "F93: and say how to read it");
+  assert.ok(!/get text <its container>/.test(content), "F93: no placeholder an agent cannot fill");
+
+  // 3. The counts have to reconcile: in-scope vs whole page, with paging reported apart.
+  const mcp = await fs.readFile(join(__dirname, "..", "..", "mcp", "index.js"), "utf8");
+  assert.ok(/const visible = obj\.window\?\.inScope/.test(mcp),
+    "F93: the header must report what is in scope, not the size of the page it printed");
+});
+
+// The release gates are only worth having if they cannot quietly stop running. This pins
+// the two properties that make them different from a checklist: they exist as a script,
+// and each one derives what it checks from the code rather than from a list someone
+// maintains by hand.
+test("The release gates are derived, not remembered (F95)", async () => {
+  const fs = await import("node:fs/promises");
+  const root = join(__dirname, "..", "..");
+  const pkg = JSON.parse(await fs.readFile(join(root, "package.json"), "utf8"));
+  assert.equal(pkg.scripts.preflight, "node scripts/preflight.mjs", "npm run preflight must exist");
+  assert.ok(pkg.scripts["preflight:e2e"], "the live-browser variant must be one command too");
+
+  const pre = await fs.readFile(join(root, "scripts", "preflight.mjs"), "utf8");
+  // Derived from the registry and the schemas — not from a hand-kept list of tool names.
+  assert.ok(/server\._registeredTools/.test(pre), "F95: the gates must read the live tool registry");
+  assert.ok(/inputSchema\?\.shape/.test(pre), "F95: parameter gates must read the schemas");
+  assert.ok(!/const TOOL_LIST = \[/.test(pre), "F95: no hand-maintained tool list may appear in the gates");
+
+  // The gates a release depends on, by name. Deleting one should be a deliberate act that
+  // shows up in a diff here, not a quiet edit to a script nobody reads.
+  for (const name of [
+    "versions agree",
+    "unit tests",
+    "generated surface doc is current",
+    "every core tool appears in the docs",
+    "every core tool parameter is documented",
+    "no live pointer to a removed tool",
+    "e2e covers every protocol action",
+    "the intent index is not stale",
+    "npm tarball is clean",
+    "end-to-end (live browser)",
+  ]) {
+    assert.ok(pre.includes(`gate("${name}"`), `F95: the '${name}' gate is gone`);
+  }
+
+  const doc = await fs.readFile(join(root, "docs", "RELEASING.md"), "utf8");
+  assert.ok(/npm run preflight -- --e2e/.test(doc), "F95: the guide must lead with the command");
+  // The guide's own rot is the thing it warns about: every gate needs a row.
+  for (const name of [...pre.matchAll(/gate\("([^"]+)"/g)].map((m) => m[1])) {
+    assert.ok(doc.includes(name), `F95: docs/RELEASING.md has no row for the '${name}' gate`);
+  }
 });

@@ -34,6 +34,27 @@
 
   <!-- Cross-origin iframe (served from a different port) to exercise all_frames
        per-frame injection + frame-qualified refs. src filled in by the runner. -->
+  <!-- A row-shaped list: the shape get_property({all, fields}) exists for. Each row holds a
+       title, a link and a number; the score-like value in `.n` is INSIDE the row, and
+       `#outside` deliberately is not, so the "field matched nothing in the row" path is
+       reachable too. -->
+  <!-- check/uncheck/clear/dismiss targets. browser_dismiss_modal once shipped completely
+       dead while every snapshot advertised it (invariants.md), so the dialog here exists to
+       keep that from being possible again. -->
+  <input type="checkbox" id="cbox" />
+  <button id="dlgopen" onclick="document.getElementById('dlg').showModal()">Open dialog</button>
+  <dialog id="dlg" aria-label="E2E Dialog">
+    <p id="dlgbody">Dialog body text</p>
+    <button id="dlgclose" onclick="document.getElementById('dlg').close()">Close</button>
+  </dialog>
+
+  <ul id="rows">
+    <li class="row"><h3 class="t">Row One</h3><a class="u" href="/second.html">open</a><span class="n">11</span></li>
+    <li class="row"><h3 class="t">Row Two</h3><a class="u" href="https://example.com/x">open</a><span class="n">22</span></li>
+    <li class="row"><h3 class="t">Row Three</h3><a class="u" href="/third.html">open</a><span class="n">33</span></li>
+  </ul>
+  <span id="outside">not in any row</span>
+
   <iframe id="frm" src="__IFRAME_SRC__" width="320" height="140"></iframe>
 
   <script>

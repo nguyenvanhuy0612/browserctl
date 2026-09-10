@@ -15,6 +15,9 @@ modes worth recognising. Three neighbours, so you land in the right one:
 > **Safety & Isolation Disclaimer:**
 > `browserctl` gives AI agents direct DOM and network control. Never run on a primary browser profile with personal credentials. Use dedicated testing profiles or open-source Chromium builds.
 
+> Releasing a version? Run `npm run preflight -- --e2e` and read
+> [RELEASING.md](RELEASING.md) — it lists every gate and what a failure means.
+
 ## What it is
 
 **browserctl** (v0.6.3, 80 tools) gives an AI agent DOM-level control of a *real*, already-logged-in Chrome
@@ -197,8 +200,8 @@ that is active in a focused window. On a background tab, `Input.dispatchMouseEve
 
 Remedies, in order of preference:
 
-1. Use the DOM equivalent — `browser_click` / `browser_click_selector` by ref or selector
-   instead of a pixel click; `browser_type` / `browser_fill_selector` instead of keystrokes.
+1. Use the DOM equivalent — `browser_click` by ref, selector or text instead of a pixel
+   click; `browser_fill` (any `method`) instead of keystrokes.
 2. `browser_press_key { allowSynthetic: true }` — fires the page's own shortcut handler
    with the modifier flags set. Does **not** drive native editing (no real `Cmd+A`).
 3. Foreground it: `browser_switch_tab { id, focus: true }`. This steals the user's focus —
@@ -206,6 +209,29 @@ Remedies, in order of preference:
 
 `press_key` always reports `via: "cdp"` (real OS event) or `via: "dom"` (synthetic) so you
 never have to guess which semantics you got.
+
+## Reading a list of rows
+
+A page of results, cards, table rows or messages is one call, not one call per field:
+
+```
+browser_get_property({
+  selector: "li.result",            // the ROW
+  all: true,
+  fields: {
+    title: "h3",                    // a CSS selector, read as text
+    url:   { selector: "a", attr: "href" },   // …or {selector, property, attr}
+    price: ".price",
+  },
+})
+```
+
+Each row comes back with its own `ref` and the named values; URL attributes are resolved to
+absolute. Field selectors resolve **inside** each row — if a value lives in a sibling of the
+row (a separate `<tr>`, the next `<div>`), it is a second read, and the response says which
+fields matched nothing rather than handing back silent nulls.
+
+The census tells you what the rows are: `[Structure: 18 repeated <li> rows (~1 control each: a)]`.
 
 ## Element identity: refs vs indices vs selectors
 
@@ -243,54 +269,64 @@ in Chrome's accessibility tree.
 The names below are MCP tool names. Three kinds of row do not map one-to-one onto a protocol
 action, so read them before assuming a name is callable as-is:
 
-- **Composites have no action of their own.** `browser_open_and_read` is `new_tab`/`navigate`
-  → wait → `read_pdf` probe → read.
-- **Some tool names are aliases for one action.** `browser_get_text` is `get_property` with
-  `{property: "text"}`; likewise `get_value`, `get_html`, `get_box`, `get_attribute` and
-  `get_count`. The alias is resolved at the extension's dispatch entry, so either name works
-  everywhere — MCP, CLI and raw HTTP.
+- **Composites have no action of their own.** `browser_open_url` is `new_tab`/`navigate` → wait
+  → `read_pdf` probe → optional read, in one call.
+- **One name per capability.** The reader is `get_property` at every layer — MCP tool, CLI and
+  raw HTTP. The old convenience action names (`get_text`, `get_value`, `get_html`, `get_box`,
+  `get_attribute`, `get_count`) still resolve at the extension's dispatch entry, so an old script
+  keeps working, but there is no MCP tool by those names any more.
 - **Rows marked ¹ are protocol actions with no MCP tool.** Reach them with
   `browser_action({action: "check", params: {…}})`, or from the CLI as `browserctl check <target>`.
   There is no `browser_check` tool to call.
+- **Eight tool names were removed in 0.6.4/0.7.0; their job is a parameter now.**
+  `browser_type` / `browser_paste` / `browser_select_option` → `browser_fill` with `method` or
+  `option`. `browser_screenshot_fullpage` → `browser_screenshot({fullPage: true})`.
+  `browser_wait_settle` → `browser_wait_for({for: "settle"})`. `browser_get_text` /
+  `browser_get_attribute` / `browser_get_count` → **`browser_get_property`** with
+  `property: "text" | "attr" | "count"`. No aliases were kept: one name per capability, at every
+  layer. The underlying protocol actions all still run — `browser_action({action: "paste", …})`
+  reaches them, and they are listed in its catalogue.
+- **0.8.0 removed four more.** `browser_navigate` and `browser_new_tab` → **`browser_open_url`**
+  with `target: "current" | "new" | <tabId>` (and `read:` folds in the old
+  `browser_open_and_read`). `browser_find_text` → `browser_find({query, in: "text"})`.
+  `browser_dismiss_modal` → click the dialog's own close control, or
+  `browser_action({action: "dismiss"})`. `browser_reload` moved INTO core.
+- **Rows marked ³ left `core` in 0.6.4** — zero calls across 43 measured agent sessions, or
+  (for `browser_exec_system_cmd`) no business being one keystroke away from a page-reading
+  agent. Load them with `browser_load_tools({profile: "advanced" | "system"})`.
 
 For the authoritative list of everything callable, run `browserctl --help` or call
-`browser_action` with no arguments. Every tab-scoped tool also accepts `tabId`.
+`browser_action` with no arguments. Every tab-scoped tool also accepts `tabId` (and `tab_id`).
+
+**Tool profiles.** `core` (default) loads 23 tools; `all` loads everything. Everything else is one
+`browser_load_tools` call away: `network`, `cdp`, `cookies`, `storage`, `console`, `record`,
+`tabs`, `advanced`, `system`.
 
 ### Read the page
 
 | Tool | Purpose | Params |
 |---|---|---|
 | `browser_snapshot` | Primary tool to inspect UI, controls, notifications & badges | `maxText`, `scope`, `compact`, `format` |
-| `browser_get_text` | Extract innerText from element (selector, ref, or index) without eval_js | `selector`, `ref`, `index`, `placeholder` |
-| `browser_get_attribute` | Read specific DOM attribute (e.g. href, aria-label, src) | `attr`, `selector`, `ref`, `index` |
-| `browser_get_count` | Fast element census count matching CSS selector | `selector` |
+| `browser_get_property` | **The element read.** One element, a whole region, every match, or a whole row-shaped list — text, value, HTML, box, attribute or count, without eval_js | `selector`, `ref`, `index`, `placeholder`, `property` (`text`\|`value`\|`html`\|`box`\|`attr`\|`count`), `attr`, `all`, `max`, `fields` |
 | `browser_read_page` | Read page (accessibility tree) | `mode`, `depth`, `ref_id`, `maxChars` |
-| `browser_find` | Find elements by text | `query`, `max` |
-| `browser_find_text` | Find text on the page | `query`, `regex`, `max`, `contextChars` |
+| `browser_find` | Find controls by label/text or CSS selector, or search the page's prose with `in: "text"` | `query`, `selector`, `in` (`controls`\|`text`), `regex`, `contextChars`, `max` |
 | `browser_get_page_content` | Get readable article/documentation text (prose only) | `maxChars` |
 | `browser_describe_element` | Describe element tag, attributes, box, and visibility | `selector`, `ref`, `index`, `placeholder` |
 | `browser_a11y_snapshot` | Accessibility snapshot | — |
 | `browser_read_pdf` | Read a PDF tab | — |
-| `browser_open_and_read` | Open (or reuse) a tab and read it in one call | `url`, `wait`, `timeoutMs`, `read`, `maxChars` |
 
 ### Interact (DOM — works on a background tab)
 
 | Tool | Purpose | Params |
 |---|---|---|
-| `browser_click` | Click element by ref/selector/text | `ref`, `selector`, `text`, `waitFor`, `settleMs` |
-| `browser_fill` | Fill input or rich-text editor (clears & sets instantly) | `ref`, `selector`, `text`, `waitFor`, `submit` |
-| `browser_paste` | Paste large text/Markdown via Clipboard events | `ref`, `selector`, `text`, `waitFor`, `submit` |
-| `browser_type` | Focus element and set text (React/Vue `v-model` compatible) | `ref`, `selector`, `text`, `waitFor`, `submit` |
+| `browser_click` | Click element by ref/selector/text | `ref`, `selector`, `text`, `index`, `waitFor`, `settleMs`, `autoSettle` |
+| `browser_fill` | **The one text-entry verb.** Any editable target (input, textarea, contenteditable, rich-text) or a `<select>` | `ref`, `selector`, `placeholder`, `index`, `text`, `option`, `method` (`set`\|`type`\|`paste`), `waitFor`, `submit`, `settleMs`, `autoSettle` |
 | `clear` ¹ | Clear input/textarea element | `ref`, `selector` |
 | `check` ¹ | Check checkbox or radio button | `ref`, `selector`, `text` |
 | `uncheck` ¹ | Uncheck checkbox | `ref`, `selector`, `text` |
-| `browser_click_selector` | Click by CSS selector | `selector` |
-| `browser_fill_selector` | Fill by CSS selector | `selector`, `value` |
-| `browser_hover` | Hover element | `ref`, `selector`, `text` |
-| `browser_select_option` | Select dropdown option | `ref`, `selector`, `value`, `label` |
+| `browser_hover` ³ | Hover element | `ref`, `selector`, `text` |
 | `browser_press_key` | Press a key | `key`, `ref`, `modifiers`, `allowSynthetic` |
 | `browser_scroll` | Scroll page or container (smart nested container detection) | `direction`, `amount`, `ref`, `selector`, `index` |
-| `browser_dismiss_modal` | Dismiss active modal, drawer, or flyout | `ref`, `selector` |
 | `browser_insert_text` | Insert text (CDP) | `text` |
 
 ### Daemon & Dynamic Tool Management
@@ -301,7 +337,7 @@ For the authoritative list of everything callable, run `browserctl --help` or ca
 | `browser_start` | Start bridge daemon in background if stopped | — |
 | `browser_stop` | Stop bridge daemon (records explicit stopped state) | — |
 | `browser_load_tools` | Dynamically load tool categories (`network`, `cdp`, `cookies`, `storage`, etc.) into prompt | `profile`, `tools` |
-| `browser_unload_tools` | Unload extra tools and reset prompt back to lightweight `core` profile | `profile`, `tools` |
+| `browser_unload_tools` ³ | Unload extra tools and reset back to the `core` profile | `profile`, `tools` |
 | `browser_list_available_tools` | List all tool profiles and currently active/inactive status | `format` |
 
 ### Interact (pixel — FOREGROUND tab only)
@@ -315,20 +351,17 @@ For the authoritative list of everything callable, run `browserctl --help` or ca
 
 | Tool | Purpose | Params |
 |---|---|---|
-| `browser_navigate` | Navigate | `url` |
 | `browser_go_back` | Go back | — |
 | `browser_go_forward` | Go forward | — |
-| `browser_reload` | Reload | — |
-| `browser_wait_for` | Wait for condition | `selector`, `text`, `gone`, `timeoutMs` |
-| `browser_wait_settle` | Wait for page DOM mutations and animations to settle (ideal for SPAs with active WebSockets) | `timeoutMs` |
+| `browser_reload` | Reload the target tab | `bypassCache` |
+| `browser_wait_for` | Wait for a condition, or for the page itself to stop moving | `for` (`settle`), `selector`, `text`, `gone`, `timeoutMs` |
 | `browser_wait_network_idle` | Wait for network quiet period (supports tolerance for persistent sockets) | `idleMs`, `timeoutMs`, `maxInFlight` |
 
 ### Screenshots & PDF
 
 | Tool | Purpose | Params |
 |---|---|---|
-| `browser_screenshot` | Screenshot | `format`, `quality` |
-| `browser_screenshot_fullpage` | Full-page screenshot | `format`, `quality` |
+| `browser_screenshot` | Screenshot the viewport, or the whole page with `fullPage` | `fullPage`, `format`, `quality` |
 | `browser_element_screenshot` | Screenshot one element | `index`, `ref`, `format` |
 | `browser_print_pdf` | Print page to PDF | — |
 
@@ -338,7 +371,6 @@ For the authoritative list of everything callable, run `browserctl --help` or ca
 |---|---|---|
 | `browser_status` | Bridge/extension readiness, no browser command needed | — |
 | `browser_list_tabs` | List tabs | — |
-| `browser_new_tab` | New tab | — |
 | `browser_switch_tab` | Switch tab | `id`, `focus` |
 | `browser_close_tab` | Close tab | — |
 | `browser_current_tab` | Current target tab | — |
@@ -379,7 +411,7 @@ For the authoritative list of everything callable, run `browserctl --help` or ca
 
 | Tool | Purpose | Params |
 |---|---|---|
-| `browser_exec_system_cmd` | Execute system shell command on bridge host | `command`, `cwd`, `env`, `timeoutMs` |
+| `browser_exec_system_cmd` ³ | Execute system shell command on bridge host (`system` profile) | `command`, `cwd`, `env`, `timeoutMs` |
 | `browser_cdp_send` | Send a raw CDP command (power tool) | `method`, `params` |
 | `browser_eval_js` | Evaluate JavaScript in page context (auto-bypasses CSP and Trusted Types via CDP) | `expression`, `format` |
 | `browser_audit` | Audit page | — |
@@ -455,13 +487,13 @@ want the element list without any page text.
 
 ```
 browser_group_tab                                  # show the user which tab you drive
-browser_navigate  { url }
-browser_wait_settle                                # readyState complete + no animations
+browser_open_url  { url, target: "new" }
+browser_wait_for  { for: "settle" }                 # readyState complete + no animations
 browser_read_page { mode: "interactive" }
 browser_click     { ref: "ref_12" }
 ```
 
-**Fill a form without keystrokes.** `type` and `fill_selector` set the value through the
+**Fill a form without keystrokes.** `browser_fill` sets the value through the
 prototype's native setter, so React/Vue value-tracking sees a real edit instead of
 reverting it. This is more reliable than synthesising keys, and it works in the background.
 

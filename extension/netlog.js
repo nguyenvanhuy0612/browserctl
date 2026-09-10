@@ -267,7 +267,7 @@ export function waitNetworkIdle(tabId, idleMs = 500, timeoutMs = 10000, maxInFli
         );
         err.code = "NETWORK_IDLE_TIMEOUT";
         err.diagnostics = { timeoutMs, inFlight: count, maxInFlight };
-        err.recoveryHint = "Modern SPAs often keep persistent WebSockets or telemetry active. Use 'wait --settle' (or 'browser_wait_settle') instead, or pass maxInFlight: 1.";
+        err.recoveryHint = "Modern SPAs often keep persistent WebSockets or telemetry active. Use 'wait --settle' (or browser_wait_for with for:'settle') instead, or pass maxInFlight: 1.";
         reject(err);
       }
     }, 100);

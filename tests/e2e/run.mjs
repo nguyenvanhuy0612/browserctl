@@ -49,15 +49,32 @@ function protocolActions() {
 // shows up as a coverage miss, which is the point.
 const NOT_EXERCISED = {
   reload_extension: "drops the connection mid-run by design",
+  // The get_* names are dispatch aliases for one action: get_property with a fixed
+  // `property`. This suite exercises get_property itself in every shape (single, count,
+  // all, fields, attr), so counting the aliases as "missed" hides real gaps behind noise.
+  get_text: "alias for get_property({property:'text'}), exercised directly",
+  get_value: "alias for get_property({property:'value'}), exercised directly",
+  get_html: "alias for get_property({property:'html'}), exercised directly",
+  get_box: "alias for get_property({property:'box'}), exercised directly",
+  get_attribute: "alias for get_property({property:'attr'}), exercised directly",
+  get_count: "alias for get_property({property:'count'}), exercised directly",
+  screenshot_fullpage: "alias for capture_screenshot({fullPage:true}), exercised directly",
+  dismiss_modal: "alias for dismiss, exercised directly",
+  close_modal: "alias for dismiss, exercised directly",
+  element_rect: "alias for get_property({property:'box'}), exercised directly",
   exec_system_cmd: "runs a host command; out of scope for an unattended suite",
   action: "the escape hatch; every action it can reach is counted on its own",
   focus_window: "steals OS focus; only runs under E2E_FOREGROUND=1",
-  open_and_read: "an MCP-layer composite (new_tab -> wait -> read_pdf probe -> read); it has no bridge action, so a bridge-level suite cannot reach it",
+  open_url: "an MCP-layer composite (new_tab/navigate -> wait -> read_pdf probe -> optional read); it has no bridge action of its own, so a bridge-level suite cannot reach it. Its parts are each exercised here, and its tab-safety rule is pinned by a unit test (F91).",
 };
 
 const ALL_ACTIONS = protocolActions();
 
 const used = new Set();
+// Every tab this run opens, recorded HERE rather than by each test, so a test that fails
+// before its own cleanup cannot leak one. The suite left three dead tabs in the user's
+// browser exactly that way; a suite that runs before every release must not litter.
+const createdTabs = new Set();
 async function cmd(action, params = {}) {
   used.add(action);
   const res = await fetch(`${BRIDGE}/command`, {
@@ -67,6 +84,8 @@ async function cmd(action, params = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!data.ok) throw new Error(`${action}: ${data.error || "HTTP " + res.status}`);
+  if (action === "new_tab" && data.result && data.result.id != null) createdTabs.add(data.result.id);
+  if (action === "close_tab") createdTabs.delete(params.id ?? params.tabId);
   return data.result;
 }
 
@@ -158,6 +177,119 @@ async function main() {
     await test("read_page", async () => { const r = await cmd("read_page", { mode: "interactive" }); assert(/Click Me/.test(r.tree) && /ref_/.test(r.tree), "read_page tree missing button/ref"); });
     await test("read_page pierces shadow DOM", async () => { const r = await cmd("read_page", { mode: "interactive" }); assert(/Shadow Button/.test(r.tree), "read_page tree missing shadow button"); });
     await test("find (shadow)", async () => { const r = await cmd("find", { query: "Shadow Button" }); assert(r.matches.length >= 1 && r.matches[0].ref, "find did not locate shadow button"); });
+
+    // --- the actions with no tool of their own (reached via browser_action) ---
+    await test("clear empties a field", async () => {
+      await cmd("fill", { selector: "#plain", text: "to be cleared" });
+      await cmd("clear", { selector: "#plain" });
+      const v = await cmd("get_property", { selector: "#plain", property: "value" });
+      assert(v.value === "", `after clear, value = ${JSON.stringify(v.value)}`);
+    });
+
+    await test("check / uncheck a checkbox", async () => {
+      await cmd("check", { selector: "#cbox" });
+      let v = await cmd("get_property", { selector: "#cbox", property: "attr", attr: "checked" });
+      const checkedNow = async () => (await cmd("eval_js", { expression: "document.getElementById('cbox').checked" })).value;
+      assert((await checkedNow()) === true, "check did not tick the box");
+      await cmd("uncheck", { selector: "#cbox" });
+      assert((await checkedNow()) === false, "uncheck did not clear the box");
+    });
+
+    await test("paste puts multi-line text into a textarea", async () => {
+      await cmd("paste", { selector: "#area", text: "line one\nline two" });
+      const v = await cmd("get_property", { selector: "#area", property: "value" });
+      assert(v.value === "line one\nline two", `paste value = ${JSON.stringify(v.value)}`);
+    });
+
+    await test("an open dialog is reported, addressable, and dismissable", async () => {
+      await cmd("click", { selector: "#dlgopen" });
+      const snap = await cmd("snapshot", { compact: true, maxText: 0 });
+      const line = (snap.compactView || "").split("\n").find((l) => /Active Modal|Open dialog/.test(l));
+      assert(line, "an open <dialog> must be reported by the census");
+      const ref = (line.match(/\(@(ref_\d+)\)/) || [])[1];
+      assert(ref, `the dialog must carry a ref it can be read by: ${line}`);
+      const body = await cmd("get_property", { ref, property: "text" });
+      assert(/Dialog body text/.test(body.value), `reading the dialog by ref gave: ${JSON.stringify(body.value)}`);
+      await cmd("dismiss", {});
+      const open = await cmd("eval_js", { expression: "document.getElementById('dlg').open" });
+      assert(open.value === false, "dismiss did not close the dialog");
+    });
+
+    // --- the element read, in every shape the surface offers ---
+    await test("get_property: one element", async () => {
+      const r = await cmd("get_property", { selector: "#title", property: "text" });
+      assert(r.value === "bctl Test Page", `title text = ${JSON.stringify(r.value)}`);
+    });
+
+    await test("get_property: count is an answer, zero included", async () => {
+      const hit = await cmd("get_property", { selector: "li.row", property: "count" });
+      assert(hit.value === 3, `row count = ${hit.value}`);
+      const miss = await cmd("get_property", { selector: "li.nope", property: "count" });
+      assert(miss.value === 0 && /answer, not a failure/.test(miss.note || ""), "zero count must be an answer");
+    });
+
+    await test("get_property: all=true reads every match, each with its own ref", async () => {
+      const r = await cmd("get_property", { selector: "li.row .t", property: "text", all: true });
+      assert(r.count === 3, `count = ${r.count}`);
+      assert(r.matches.length === 3, `matches = ${r.matches.length}`);
+      assert(r.matches.every((m) => m.ref), "every row must carry a ref");
+      assert(r.matches[2].value === "Row Three", `third = ${JSON.stringify(r.matches[2].value)}`);
+    });
+
+    await test("get_property: all=true resolves URL attributes absolutely", async () => {
+      const r = await cmd("get_property", { selector: "li.row .u", property: "attr", attr: "href", all: true });
+      assert(/^https?:\/\/.+\/second\.html$/.test(r.matches[0].resolved), `not resolved: ${r.matches[0].resolved}`);
+      assert(r.matches[1].value === "https://example.com/x", `absolute href changed: ${r.matches[1].value}`);
+    });
+
+    await test("get_property: fields reads a whole row in one call", async () => {
+      const r = await cmd("get_property", {
+        selector: "li.row",
+        all: true,
+        fields: { title: ".t", url: { selector: ".u", attr: "href" }, n: ".n" },
+      });
+      assert(r.count === 3, `rows = ${r.count}`);
+      assert(r.fields.join(",") === "title,url,n", `fields = ${r.fields}`);
+      assert(r.matches[0].title === "Row One", `title = ${r.matches[0].title}`);
+      assert(r.matches[0].n === "11", `n = ${r.matches[0].n}`);
+      assert(/\/second\.html$/.test(r.matches[0].url), `url = ${r.matches[0].url}`);
+      assert(r.matches[1].url === "https://example.com/x", `url2 = ${r.matches[1].url}`);
+    });
+
+    await test("get_property: a field outside the row is reported, not silently null", async () => {
+      const r = await cmd("get_property", {
+        selector: "li.row",
+        all: true,
+        fields: { title: ".t", outside: "#outside" },
+      });
+      assert(r.matches.every((m) => m.outside === null), "a field with no match in the row must be null");
+      assert(/no match inside the row for: outside \(3\/3 rows\)/.test(r.note || ""), `note = ${r.note}`);
+      assert(/SIBLING of the row/.test(r.note || ""), "the note must say why, not just that");
+    });
+
+    await test("snapshot is paged, and the pages join up", async () => {
+      const p1 = await cmd("snapshot", { scope: "all", compact: true, maxText: 0, limit: 5 });
+      assert(p1.window && p1.window.shown === 5, `page 1 window = ${JSON.stringify(p1.window)}`);
+      assert(p1.next === 5, `next = ${p1.next}`);
+      assert(/\[More: elements 1-5 of /.test(p1.compactView), "the compact view must name the continuation");
+      const p2 = await cmd("snapshot", { scope: "all", compact: true, maxText: 0, limit: 5, cursor: p1.next });
+      assert(p2.window.offset === 5, `page 2 offset = ${p2.window.offset}`);
+      assert(p2.elements[0].index === 5, `page 2 first index = ${p2.elements[0].index}`);
+      // Refs stay addressable across pages: the ref from page 2 must still read.
+      const read = await cmd("get_property", { ref: p2.elements[0].ref, property: "text" });
+      assert(read.property === "text", "a ref from a later page must still resolve");
+    });
+
+    await test("the census hands over a ref for each region (F93)", async () => {
+      const s = await cmd("snapshot", { scope: "all", compact: true, maxText: 0 });
+      const structure = (s.compactView || "").split("\n").find((l) => l.startsWith("[Structure:"));
+      assert(structure, "no structure line");
+      const m = structure.match(/main \d+ \(@(ref_\d+)\)/) || structure.match(/\(@(ref_\d+)\)/);
+      assert(m, `no region ref in: ${structure}`);
+      const region = await cmd("get_property", { ref: m[1], property: "text" });
+      assert(typeof region.value === "string" && region.value.length > 0, "a region ref must read its text");
+    });
+
 
     // --- cross-origin iframe (all_frames + frame-qualified refs) ---
     let iframeBtnRef;
@@ -523,6 +655,8 @@ async function main() {
   } finally {
     if (bgTab != null) { try { await cmd("close_tab", { id: bgTab }); } catch {} }
     if (tabId != null) { try { await cmd("close_tab", { id: tabId }); } catch {} }
+    // Anything else this run opened — including a tab a failing test never got to close.
+    for (const id of [...createdTabs]) { try { await cmd("close_tab", { id }); } catch {} }
     server.close();
     originB.close();
   }

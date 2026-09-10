@@ -13,7 +13,7 @@ foreground; browserctl works in another one.
 - **Background operation is the premise.** Clicks, typing, navigation, reads and screenshots all
   run on a tab that is not focused. Never foreground a tab in order to act on it.
 - **The target is pinned.** The first command pins a tab and it stays pinned even after the user
-  switches away. `browser_new_tab` / `browser_navigate` re-pin; every tab-scoped tool also takes an
+  switches away. `browser_open_url` re-pins; every tab-scoped tool also takes an
   optional `tabId` so parallel agents can drive different tabs without racing on the pin.
 - **It uses the user's real session.** No separate profile, no re-login.
 
@@ -22,14 +22,23 @@ foreground; browserctl works in another one.
 1. `browser_snapshot` — the census: interactive elements with stable `@ref`s, in reading order,
    plus open dialogs and a note about anything withheld. Act by ref.
 2. `browser_find "<label>"` — whole-page search when you know a control's label. On a miss it
-   returns near-matches rather than a bare zero.
-3. `browser_click` / `browser_fill` / `browser_type` — every one returns an `effect` block
-   (mutation count, url change) so you can tell a real action from a no-op.
+   returns near-matches rather than a bare zero. It also takes a CSS `selector`, which is how you
+   get a ref for something that just appeared without re-reading the page.
+3. `browser_click` / `browser_fill` — every action returns an `effect` block (mutation count, url
+   change) so you can tell a real action from a no-op. `browser_fill` is the only text-entry verb
+   you need: `method` picks set/type/paste, `option` picks a `<select>` entry.
 
 ## Two things that cost agents the most turns
 
 - **Counts and complete lists need `scope: 'all'`.** The default viewport census can omit rows of
   exactly the kind you were asked for. `all` is cheap.
+- **A long census is paged, not cut.** It lists 200 elements and returns `next`; call
+  `browser_snapshot({cursor: <next>})` for the rest. Indices and refs stay valid across pages.
+- **One read can answer for every match, and for every field in a row.**
+  `browser_get_property({selector, all: true})` returns a row per match; add
+  `fields: {title: "h3", url: {selector: "a", attr: "href"}}` and each row comes back with those
+  values named, refs included. Reaching for JavaScript to map over `querySelectorAll` is the tell
+  that one of these was missed.
 - **`all` is not everything.** Feeds, notification panels and virtualised lists keep rows out of the
   DOM until a control is clicked. When that is likely, the snapshot prints a
   `Possible hidden content` line naming the control — click it rather than re-snapshotting.

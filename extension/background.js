@@ -219,7 +219,7 @@ async function init() {
 }
 
 // Route a command to the right handler. Returns { ok, result } or throws.
-// The tool names an agent sees are not all protocol action names. `browser_get_text` is
+// The tool names an agent sees are not all protocol action names. `browser_get_property` is
 // a tool; `get_text` is `get_property` with `{property: "text"}`. Anyone reaching for the
 // name they just saw — through browser_action, the documented raw-HTTP endpoint, or a
 // script — got a bare "unknown action", which reads as "this capability does not exist"
@@ -820,10 +820,25 @@ async function screenshot(params = {}) {
   return await captureViewport(tab.id, { format, quality });
 }
 
+// `pinned` is reported here because this is the only way to ASK which tab is the target
+// without becoming the answer: current_tab() resolves through targetTab(), which pins the
+// active tab when nothing is pinned yet. A caller deciding "navigate the target, or open a
+// new tab?" must not pin the user's focused tab merely by asking.
 async function listTabs() {
   const tabs = await chrome.tabs.query({});
+  if (targetTabId == null) {
+    const { targetTabId: saved } = await chrome.storage.session.get("targetTabId");
+    if (saved != null) targetTabId = saved;
+  }
   return {
-    tabs: tabs.map((t) => ({ id: t.id, url: t.url, title: t.title, active: t.active })),
+    tabs: tabs.map((t) => ({
+      id: t.id,
+      url: t.url,
+      title: t.title,
+      active: t.active,
+      ...(t.id === targetTabId ? { pinned: true } : {}),
+    })),
+    ...(targetTabId == null ? { pinned: null } : { pinned: targetTabId }),
   };
 }
 
@@ -947,11 +962,42 @@ async function focusWindow({ id }) {
 // frame (frameId 0 = the top document) — otherwise every frame would reply and race.
 async function toContent(action, params, frameId = 0) {
   const tab = await targetTab(params);
+  const urlBefore = tab.url;
   const opts = { frameId };
   try {
     return await chrome.tabs.sendMessage(tab.id, { action, params }, opts);
   } catch (err) {
-    // Content script not present (page predates install, or was reloaded): inject and retry.
+    // Two very different things land here, and they used to be treated as one.
+    //
+    // (a) The content script was never there (page predates the install, or was
+    //     reloaded). Injecting and retrying is right.
+    // (b) The action WORKED and navigated the page — a submit, a link, a router push.
+    //     The content script running it died with the old document and took its reply
+    //     with it. Retrying then runs the action a SECOND time on the new page, or, if
+    //     the ref cannot resolve there, reports STALE_REF for an action that succeeded.
+    //
+    // Measured: clicking a Submit button submitted the form and returned
+    // `STALE_REF: ref "ref_14" not found or stale`. The agent that saw it concluded the
+    // click had never happened and invented a different cause for the submission — a
+    // false failure is worse than no answer, and a silent double-submit is worse still.
+    let after = null;
+    try { after = await chrome.tabs.get(tab.id); } catch {}
+    if (after && after.url && urlBefore && after.url !== urlBefore) {
+      return {
+        ok: true,
+        result: {
+          navigated: true,
+          from: urlBefore,
+          to: after.url,
+          effect: { measured: false, urlChanged: true },
+          note:
+            `'${action}' navigated the page, so the content script running it was replaced and its ` +
+            `own reply was lost. The action DID run — it was deliberately not retried, because a ` +
+            `retry could repeat it (e.g. submit twice). Read the new page to see the result; refs ` +
+            `from before the navigation are gone.`,
+        },
+      };
+    }
     await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [frameId] }, files: ["content.js"] });
     return await chrome.tabs.sendMessage(tab.id, { action, params }, opts);
   }
@@ -1038,17 +1084,18 @@ function mergeFrameResults(action, parts, params = {}, errors = []) {
     const totalElementsCount = parts.reduce((sum, p) => sum + (p.result.totalElementsCount || p.result.elements?.length || 0), 0);
     const offscreenCount = parts.reduce((sum, p) => sum + (p.result.offscreenCount || 0), 0);
 
+    // Pass the top frame's result through and override only what the merge OWNS. This
+    // branch used to enumerate the fields it kept, so every field the content script
+    // learned afterwards was dropped here in silence — `window`/`next` (the paged census)
+    // vanished on every multi-frame page the day they were added, which is every real
+    // site. The find merge above was fixed the same way, for the same reason.
     const res = {
-      url: top.result.url,
-      title: top.result.title,
+      ...top.result,
       scope: top.result.scope || params.scope || "viewport",
-      viewport: top.result.viewport,
       totalElementsCount,
       offscreenCount,
-      pageState: top.result.pageState,
       foldedCount: top.result.foldedCount || 0,
       elements,
-      text: top.result.text,
     };
     // The compact view is built in the content script, where the DOM is: landmark
     // grouping, key inputs hoisted to the top, repetitive runs folded, row context on

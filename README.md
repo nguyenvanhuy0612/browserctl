@@ -79,7 +79,7 @@ browserctl status
 You still need the Chrome extension loaded (step 2 below) — that is what the bridge talks to.
 
 Every MCP tool has a CLI equivalent with the same name minus the `browser_` prefix:
-`browser_snapshot` → `browserctl snapshot`, `browser_get_text` → `browserctl get text @ref_1`,
+`browser_snapshot` → `browserctl snapshot`, `browser_get_property` → `browserctl get text @ref_1`,
 `browser_click` → `browserctl click @ref_1`. The full list is in
 [CLI Reference](#cli-reference--ai-agent-guide-browserctl) below; `browserctl --help` prints it too.
 
@@ -193,7 +193,9 @@ instead of MCP.
 
 ### Command Catalog by Functional Group
 
-For deep parameters, protocol schemas, and examples, refer to [docs/REFERENCE.md](docs/REFERENCE.md) and [PROTOCOL.md](PROTOCOL.md):
+Every tool with its exact parameters, generated from the server's own registry:
+[docs/TOOLS.md](docs/TOOLS.md). For prose, protocol schemas, and examples, refer to
+[docs/REFERENCE.md](docs/REFERENCE.md) and [PROTOCOL.md](PROTOCOL.md):
 
 - **Navigation & Tab Control** ([REFERENCE.md](docs/REFERENCE.md)):
   `open <url>`, `reload`, `back`, `forward`, `tab list` (alias: `tabs`), `tab switch <id>` (alias: `switch`), `tab new [url]`, `tab close [id]`.
@@ -232,6 +234,14 @@ browserctl tabs                    # -> clean ASCII table
 browserctl tabs --json             # -> {"tabs":[...]}
 ```
 
+## Releasing
+
+`npm run preflight -- --e2e` runs every pre-release gate: versions, unit tests, the generated
+tool surface, doc coverage for every tool and parameter, dead pointers to removed tools, e2e
+action coverage, the agent-facing intent index, the npm tarball, and the live end-to-end
+suite. See [docs/RELEASING.md](docs/RELEASING.md) — the gates and what each failure means —
+before cutting a version.
+
 ## Using it via Model Context Protocol (MCP)
 
 The `mcp/` server exposes browser automation tools for MCP clients (Antigravity, Claude Code, Cursor, Windsurf).
@@ -239,28 +249,27 @@ The `mcp/` server exposes browser automation tools for MCP clients (Antigravity,
 ### Dynamic Tool Discovery & Profile Management
 AI agents can dynamically load and unload specialized tool categories into the active session without restarting the server:
 
-* `browser_load_tools`: Load a category (`"network"`, `"cdp"`, `"cookies"`, `"storage"`, `"console"`, `"record"`, `"tabs"`, `"advanced"`, `"all"`) or specific tools directly into the prompt.
-* `browser_unload_tools`: Unload extra tools and reset back to the lightweight `"core"` profile to free system prompt tokens.
+* `browser_load_tools`: Load a category (`"network"`, `"cdp"`, `"cookies"`, `"storage"`, `"console"`, `"record"`, `"tabs"`, `"advanced"`, `"system"`, `"all"`) or specific tools directly into the prompt.
 * `browser_list_available_tools`: Check which tool categories are currently active vs available for loading.
+
+Start-up profile: `BROWSERCTL_MCP_PROFILE=core` (default, 23 tools) or `all`.
 
 ### MCP Core Tools
 
 | Tool | Description |
 |---|---|
 | `browser_click` | Click element by ref/index/selector/text across standard tags, ARIA roles, and custom Web Components |
-| `browser_fill` | Fill input or rich-text editor (with recovery hints suggesting candidate inputs on mismatch) |
-| `browser_paste` | Paste large text/Markdown via Clipboard events without AST corruption |
-| `browser_type` | Focus element and set text (React/Vue `v-model` compatible) |
-| `browser_snapshot` | Primary inspection tool (preserves Key Inputs block at top, folds dense feeds, saves 75-85% tokens) |
-| `browser_get_text` | Extract visible innerText from element by selector, ref, or index (no eval_js needed) |
-| `browser_get_attribute` | Read specific DOM attribute (href, aria-label, src, etc.) from target element |
-| `browser_get_count` | Fast element census count matching CSS selector across page and open Shadow DOM |
+| `browser_fill` | The one text-entry verb — any editable target or a `<select>`; `method` picks set/type/paste, `option` picks a dropdown entry |
+| `browser_find` | Find elements by label/text **or by CSS `selector`**, and get a ref back for each |
+
+| `browser_snapshot` | Primary inspection tool (Key Inputs kept at top, dense feeds folded, **paged with `limit`/`cursor` instead of truncated**) |
+| `browser_get_property` | **The element read**: one element, a whole region, every match (`all: true`), or a row-shaped list with several fields each (`fields`) — text, value, html, box, attribute or count, no eval_js needed |
 | `browser_describe_element` | Inspect element tag, attributes, bounding box, and actionability visibility |
-| `browser_dismiss_modal` | Dismiss active modal, side drawer, or flyout (clicks close or sends Escape) |
-| `browser_wait_settle` | Wait for DOM mutations & animations to settle (ideal for SPAs with active WebSockets) |
+| `browser_wait_for` | Wait for a selector/text, or for the page itself to stop moving (`for: "settle"`) |
+
 | `browser_read_page` | Accessibility tree inspection |
 | `browser_get_page_content` | Extract article or documentation text (prose only, not for app UI or headers) |
-| `browser_screenshot` | Viewport or full-page screenshot (lossless PNG or vision-optimized JPEG) |
+| `browser_screenshot` | Viewport screenshot, or the whole page with `fullPage: true` (lossless PNG or vision-optimized JPEG) |
 | `browser_eval_js` | Evaluate JavaScript in page context (auto-bypasses CSP & Trusted Types via CDP) |
 | `browser_load_tools` | Dynamically load tool categories (`cdp`, `network`, `cookies`, etc.) into prompt |
 | `browser_unload_tools` | Unload extra tools and reset active prompt back to core profile |
