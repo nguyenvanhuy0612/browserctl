@@ -11,8 +11,8 @@
 
 import http from "node:http";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, statSync, renameSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { appendFileSync, statSync, renameSync, existsSync } from "node:fs";
+import { dirname, join, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execa } from "execa";
 import { WebSocketServer } from "ws";
@@ -313,6 +313,28 @@ function handleCommand(body, res) {
       });
 
     return;
+  }
+
+  // Chrome reads the file itself, from the bridge host's filesystem, so a bad path fails
+  // silently on the CDP side (the input just stays empty). Check it here, where there is a
+  // filesystem to check against, and say which path was wrong.
+  if (action === "upload") {
+    const given = Array.isArray(params?.files) ? params.files : params?.file ? [params.file] : [];
+    if (given.length === 0) {
+      return sendJson(res, 400, { ok: false, error: "upload needs 'files' (absolute paths on this machine)" });
+    }
+    const bad = [];
+    for (const f of given) {
+      if (typeof f !== "string" || !isAbsolute(f)) bad.push(`${f} (not an absolute path)`);
+      else if (!existsSync(f)) bad.push(`${f} (no such file)`);
+      else if (!statSync(f).isFile()) bad.push(`${f} (not a regular file)`);
+    }
+    if (bad.length) {
+      return sendJson(res, 400, {
+        ok: false,
+        error: `upload cannot read: ${bad.join(", ")}. Chrome opens these paths itself, on this machine, so they must be absolute and must exist.`,
+      });
+    }
   }
 
   if (!extensionSocket) {

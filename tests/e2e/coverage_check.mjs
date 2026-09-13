@@ -41,17 +41,26 @@ const main = async () => {
     if (r.ok) readable++; else unreadable.push({ ref: e.ref, err: String(r.error).slice(0, 60) });
   }
 
-  // 3. Does the viewport census DISCLOSE what it withheld?
-  const cv = vp.compactView || "";
+  // 3. Does the viewport census DISCLOSE what it withheld? It used to say so in a
+  // [Notice: ...] line; since 0.7.1 a result carries no prose and the same facts are fields.
   const hidden = truth.length - (vp.elements || []).length;
-  const notice = /\[Notice:[^\]]*offscreen/.test(cv);
-  const namesKinds = /offscreen, including/.test(cv);
+  const counted = (vp.offscreenCount || 0) + (vp.foldedCount || 0) + (vp.duplicateCount || 0);
+  // Within one element: the census counts what it withheld, `truth` counts what scope:"all"
+  // lists, and a page can gain or lose a control between the two reads.
+  const discloses = hidden <= 0 || counted > 0;
+  const kinds = [
+    vp.offscreenCount ? `offscreen ${vp.offscreenCount}` : null,
+    vp.foldedCount ? `folded ${vp.foldedCount}` : null,
+    vp.duplicateCount ? `duplicate ${vp.duplicateCount}` : null,
+    (vp.hiddenContent || []).length ? `loads-on-demand ${(vp.hiddenContent || []).length}` : null,
+  ].filter(Boolean);
 
   console.log(`${LABEL}`);
   console.log(`  truth(all)=${truth.length} labelled=${labelled.length} viewport=${(vp.elements||[]).length} withheld=${hidden}`);
   console.log(`  find() reached ${findable}/${sample.length} sampled labels`);
   console.log(`  get_text read ${readable}/${sample.length} sampled refs`);
-  console.log(`  viewport discloses withholding: notice=${notice} namesKinds=${namesKinds}`);
+  console.log(`  viewport discloses withholding: ${discloses ? "yes" : "NO"} (${kinds.join(", ") || "nothing withheld"})`);
+  if (!discloses) console.log(`  WITHHELD ${hidden} ELEMENTS WITHOUT SAYING SO — the census must count what it leaves out`);
   if (misses.length) { console.log("  UNREACHABLE BY find():"); for (const m of misses.slice(0, 8)) console.log(`    <${m.tag}> "${m.text}" (nearest offered: ${m.nearest})`); }
   if (unreadable.length) { console.log("  UNREADABLE BY get_text:"); for (const u of unreadable.slice(0, 8)) console.log(`    @${u.ref}: ${u.err}`); }
   if (ownTabId != null) await call("close_tab", { id: ownTabId });

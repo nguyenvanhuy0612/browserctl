@@ -225,7 +225,7 @@
       if (rect.right <= 0 || rect.left >= window.innerWidth) continue;
       let label = "";
       try {
-        label = (d.getAttribute("aria-label") ||
+        label = fromPage(d.getAttribute("aria-label") ||
           (d.querySelector("h1, h2, h3") || {}).innerText ||
           d.tagName.toLowerCase()).trim().replace(/\s+/g, " ").slice(0, 60);
       } catch { label = d.tagName.toLowerCase(); }
@@ -546,6 +546,100 @@
     return false;
   }
 
+  // Properties whose animation actually MOVES a box. An opacity or colour animation on an
+  // ancestor must not make every click on that subtree report a moving target.
+  const GEOMETRY_PROPS = /^(transform|translate|rotate|scale|left|top|right|bottom|inset|width|height|margin|padding|border.*width|font-size|gap|flex-basis)/;
+
+  // Is an animation running that moves this element's box, now? Synchronous, and it reads the
+  // animation itself rather than watching for movement — which is the only thing that works in
+  // a tab that is not visible. Returns the one with the most time left to run, or null.
+  function runningMotion(el) {
+    let list = [];
+    try { list = document.getAnimations ? document.getAnimations() : []; } catch {}
+    let worst = null;
+    for (const a of list) {
+      if (a.playState !== "running") continue;
+      const target = a.effect && a.effect.target;
+      if (!target) continue;
+      // An ancestor sliding in carries its children with it, so an animation on either side
+      // of the relationship counts.
+      if (!(target === el || composedContains(target, el) || composedContains(el, target))) continue;
+      let movesBox = false;
+      try {
+        for (const kf of a.effect.getKeyframes()) {
+          for (const prop of Object.keys(kf)) {
+            if (GEOMETRY_PROPS.test(prop.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase()))) { movesBox = true; break; }
+          }
+          if (movesBox) break;
+        }
+      } catch { movesBox = true; }  // unreadable keyframes: assume the worst rather than miss it
+      if (!movesBox) continue;
+      let remaining = Infinity;
+      try {
+        const dur = a.effect.getComputedTiming().activeDuration;
+        const now = typeof a.currentTime === "number" ? a.currentTime : 0;
+        if (Number.isFinite(dur)) remaining = Math.max(0, dur - now);
+      } catch {}
+      if (!worst || remaining > worst.remaining) worst = { remaining };
+    }
+    return worst;
+  }
+
+  // Playwright refuses to click until the target's box has stopped moving; we did not, and the
+  // coordinates we dispatch with are read from that box — so a control still sliding in with a
+  // modal, or one being scrolled to under `scroll-behavior: smooth`, gets clicked where it was
+  // a frame ago.
+  //
+  // Two regimes, because this tool spends most of its life driving a tab that is not visible:
+  //   - visible: sample the rect across frames. Catches everything, including movement driven
+  //     by a plain rAF loop, which owns no Animation object.
+  //   - hidden: requestAnimationFrame never fires, but the animation timeline keeps advancing
+  //     (measured on a background tab: a slide read 298 -> 310 -> 323 px across three calls),
+  //     so the target really can be moving. Sampling cannot see it — read the animation.
+  async function waitForStableRect(el, { maxMs = 300 } = {}) {
+    if (document.visibilityState !== "visible") {
+      const motion = runningMotion(el);
+      if (!motion) return { moved: false };
+      if (motion.remaining > maxMs) return { moved: true, settled: false, waitedMs: 0, via: "animation" };
+      const start = Date.now();
+      // Timers are clamped in a background tab, so this lands late rather than early; waitedMs
+      // reports what it actually cost.
+      await new Promise((r) => setTimeout(r, Math.ceil(motion.remaining) + 16));
+      return { moved: true, settled: !runningMotion(el), waitedMs: Date.now() - start, via: "animation" };
+    }
+    const box = () => {
+      const r = el.getBoundingClientRect();
+      return [r.x, r.y, r.width, r.height];
+    };
+    // Epsilon only wide enough to absorb float noise. A 1px tolerance was too coarse: a slide
+    // of 400px over 10s moves 0.66px per frame, which read as "not moving" — the slow
+    // animations are exactly the ones a click is most likely to land in the middle of.
+    const same = (a, b) => a.every((v, i) => Math.abs(v - b[i]) <= 0.05);
+    const frame = () =>
+      new Promise((resolve) => {
+        let done = false;
+        const finish = () => { if (!done) { done = true; resolve(); } };
+        requestAnimationFrame(finish);
+        // A throttled or paused rAF must not hold the click forever.
+        setTimeout(finish, 50);
+      });
+    const start = Date.now();
+    let prev = box();
+    let frames = 0;
+    let settled = false;
+    while (Date.now() - start < maxMs) {
+      await frame();
+      frames++;
+      const now = box();
+      if (same(prev, now)) { settled = true; break; }
+      prev = now;
+    }
+    const waitedMs = Date.now() - start;
+    // One frame to confirm it was never moving is the common case, and not worth reporting.
+    if (settled && frames <= 1) return { moved: false };
+    return { moved: true, settled, waitedMs, via: "rect" };
+  }
+
   function checkElementCovered(el) {
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return null;
@@ -586,10 +680,17 @@
 
   // Returns the capped label plus how much was cut, so the census can tell an agent
   // that the rest is one `get text @ref` away instead of leaving it to guess (F35).
+  // Page-origin strings pass through untouched. There is no server marker in a result any
+  // more — the result is JSON, so the boundary is structural: a KEY is browserctl's, a VALUE
+  // is the page's. Nothing to forge, nothing to strip.
+  function fromPage(s) {
+    return s;
+  }
+
   function elementTextInfo(el) {
     const full = fullElementText(el);
     const text = full.slice(0, TEXT_CAP);
-    return { text, truncatedBy: Math.max(0, full.length - text.length) };
+    return { text: fromPage(text), truncatedBy: Math.max(0, full.length - text.length) };
   }
 
   // Callers include find(), whose "text-container" rung can hand back a node that is not
@@ -940,10 +1041,10 @@
         activeModalTag: activeModal ? activeModal.tagName.toLowerCase() : null,
         // Every dialog that is open, blocking or not. hasActiveModal stays the "is the
         // page blocked" answer; this is the "what am I working inside" answer (F27).
-        openDialogs: openDialogs.map((d) => ({ label: d.label, tag: d.tag, width: d.width, height: d.height })),
+        openDialogs: openDialogs.map((d) => ({ label: d.label, tag: d.tag, width: d.width, height: d.height, ref: getOrAssignRef(d.node) })),
       },
       elements,
-      text: (document.body ? document.body.innerText : "").trim().replace(/\s+/g, " ").slice(0, maxText),
+      text: fromPage((document.body ? document.body.innerText : "").trim().replace(/\s+/g, " ")).slice(0, maxText),
     };
 
     if (compact) {
@@ -1008,6 +1109,7 @@
       let duplicateCount = 0;
 
       let foldedCount = 0;
+      let structureSummary = "";
       const lines = [];
 
       // The shape of the page, before any element. This is the line an agent reads to
@@ -1023,13 +1125,14 @@
       if (openDialogs.length) shapeBits.push(`${openDialogs.length} open dialog${openDialogs.length > 1 ? "s" : ""}`);
       // On a trivial page the brief says nothing the element list does not — printing
       // "[Structure: main 1]" above a single link is pure noise.
+      // The page's shape is data, so it is a FIELD; it used to be a prose line carrying a
+      // suggestion inside it. The region refs stay — they are what makes a region readable.
       if (shapeBits.length > 0 || nodes.length >= 8) {
         shapeBits.push(shape.regions.join(", "));
-        const regionHint = /\(@/.test(shape.regions.join("")) ? " — read a whole region with 'get text @ref'" : "";
-        lines.push(`[Structure: ${shapeBits.join(" · ")}${regionHint}]`);
+        structureSummary = shapeBits.join(" · ");
       }
       if (activeModal) {
-        const modalTitle = (activeModal.getAttribute("aria-label") || activeModal.querySelector("h1, h2, h3, [class*='title' i]")?.innerText || activeModal.tagName.toLowerCase()).trim().replace(/\s+/g, " ").slice(0, 80);
+        const modalTitle = fromPage((activeModal.getAttribute("aria-label") || activeModal.querySelector("h1, h2, h3, [class*='title' i]")?.innerText || activeModal.tagName.toLowerCase()).trim().replace(/\s+/g, " ")).slice(0, 80);
         const modalRef = getOrAssignRef(activeModal);
         lines.push(`[Active Modal/Drawer: ${modalTitle} (@${modalRef}) — read it with 'get text @${modalRef}'; close it with 'dismiss' (Escape, or its own close control)]`);
       } else if (openDialogs.length > 0) {
@@ -1122,61 +1225,24 @@
         }
       }
 
-      lines.push("");
-      lines.push("---");
-
-      // What was withheld, in page terms. "46 elements offscreen" is a token-budget note
-      // an agent cannot act on; naming the kind of thing that is missing turns it into a
-      // correctness warning (F30, F38).
-      if (scope === "viewport" && offscreenCount > 0) {
-        const shown = new Set(nodes);
-        const missing = allInteractives.filter((el) => !shown.has(el));
-        const kinds = describeElements(missing, 3);
-        const detail = kinds.length ? `, including ${kinds.join(", ")}` : "";
-        lines.push(`[Notice: ${nodes.length}/${allInteractives.length} elements visible in viewport. ${offscreenCount} offscreen${detail}. Call 'snapshot --all' to see them, or scroll down]`);
-      }
-      // 'all' used to say nothing at all about its own folding, so the mode an agent
-      // escalates to for completeness was silently incomplete as well (F38).
-      if (scope === "all" && foldedCount > 0) {
-        lines.push(`[Notice: full-page scope, but ${foldedCount} repetitive elements are folded above. Their refs are listed inline; use 'find <text>' to target one]`);
-      }
-      if (duplicateCount > 0) {
-        lines.push(`[Notice: ${duplicateCount} duplicate link${duplicateCount > 1 ? "s" : ""} suppressed (same destination and label as a row already listed)]`);
-      }
-
-      // The remainder is askable, so say the call that asks. A count of what was withheld
-      // with no way to request it is the line that sends an agent to eval_js.
-      if (offset + elements.length < nodes.length) {
-        const rest = nodes.length - (offset + elements.length);
-        lines.push(
-          `[More: elements ${offset + 1}-${offset + elements.length} of ${nodes.length} listed. ` +
-          `${rest} not shown — call snapshot with cursor: ${offset + elements.length} for the next page ` +
-          `(the cursor is an offset into THIS ordering; re-snapshot from the start if the page has changed)]`
-        );
-      } else if (offset > 0) {
-        lines.push(`[More: elements ${offset + 1}-${offset + elements.length} of ${nodes.length} listed — this is the last page]`);
-      }
-
-      // Content that no scope setting can reveal, because it is not in the DOM yet (F39).
-      const hints = hiddenContentHints(nodes);
-      const regions = openDialogs.length ? overflowingRegions(openDialogs[0].node) : [];
-      if (hints.more.length || hints.tabs.length || regions.length) {
-        const bits = [];
-        if (hints.more.length) bits.push(hints.more.map((h) => `"${h.text}" (@${h.ref})`).join(", "));
-        if (hints.tabs.length) bits.push(`filter tabs: ${hints.tabs.map((t) => `"${t.text}"${t.selected ? " (selected)" : ""} (@${t.ref})`).join(", ")}`);
-        if (regions.length) bits.push(`a scrollable region with ~${regions[0].hidden}px below the fold (@${regions[0].ref})`);
-        lines.push(`[Possible hidden content: ${bits.join("; ")}. Lists like these load on demand — 'snapshot --all' will NOT reveal rows that are not in the DOM yet; click the control instead]`);
-      }
-
-      // Phrased by INTENT, not by tool name. An agent that has just read this census and
-      // wants "the price" or "how many of these" has to map that want onto a tool; when
-      // the mapping is not in front of it, a low-tier model reaches for eval_js and
-      // hand-rolls the read, which costs far more tokens and loses every diagnostic.
-      lines.push(`[Next: click/type @ref · read one value: get text @ref · one attribute: get attr @ref href · count: get count <css> · locate a control: find "label" · a value in plain text: find text "label" · more of the page: scroll down or snapshot --all]`);
-
-      res.compactView = lines.join("\n");
+      res.census = lines.join("\n");
+      res.compactView = res.census; // legacy name, still read by the CLI renderer
       res.foldedCount = foldedCount;
+      res.duplicateCount = duplicateCount;
+      if (structureSummary) res.structure = structureSummary;
     }
+
+    // What the prose notices used to say, as data. Each was a sentence an agent had to parse
+    // out of a text blob; none of it is new information, and a field cannot be mistaken for
+    // the page's own words.
+    const hints = hiddenContentHints(nodes);
+    const regions = openDialogs.length ? overflowingRegions(openDialogs[0].node) : [];
+    const hiddenContent = [
+      ...hints.more.map((x) => ({ kind: "load-more", text: x.text, ref: x.ref })),
+      ...hints.tabs.map((x) => ({ kind: "tab", text: x.text, ref: x.ref, selected: !!x.selected })),
+      ...regions.map((r) => ({ kind: "scrollable-region", hiddenPx: r.hidden, ref: r.ref })),
+    ];
+    if (hiddenContent.length) res.hiddenContent = hiddenContent;
 
     return res;
   }
@@ -1535,7 +1601,7 @@
   }
 
   function accessibleName(el) {
-    const pick = (s) => (s ? String(s).trim().replace(/\s+/g, " ").slice(0, 100) : "");
+    const pick = (s) => (s ? fromPage(String(s).trim().replace(/\s+/g, " ")).slice(0, 100) : "");
     let n = pick(el.getAttribute && el.getAttribute("aria-label"));
     if (n) return n;
     const labelledby = el.getAttribute && el.getAttribute("aria-labelledby");
@@ -2097,6 +2163,9 @@
     // scrollIntoView moves it — so measuring first tested coordinates the click would
     // never use, and could report an overlay that scrolling had already resolved (or
     // miss one it had just slid under).
+    // Before the hit-test, not after: both it and the dispatch coordinates come from the box,
+    // so measuring a moving element tests a point the click will never use.
+    const stability = await waitForStableRect(el);
     const coveredInfo = checkElementCovered(el);
     const mutations = startMutationCounter();
 
@@ -2136,10 +2205,24 @@
     if (eventTarget !== el) {
       out.dispatchedTo = `<${eventTarget.tagName.toLowerCase()}> inside <${el.tagName.toLowerCase()}> shadow root`;
     }
+    // Append: a moving element that is ALSO covered has two things wrong with it, and the
+    // second one used to overwrite the first.
+    const addWarning = (w) => { out.warning = out.warning ? `${out.warning} — ${w}` : w; };
+    if (stability.moved) {
+      out.effect.stabilized = { waitedMs: stability.waitedMs, settled: stability.settled };
+      if (!stability.settled) {
+        addWarning(
+          (stability.via === "animation"
+            ? "the element was still moving when it was clicked (an animation that moves its box is still running)"
+            : `the element was still moving when it was clicked (its box kept changing for ${stability.waitedMs}ms)`) +
+          ": the coordinates this click used may already be stale. If nothing happened, wait for the animation " +
+          '(browser_wait_for {for: "settle"}) and click again');
+      }
+    }
     if (coveredInfo && coveredInfo.covered) {
-      out.warning = `element is covered by <${coveredInfo.coveredBy}> (@${coveredInfo.topRef}) — click event dispatched, but overlay may have intercepted it`;
+      addWarning(`element is covered by <${coveredInfo.coveredBy}> (@${coveredInfo.topRef}) — click event dispatched, but overlay may have intercepted it`);
     } else if (warning) {
-      out.warning = `element is not visible (${warning}) — the handler was still invoked, but verify the effect`;
+      addWarning(`element is not visible (${warning}) — the handler was still invoked, but verify the effect`);
     }
     // Did the control's own state move? This is the only check that distinguishes "the
     // page reacted" from "the thing I clicked is now selected".
@@ -2739,6 +2822,81 @@
 
 
 
+  // Find the <input type=file> an upload should go to, and stamp it so the CDP side can
+  // find the same element again (DOM.setFileInputFiles needs the node, and a CSS selector
+  // sent over CDP would not pierce shadow DOM).
+  //
+  // The target an agent names is usually NOT the input: the visible control is a styled
+  // <label> or <button> and the real input is hidden next to it. Resolving only the exact
+  // element would fail on the common case, so walk outwards in a fixed order and say which
+  // step answered.
+  function upload_mark({ index, ref, selector, text, placeholder } = {}) {
+    const isFileInput = (e) => e && e.tagName === "INPUT" && (e.type || "").toLowerCase() === "file";
+    const named = index != null || ref != null || selector != null || text != null || placeholder != null;
+    const all = deepQueryAll('input[type="file"]');
+    let input = null;
+    let matchedBy = "";
+
+    if (named) {
+      const el = resolveTarget({ index, ref, selector, text, placeholder });
+      if (isFileInput(el)) {
+        input = el;
+        matchedBy = "the element itself";
+      } else {
+        const inside = all.filter((i) => composedContains(el, i));
+        if (inside.length === 1) {
+          input = inside[0];
+          matchedBy = "a file input inside the target";
+        } else if (inside.length > 1) {
+          throw createStructuredError(
+            `the target contains ${inside.length} file inputs`,
+            "AMBIGUOUS_TARGET",
+            { count: inside.length },
+            "Name the input itself \u2014 browser_find({selector: 'input[type=file]'}) returns a ref for each."
+          );
+        } else {
+          // A <label for=...>, or a control sitting inside one, points at its own input.
+          const forId = el.getAttribute && el.getAttribute("for");
+          const byFor = forId ? document.getElementById(forId) : null;
+          const label = el.closest ? el.closest("label") : null;
+          const byLabel = label && label.control ? label.control : null;
+          if (isFileInput(byFor)) { input = byFor; matchedBy = "the input this label points at"; }
+          else if (isFileInput(byLabel)) { input = byLabel; matchedBy = "the input this label wraps"; }
+        }
+      }
+    }
+
+    if (!input && all.length === 1) {
+      input = all[0];
+      matchedBy = named ? "the page's only file input (the named target was not one)" : "the page's only file input";
+    }
+
+    if (!input) {
+      throw createStructuredError(
+        all.length === 0
+          ? "no <input type=file> on this page"
+          : `${all.length} file inputs on this page and the target did not name one`,
+        "ELEMENT_NOT_FOUND",
+        { fileInputs: all.length },
+        all.length === 0
+          ? "The page may open its file picker from JavaScript, which no tool can answer \u2014 check for a hidden input first with browser_find({selector: 'input[type=file]'})."
+          : "Name one: browser_find({selector: 'input[type=file]'}) returns a ref for each."
+      );
+    }
+
+    for (const e of deepQueryAll("[data-bctl-upload]")) e.removeAttribute("data-bctl-upload");
+    input.setAttribute("data-bctl-upload", "1");
+    return {
+      matchedBy,
+      ref: getOrAssignRef(input),
+      name: input.name || null,
+      accept: input.accept || null,
+      multiple: !!input.multiple,
+      // A file input is hidden on most real upload UIs; that is the design, not a fault.
+      hidden: !isVisible(input),
+    };
+  }
+
   // Resolve an element by ref/index and return its viewport rect. Used by
   // element_screenshot so it can capture ref-addressed (and shadow-DOM) elements,
   // not just the data-bctl-ref index stamp that only snapshot sets.
@@ -3107,7 +3265,15 @@
           }
           const read = readOneProperty(target, f.property || (f.attr ? "attr" : "text"), f.attr);
           // A URL is read to answer "where does this go", so hand back the absolute form.
-          row[name] = read.resolved !== undefined ? read.resolved : read.value;
+          // Not every property answers in `value`: 'box' answers in x/y/width/height, and
+          // reading only `.value` turned every box field into a silent null — the exact
+          // failure this whole mechanism exists to stop.
+          if (read.resolved !== undefined) row[name] = read.resolved;
+          else if (read.value !== undefined) row[name] = read.value;
+          else {
+            const { property: _p, name: _n, ...rest } = read;
+            row[name] = rest;
+          }
         }
         return row;
       });
@@ -3132,7 +3298,10 @@
       if (els.length === 0) {
         notes.push("0 matches. This is an answer, not a failure — the selector is valid and nothing on the page matches it.");
       }
-      if (notes.length) res.note = notes.join(" ");
+      // An array, not one joined string: two unrelated facts ("this field matched nothing" and
+      // "there are more rows") were glued with a space, so a reader had to re-split prose to
+      // find out how many things it had been told.
+      if (notes.length) res.note = notes.length === 1 ? notes[0] : notes;
       return res;
     }
 
@@ -3166,11 +3335,11 @@
   function readOneProperty(el, property, attr) {
     switch (property) {
       case "text":
-        return { property: "text", value: (el.innerText || el.textContent || "").trim() };
+        return { property: "text", value: fromPage((el.innerText || el.textContent || "").trim()) };
       case "value":
-        return { property: "value", value: el.value !== undefined ? el.value : (el.innerText || "") };
+        return { property: "value", value: fromPage(el.value !== undefined ? el.value : (el.innerText || "")) };
       case "html":
-        return { property: "html", value: el.outerHTML || "" };
+        return { property: "html", value: fromPage(el.outerHTML || "") };
       case "attr":
       case "attribute": {
         // `present` disambiguates the three cases an absent/empty attribute collapsed
@@ -3272,6 +3441,7 @@
     wait_settle,
     get_page_content,
     element_rect,
+    upload_mark,
     describe_element,
     click_selector,
     fill_selector,

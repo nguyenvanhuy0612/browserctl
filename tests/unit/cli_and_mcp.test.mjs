@@ -14,6 +14,22 @@ import {
 const execFileAsync = util.promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+// Child scripts as FILES, not as template literals inside this one. A script embedded here
+// passes through two escaping layers — the template literal, and whatever wrote the file —
+// and `split("\\n")` losing a backslash becomes a real newline inside a string literal, which
+// fails as a syntax error in a child process whose stderr the test runner truncates. That
+// cost several rounds to diagnose once. A fixture under children/ is parsed by `node --check`
+// like any other source file, and has no escaping layer at all.
+async function runChild(fixture, env = {}) {
+  const path = join(__dirname, "children", fixture);
+  try {
+    const { stdout } = await execFileAsync(process.execPath, [path], { env: { ...process.env, ...env } });
+    return stdout;
+  } catch (err) {
+    throw new Error(`${fixture} failed: ${String(err.stdout || "")} --- stderr: ${String(err.stderr || "").slice(0, 600)}`);
+  }
+}
+
 const cliPath = join(__dirname, "..", "..", "cli.js");
 
 test("CLI: prints help text when invoked with --help", async () => {
@@ -416,13 +432,14 @@ test("MCP: get_text forwards the property enum, and qualifiers survive formattin
     const htmlRes = await getProp({ selector: "h1", property: "html" });
     const sent = seen.filter((s) => s.action === "get_property").pop();
     if (sent.params.property !== "html") throw new Error("property not forwarded: " + JSON.stringify(sent.params));
-    const htmlText = htmlRes.content[0].text;
-    if (!htmlText.includes("<h1>Hi</h1>")) throw new Error("lost value: " + htmlText);
-    if (!htmlText.includes("matched 3 elements")) throw new Error("dropped multi-match note: " + htmlText);
+    const html = JSON.parse(htmlRes.content[0].text);
+    if (html.value !== "<h1>Hi</h1>") throw new Error("lost value: " + htmlRes.content[0].text);
+    if (html.matchCount !== 3) throw new Error("dropped the multi-match qualifier: " + htmlRes.content[0].text);
 
     // an absent attribute must not render as empty output
     const attrText = (await getProp({ selector: "dialog", property: "attr", attr: "open" })).content[0].text;
-    if (!/not present/.test(attrText)) throw new Error("absent attribute rendered as: " + JSON.stringify(attrText));
+    const attr = JSON.parse(attrText);
+    if (attr.present !== false) throw new Error("an absent attribute must report present:false — " + attrText);
 
     console.log("MCP_PROPERTY_OK");
     srv.close();
@@ -460,9 +477,12 @@ test("MCP: unloaded capabilities are advertised, and browser_action lists its ca
 
     // 1. every snapshot carries a one-line pointer to what is not loaded
     const snapText = (await server._registeredTools["browser_snapshot"].handler({})).content[0].text;
-    if (!/more capabilities not loaded/.test(snapText)) throw new Error("no capability hint on snapshot: " + snapText);
+    // A result carries no advice any more. Capability discovery lives where it costs once per
+    // session instead of once per call: the load_tools description, and list_available_tools.
+    if (/more capabilities not loaded/.test(snapText)) throw new Error("a result must carry no capability advice: " + snapText);
+    const loadDesc = server._registeredTools["browser_load_tools"].description || "";
     for (const profile of ["network", "cookies", "storage", "console"]) {
-      if (!snapText.includes(profile)) throw new Error("hint omits profile " + profile + ": " + snapText);
+      if (!loadDesc.includes(profile)) throw new Error("browser_load_tools omits profile " + profile);
     }
 
     // 2. browser_action with no arguments returns the dispatchable action catalogue
@@ -527,21 +547,9 @@ test("MCP: find states the real scope of BOTH indexes it searches", async () => 
 // Runs an assertion script against the MCP server in a subprocess (importing it starts a
 // server, so it must not be pulled into the test process). Mirrors the pattern above.
 async function mcpDescriptions() {
-  const script = `
-    process.env.BROWSERCTL_MCP_PROFILE = "all";
-    const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
-    const out = {};
-    for (const [name, t] of Object.entries(server._registeredTools)) {
-      out[name] = { description: t.description || "", shape: {} };
-      const shape = t.inputSchema && t.inputSchema.shape;
-      if (shape) for (const [k, v] of Object.entries(shape)) out[name].shape[k] = (v && v.description) || "";
-    }
-    console.log("JSON_START" + JSON.stringify(out) + "JSON_END");
-    process.exit(0);
-  `;
-  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]);
+  const stdout = await runChild("describe-tools.mjs");
   const m = stdout.match(/JSON_START([\s\S]*)JSON_END/);
-  assert.ok(m, "MCP description dump failed");
+  assert.ok(m, "MCP description dump failed: " + stdout.slice(0, 200));
   return JSON.parse(m[1]);
 }
 
@@ -610,21 +618,21 @@ test("Snapshot notices name what was withheld and flag load-on-demand content", 
   // census listed. They were the same number until the census learned to page, and the
   // notice then started reporting the page size as the viewport count — three numbers in
   // one response with the wrong one in front.
-  const notice = content.match(/\[Notice: \$\{nodes\.length\}[^`]*`/);
-  assert.ok(notice, "viewport notice must still be emitted, counting what is in scope");
-  assert.ok(!/\[Notice: \$\{elements\.length\}/.test(content),
-    "the viewport notice must not count the paged slice");
-  assert.ok(/including \$\{kinds/.test(content) || /\$\{detail\}/.test(content),
-    "F30: the notice must interpolate a description of the withheld elements");
+  // The facts these notices carried are fields now — a result is JSON, and a sentence an
+  // agent has to parse out of prose is the thing this release removed.
+  assert.ok(/offscreenCount,/.test(content), "what the viewport withheld must be a field");
+  assert.ok(/res\.duplicateCount = duplicateCount;/.test(content), "suppressed duplicates must be a field");
+  assert.ok(/res\.hiddenContent = hiddenContent;/.test(content), "load-on-demand controls must be a field");
+  assert.ok(/describeElements/.test(content), "F30: what was withheld must still be described, not just counted");
 
   // F38: 'all' must not be silent about its own folding.
-  assert.ok(/scope === "all" && foldedCount > 0/.test(content),
-    "F38: full-page scope must report folded elements too");
+  assert.ok(/res\.foldedCount = foldedCount;/.test(content), "F38: folding must be reported as a field");
 
   // F39: load-more controls and overflowing regions must be surfaced.
-  assert.ok(/Possible hidden content/.test(content), "F39: hidden-content hint line must exist");
+  assert.ok(/kind: "load-more"/.test(content), "F39: load-on-demand controls must be reported");
   assert.ok(/LOAD_MORE_RE/.test(content), "F39: load-more controls must be detected");
-  assert.ok(/will NOT reveal/.test(content), "F39: must say that --all cannot reveal undrawn rows");
+  assert.ok(/no depth or scope setting reveals rows that are not in the DOM/.test(content),
+    "F39: the CLI notice must still say that --all cannot reveal undrawn rows");
 
   // F27: open dialogs are reported separately from blocking modals.
   assert.ok(/findOpenDialogs/.test(content), "F27: non-blocking dialogs must be detected");
@@ -640,8 +648,8 @@ test("Snapshot notices name what was withheld and flag load-on-demand content", 
     "generality: no site-specific parameter names in the census — the heuristic must be site-agnostic");
   assert.ok(/aria-expanded=false/.test(content),
     "F39: load-more detection must use the platform flag, not only English labels");
-  assert.ok(/duplicate link\$\{/.test(content) || /duplicate links? suppressed/.test(content),
-    "F28: duplicate rows must be collapsed and reported");
+  assert.ok(/duplicateCount\+\+/.test(content) && /res\.duplicateCount = duplicateCount;/.test(content),
+    "F28: duplicate rows must be collapsed and reported as a field");
 
   // F41: the content script's compact view must survive a multi-frame page.
   const bg = await fs.readFile(join(__dirname, "..", "..", "extension", "background.js"), "utf8");
@@ -703,16 +711,22 @@ test("Tool surface is navigable by intent, not just by name (F51)", async () => 
 
   // The server instructions are read once at connect, before any tool description, so
   // they are the only place an intent->tool mapping is guaranteed to be seen.
-  assert.ok(/WHAT YOU WANT -> WHAT TO CALL/.test(src), "instructions must carry an intent index");
-  const intentIndex = src.split("WHAT YOU WANT")[1].slice(0, 2500);
+  // The property, not one phrasing of it: an agent must get from "I want to read the page" to
+  // a tool name without having loaded every schema first. The old heading is gone; the
+  // sections that do the routing are what this pins.
+  const iStart = src.indexOf("const INSTRUCTIONS = `");
+  const intentIndex = src.slice(iStart, src.indexOf("`;", iStart));
+  assert.ok(/THE LOOP/.test(intentIndex), "instructions must state the loop");
+  assert.ok(/READING, in order of/.test(intentIndex), "instructions must route reading intents to tools");
+  assert.ok(/ACTING:/.test(intentIndex), "instructions must route acting intents to tools");
   for (const t of ["browser_find", "browser_get_property", "browser_get_page_content", "browser_load_tools"]) {
     assert.ok(new RegExp(`${t}`).test(intentIndex), `intent index must name ${t}`);
   }
   // The intents that became parameters in 0.6.4 must still be findable BY INTENT — an
   // agent looking for "count these" or "read this attribute" has no reason to guess that
   // both now live on browser_get_property unless the index spells the call out.
-  for (const call of ['property: "count"', 'property: "attr"', "all: true", "selector"]) {
-    assert.ok(intentIndex.includes(call), `intent index must show the ${call} form`);
+  for (const call of ['"count"', '"attr"', "all: true", "fields:", "selector"]) {
+    assert.ok(intentIndex.includes(call), `instructions must show the ${call} form`);
   }
   assert.ok(/browser_eval_js\s*\n?[^\n]*costs far more tokens|instead costs far more tokens/.test(src),
     "instructions must say why eval_js is the expensive fallback");
@@ -1160,14 +1174,15 @@ test("Docs do not claim a completeness they lack (F75)", async () => {
     assert.ok(!rows.some((r) => r.includes("`" + ghost + "`")),
       `${ghost} is not a registered MCP tool and must not appear as a row in the tool table`);
   }
-  // ...and the rows that replaced them must be marked, with the marker explained in terms of
-  // how to actually call them. Keyed on the mechanism, not on one phrasing of it.
+  // ...and they must still be reachable in writing: named as actions without a tool, with the
+  // call that reaches them shown. Keyed on the mechanism, not on one phrasing of it.
+  const noTool = ref.slice(ref.indexOf("protocol actions have no tool"));
   for (const action of ["clear", "check", "uncheck"]) {
-    assert.ok(ref.split("\n").some((l) => new RegExp("^\\|\\s*`" + action + "` ?\u00b9").test(l)),
-      `the ${action} row must be marked as an action with no MCP tool`);
+    assert.ok(new RegExp("`" + action + "`").test(noTool.slice(0, 600)),
+      `${action} must be named as an action that has no MCP tool`);
   }
-  assert.ok(/\u00b9[^\n]*\n?[^\n]*browser_action\(\{\s*action: "check"/.test(ref),
-    "the marker must be explained by showing the browser_action call that reaches those actions");
+  assert.ok(/browser_action\(\{\s*action: "check"/.test(noTool.slice(0, 600)),
+    "the prose must show the browser_action call that reaches those actions");
 
   // Counts that were measured once and then drifted.
   assert.ok(!/~24 tools|70\+ tools|67 MCP tools/.test(ref), "stale tool counts must not return");
@@ -1254,8 +1269,8 @@ test("Inline hints reach an MCP agent in a syntax it can call (F78)", async () =
   assert.equal(mcpifyHints(pageText), pageText, "F78: content outside brackets must be untouched");
 
   // Every response goes through one funnel, so no tool can bypass the rewrite.
-  assert.ok(/function text\(obj[^)]*\)\s*\{[\s\S]{0,600}?withMcpHints\(textRaw\(/.test(src),
-    "F78: text() must route every response through withMcpHints");
+  assert.ok(/format === "json" \|\| format === "pretty" \? res : withMcpHints\(res\)/.test(src),
+    "F78: prose responses must route through withMcpHints (JSON must NOT — it corrupts the payload)");
 });
 
 test("The tools that answer 'read this region' say so (F79)", async () => {
@@ -1265,18 +1280,18 @@ test("The tools that answer 'read this region' say so (F79)", async () => {
   // The reader returns el.innerText, so it reads a whole container — but it was described
   // as "read one property of an element", and the agent that wanted a thread body never
   // recognised it.
-  const reader = src.slice(src.indexOf("THE element read."), src.indexOf("THE element read.") + 2200);
+  const reader = src.slice(src.indexOf("THE element read:"), src.indexOf("THE element read:") + 2200);
   assert.ok(/WHOLE REGION|whole region/.test(reader), "F79: the reader must say it reads a container, not just a field");
   assert.ok(/eval_js/.test(reader), "F79: the reader must name the fallback it replaces");
   assert.ok(/all=true|all: true/.test(reader), "F79: the reader must say it can answer for every match");
 
   // get_page_content used to send web-app readers to snapshot, which truncates — a loop
   // whose only exit was eval_js.
-  const gpc = src.slice(src.indexOf("Extract the main readable prose"), src.indexOf("Extract the main readable prose") + 900);
+  const gpc = src.slice(src.indexOf("main readable prose"), src.indexOf("main readable prose") + 900);
   assert.ok(/browser_get_property/.test(gpc), "F79: get_page_content must point at the tool that does answer");
 
   // read_page was called once, bare, then blamed for what ref_id fixes.
-  const rp = src.slice(src.indexOf("SPECIALISED reader"), src.indexOf("SPECIALISED reader") + 1600);
+  const rp = src.slice(src.indexOf("The accessibility tree as indented text"), src.indexOf("The accessibility tree as indented text") + 1600);
   assert.ok(/ref_id/.test(rp), "F79: read_page must name ref_id for narrowing to a subtree");
 });
 
@@ -1284,7 +1299,7 @@ test("Runtime logs are bounded and never escape the repo (F80)", async () => {
   const fs = await import("node:fs/promises");
   const read = (...p) => fs.readFile(join(__dirname, "..", "..", ...p), "utf8");
   const [server, bench, ignore] = await Promise.all([
-    read("bridge", "server.js"), read("test", "benchmark", "run_benchmark.js"), read(".gitignore"),
+    read("bridge", "server.js"), read("tests", "benchmark", "run_benchmark.js"), read(".gitignore"),
   ]);
 
   // Both appenders rotate, so each is capped at 2x its limit rather than growing forever.
@@ -1358,9 +1373,9 @@ test("MCP: unknown params are refused with a redirect, aliases resolve to the re
     const readPage = server._registeredTools["browser_read_page"].handler;
 
     // 1. A parameter that belongs to a different tool: refused, not stripped.
-    const bad = await readPage({ format: "markdown" });
+    const bad = await server._registeredTools["browser_snapshot"].handler({ mode: "all" });
     if (!bad.isError) throw new Error("unknown param was accepted");
-    if (!bad.content[0].text.includes("browser_get_page_content")) throw new Error("no redirect to the reader that does return prose");
+    if (!bad.content[0].text.includes("scope=")) throw new Error("no redirect to the parameter that does exist");
     if (!bad.content[0].text.includes("valid params:")) throw new Error("legal set not listed");
 
     // 2. A typo: did-you-mean.
@@ -1392,7 +1407,12 @@ test("MCP: unknown params are refused with a redirect, aliases resolve to the re
     console.log("PARAM_GUARD_OK");
     process.exit(0);
   `;
-  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]);
+  let stdout = "";
+  try {
+    ({ stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]));
+  } catch (err) {
+    throw new Error("param guard child: " + String(err.stdout || "") + " | " + String(err.stderr || "").slice(0, 400));
+  }
   assert.ok(stdout.includes("PARAM_GUARD_OK"));
 });
 
@@ -1464,7 +1484,7 @@ test("MCP: merged tools dispatch to the same protocol actions", async () => {
 
 // The consolidated surface is opt-in until it is measured. Both numbers are asserted so a
 // tool added to core without a decision shows up as a failing test, not as a drifting count.
-test("MCP: core is exactly 23 tools, and the merged-away names stay gone", async () => {
+test("MCP: core is exactly 24 tools, and the merged-away names stay gone", async () => {
   const script = `
     const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
     const on = Object.entries(server._registeredTools).filter(([, t]) => t.enabled !== false).map(([n]) => n);
@@ -1477,7 +1497,9 @@ test("MCP: core is exactly 23 tools, and the merged-away names stay gone", async
   const core = JSON.parse(stdout.trim().split("\n").at(-1));
 
   // A tool added to core without a decision shows up here as a failing count, not as drift.
-  assert.equal(core.length, 23);
+  // 24 since browser_upload: attaching a file is a step in the flow core exists for, and it is
+  // the one action a page's own JavaScript cannot perform, so eval_js is not a fallback for it.
+  assert.equal(core.length, 24);
 
   // Eight names became parameters on five survivors in 0.6.4/0.7.0. They must not creep back.
   for (const gone of [
@@ -1527,8 +1549,10 @@ test("Snapshot is paged, and the frame merge cannot drop what it was not taught 
   const content = await fs.readFile(join(__dirname, "..", "..", "extension", "content.js"), "utf8");
   assert.ok(/params\.limit/.test(content) && /params\.cursor/.test(content),
     "F90: the census must accept limit/cursor");
-  assert.ok(/\[More: elements /.test(content),
-    "F90: the compact view must say the remainder is askable, not just that it exists");
+  assert.ok(/window: \{ offset, shown: elements\.length, inScope: nodes\.length \}/.test(content),
+    "F90: the window must be reported as data");
+  assert.ok(/next: offset \+ elements\.length/.test(content),
+    "F90: the continuation must be a field, not a sentence");
 
   const script = `
     import http from "node:http";
@@ -1648,8 +1672,8 @@ test("The census hands over calls, not just counts (F93)", async () => {
   assert.ok(/function getLandmarkNode\(/.test(content), "F93: the landmark CONTAINER must be reachable, not just its name");
   assert.ok(/\$\{lm\} \$\{n\} \(@\$\{getOrAssignRef\(node\)\}\)/.test(content),
     "F93: each region in the structure line must carry a ref");
-  assert.ok(/read a whole region with 'get text @ref'/.test(content),
-    "F93: the structure line must say what the region refs are for");
+  assert.ok(/if \(structureSummary\) res\.structure = structureSummary;/.test(content),
+    "F93: the page's shape must be a field, not a prose line carrying a suggestion");
 
   // 2. An open dialog is the most common region read of all.
   assert.ok(/Open dialog: .*\(@\$\{dialogRef\}\)/.test(content), "F93: an open dialog must carry its own ref");
@@ -1703,3 +1727,22 @@ test("The release gates are derived, not remembered (F95)", async () => {
     assert.ok(doc.includes(name), `F95: docs/RELEASING.md has no row for the '${name}' gate`);
   }
 });
+
+// The all=true read is the shape most likely to be large — every link, every control — and
+// it fell through to a raw JSON dump: twelve lines a row, with property/name/present
+// repeated on each. Fifty rows of that is six hundred lines to say fifty things, which is
+// the token cost that sends an agent back to eval_js. Found by rendering it through the MCP
+// layer instead of reading the bridge's JSON, which is what the agent actually sees.
+test("The human view of an all=true read is one line per row (F97)", async () => {
+  const out = await runChild("all-render.mjs");
+  assert.ok(out.includes("ALL_RENDER_OK"), out);
+});
+
+test("open_url's read comes back as rendered text, with callable hints (F98)", async () => {
+  const out = await runChild("open-url-read.mjs");
+  assert.ok(out.includes("OPEN_URL_READ_OK"), out);
+});
+
+
+
+

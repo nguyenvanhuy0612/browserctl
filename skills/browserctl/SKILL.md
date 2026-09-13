@@ -17,6 +17,12 @@ foreground; browserctl works in another one.
   optional `tabId` so parallel agents can drive different tabs without racing on the pin.
 - **It uses the user's real session.** No separate profile, no re-login.
 
+## The loop
+
+`orient -> read -> act -> verify`. Each step has its own tool group, and every tool
+description says which step it is. Act on a ref you just read; verify with the `effect`
+block every action returns, not by assuming.
+
 ## Start here
 
 1. `browser_snapshot` — the census: interactive elements with stable `@ref`s, in reading order,

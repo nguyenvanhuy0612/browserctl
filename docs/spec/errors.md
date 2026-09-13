@@ -60,6 +60,7 @@ the values a caller could branch on. `recoveryHint` is the next call, spelled ou
 | `SCROLL_TARGET_NOT_SCROLLABLE` | the target does not scroll | the nearest scrollable ancestor's ref |
 | `MODAL_NOT_DISMISSED` | dismiss ran and the modal is still open | what was tried |
 | `INVALID_SELECTOR` | malformed CSS | that ARIA roles are not CSS tags; `find` searches by label |
+| `AMBIGUOUS_TARGET` | the target matched several things and picking one would be a guess | how to name the one meant — the call that returns a ref for each candidate |
 | `WAIT_TIMEOUT` | the condition never held | `readyState`, and the closest text actually on the page |
 | `NET_CAPTURE_NOT_STARTED` | reading a capture that was never started | `net_start` |
 | `NETWORK_IDLE_TIMEOUT` | still in flight at the deadline | `wait_settle`, or a `maxInFlight` tolerance |

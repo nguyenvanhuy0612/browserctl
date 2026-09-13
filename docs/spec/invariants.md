@@ -47,7 +47,7 @@ insertion path runs on paste".
 ## I5 — A merge passes through, it does not enumerate
 
 `background.js` merges per-frame results. Listing the fields to **keep** means editing the merge every
-time the content script gains one, and forgetting is invisible: `compactView` was rebuilt from
+time the content script gains one, and forgetting is invisible: the census was rebuilt from
 scratch [F41], then `nearest` was lost, then `pageLabels` [F59]. Spread the top frame's result and
 override only what the merge owns.
 

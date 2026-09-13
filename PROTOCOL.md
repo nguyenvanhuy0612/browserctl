@@ -1,11 +1,13 @@
 # Command protocol
 
-Current version: **0.6.3** (extension, bridge, and MCP server are versioned together).
+Current version: **0.7.1** (extension, bridge, and MCP server are versioned together).
 
-**Scope of this document.** It specifies the wire format and the 24 actions worth describing in
-detail — the census, the actions, and the shapes their responses take. It is **not** the action index:
-there are 81. For the complete list use `browserctl --help`, or `browser_action` called with no
-arguments from an MCP client. Every action not detailed here follows the same envelope:
+**Scope of this document.** It specifies the wire format and the actions worth describing in detail —
+the census, the actions, and the shapes their responses take. It is **not** the action index: for the
+complete list use `browserctl --help`, or `browser_action` called with no arguments from an MCP
+client, which prints every action the bridge will dispatch.
+
+Every action not detailed here follows the same envelope:
 `POST /command  {"action": "<name>", "params": {…}}`, replying `{ok, result}` or
 `{ok: false, error, code?, diagnostics?, recoveryHint?}`.
 
@@ -97,7 +99,7 @@ Params: optional `{ "scope": "viewport"|"all", "compact": true, "maxText": 4000 
 `viewport`; `all` lists every element currently in the DOM — which is NOT every row the page can show,
 since feeds and virtualised lists materialise rows only on interaction.
 
-`text` is the element's accessible name, resolved the way the browser resolves it (0.6.0): `aria-label`,
+`text` is the element's accessible name, resolved the way the browser resolves it: `aria-label`,
 `aria-labelledby`, a descendant image's `alt`, `title`/`placeholder`, a form control's `<label for>` /
 wrapping `<label>` / row text, then slotted shadow content. A control's `value` is never used as its
 name.
@@ -117,22 +119,33 @@ Result:
   ],
   "pageState": {
     "hasActiveModal": false,
-    "openDialogs": [ { "label": "Notifications", "tag": "div", "width": 360, "height": 661 } ]
+    "openDialogs": [ { "label": "Notifications", "tag": "div", "width": 360, "height": 661, "ref": "ref_35" } ]
   },
-  "compactView": "[Structure: 30 repeated <tr> rows (~2 controls each)]\n  [@ref_1] <a> \"Home\" -> /\n…",
+  "census": "  [@ref_1] <a> \"Home\" -> /\n…",
+  "structure": "30 repeated <tr> rows (~2 controls each) · main 199 (@ref_61)",
+  "window": { "offset": 0, "shown": 60, "inScope": 199 },
+  "next": 60,
+  "offscreenCount": 31,
+  "foldedCount": 48,
+  "duplicateCount": 3,
+  "hiddenContent": [ { "kind": "load-more", "text": "See more", "ref": "ref_62" } ],
   "text": "Visible page text, truncated..."
 }
 ```
 
-Per-element fields added in 0.6.0: `role` and `state` (from `aria-checked`/`selected`/`expanded`/
+Per-element fields: `role` and `state` (from `aria-checked`/`selected`/`expanded`/
 `pressed`/`current`/`disabled`), `hrefKey` (href normalised for duplicate detection), `textTruncatedBy`
 (characters cut, retrievable with `get_property text`), `viaLabel` (a visually hidden control operated
 through its visible label), `revealOn` (hidden until hover/focus). `pageState.openDialogs` lists every
 open dialog, whether or not it blocks the page.
 
-`compactView` opens with a `[Structure: …]` line describing the page's shape, and closes with notices
-naming what was withheld — offscreen elements *by kind*, suppressed duplicates, folded runs, and
-`[Possible hidden content: …]` for controls that load more rows on demand.
+`census` is the element listing: one line per element, in reading order within each landmark block.
+What it withheld is reported alongside it as data, not as prose inside it — `window` and `next` for
+paging, `offscreenCount` for elements in the DOM but off screen, `foldedCount` for collapsed repeats
+(their refs stay in the listing), `duplicateCount` for suppressed same-destination links, and
+`hiddenContent` for controls whose rows are not in the DOM at all until they are clicked.
+`structure` summarises the page's shape and carries a ref for each landmark region, so a region can
+be read whole with `get_property`. `compactView` is kept as an alias of `census` for older callers.
 
 Elements are listed in reading order within each landmark block. Indices and refs are valid until the
 page navigates or is re-rendered; a stale `ref` now reports the ref that replaced it where the same
@@ -159,7 +172,7 @@ Every click/type/fill/paste returns an `effect` block so the caller can tell a r
     "mutationCount": 34,
     "urlChanged": false,
     "targetStillPresent": true,
-    // 0.6.0: for a control carrying aria-checked/selected/pressed/expanded, whether its
+    // For a control carrying aria-checked/selected/pressed/expanded, whether its
     // OWN state moved. "The DOM mutated" is not evidence the intended thing happened —
     // eight consecutive clicks on a real audience selector each reported 34+ mutations
     // while the selection never committed.
@@ -204,6 +217,16 @@ Alias for `type` — clears existing value and sets new text via native prototyp
 
 ### `get_property`
 `params: { property: "text"|"value"|"attr"|"title"|"url"|"html"|"box"|"count", ref?, index?, selector?, attr? }` - retrieve specific property of target element or page. Result: `{ property, value: ... }`.
+
+### `upload`
+`params: { files: string[], ref?, index?, selector?, text?, placeholder? }` - attach local files
+to an `<input type=file>` and fire the page's `change`/`input`, via CDP `DOM.setFileInputFiles`.
+Attaches the debugger (banner). Paths are **absolute** and are opened by Chrome on the bridge
+host; the bridge refuses a relative or missing path before the command reaches the extension.
+The target may be the input or the visible control in front of it (a `<label>`, a button, a
+container); with no target the page's only file input is used, and with several it refuses.
+Result: `{ files: string[], count, bytes, input: { matchedBy, ref, name, accept, multiple,
+hidden }, note, warning? }` - `warning` when an input without `multiple` dropped files.
 
 ### `scroll`
 `params: { direction: "up"|"down", amount? }` - scroll by `amount` px

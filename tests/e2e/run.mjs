@@ -15,9 +15,10 @@
 // It creates a dedicated tab, runs everything there, and closes it at the end.
 
 import http from "node:http";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, basename } from "node:path";
 function envStr(name, fallback) {
   const raw = process.env[name];
   return raw !== undefined && raw !== "" ? raw : fallback;
@@ -271,7 +272,8 @@ async function main() {
       const p1 = await cmd("snapshot", { scope: "all", compact: true, maxText: 0, limit: 5 });
       assert(p1.window && p1.window.shown === 5, `page 1 window = ${JSON.stringify(p1.window)}`);
       assert(p1.next === 5, `next = ${p1.next}`);
-      assert(/\[More: elements 1-5 of /.test(p1.compactView), "the compact view must name the continuation");
+      // The continuation is a field now, not a sentence in the census.
+      assert(p1.next === 5 && p1.window.inScope > 5, `continuation must be data: ${JSON.stringify(p1.window)} next=${p1.next}`);
       const p2 = await cmd("snapshot", { scope: "all", compact: true, maxText: 0, limit: 5, cursor: p1.next });
       assert(p2.window.offset === 5, `page 2 offset = ${p2.window.offset}`);
       assert(p2.elements[0].index === 5, `page 2 first index = ${p2.elements[0].index}`);
@@ -282,10 +284,11 @@ async function main() {
 
     await test("the census hands over a ref for each region (F93)", async () => {
       const s = await cmd("snapshot", { scope: "all", compact: true, maxText: 0 });
-      const structure = (s.compactView || "").split("\n").find((l) => l.startsWith("[Structure:"));
-      assert(structure, "no structure line");
-      const m = structure.match(/main \d+ \(@(ref_\d+)\)/) || structure.match(/\(@(ref_\d+)\)/);
-      assert(m, `no region ref in: ${structure}`);
+      // The page's shape is a field now; the region refs it carries are what make a region
+      // readable in one call.
+      assert(s.structure, "no structure field");
+      const m = s.structure.match(/main \d+ \(@(ref_\d+)\)/) || s.structure.match(/\(@(ref_\d+)\)/);
+      assert(m, `no region ref in: ${s.structure}`);
       const region = await cmd("get_property", { ref: m[1], property: "text" });
       assert(typeof region.value === "string" && region.value.length > 0, "a region ref must read its text");
     });
@@ -328,6 +331,65 @@ async function main() {
       await cmd("click", { ref });
       const v = await cmd("eval_js", { expression: "window.__clicked||0" });
       assert(v.value === 1, `click had no effect (clicked=${v.value})`);
+    });
+    // Only the browser process can mint a File, so upload is the one capability a page's own
+    // JavaScript cannot fake — and the input is hidden behind a styled label on nearly every
+    // real upload UI, which is the part that has to work.
+    const uploadFiles = [1, 2].map((n) => join(tmpdir(), `bctl-e2e-upload-${Date.now()}-${n}.txt`));
+    writeFileSync(uploadFiles[0], "e2e upload probe\n");
+    writeFileSync(uploadFiles[1], "second\n");
+    await test("upload walks from the styled label to the hidden input", async () => {
+      const r = await cmd("upload", { files: [uploadFiles[0]], text: "Choose file" });
+      assert(r.count === 1, `expected 1 file attached, got ${r.count}`);
+      assert(r.files[0] === basename(uploadFiles[0]), `wrong file attached: ${r.files[0]}`);
+      assert(/label/.test(r.input.matchedBy), `must resolve through the label, got: ${r.input.matchedBy}`);
+      assert(r.input.hidden === true, "the fixture's input is display:none, and that is normal");
+      // The page's own change handler is the real proof: the file is in the DOM, not just in
+      // a CDP call that returned.
+      const shown = await cmd("get_property", { selector: "#filename", property: "text" });
+      assert(shown.value.startsWith(basename(uploadFiles[0])), `page did not see the file: ${shown.value}`);
+    });
+    await test("upload into a 'multiple' input takes every file", async () => {
+      const r = await cmd("upload", { files: uploadFiles, selector: "#dropzone" });
+      assert(r.count === 2, `expected both files, got ${r.count}`);
+      assert(/inside the target/.test(r.input.matchedBy), `expected the input inside the container, got: ${r.input.matchedBy}`);
+      assert(!r.warning, `nothing was dropped, so there must be no warning: ${r.warning}`);
+      const shown = await cmd("get_property", { selector: "#multinames", property: "text" });
+      assert(shown.value.split(",").length === 2, `page did not see both files: ${shown.value}`);
+    });
+    await test("a single-file input says what it dropped instead of reporting a clean success", async () => {
+      const r = await cmd("upload", { files: uploadFiles, text: "Choose file" });
+      assert(r.count === 1, `a non-multiple input holds one file, got ${r.count}`);
+      assert(/multiple/.test(r.warning || ""), `expected a warning naming the cause, got: ${r.warning}`);
+    });
+    await test("upload names the input to pick when the page has more than one", async () => {
+      const err = await cmdFail("upload", { files: [uploadFiles[0]] });
+      assert(/did not name one/.test(err), `expected an ambiguity error, got: ${err}`);
+    });
+    await test("upload refuses a path Chrome could not open", async () => {
+      const err = await cmdFail("upload", { files: ["report.pdf"], text: "Choose file" });
+      assert(/absolute/.test(err), `expected an absolute-path error, got: ${err}`);
+    });
+    rmSync(uploadFiles[0], { force: true });
+    rmSync(uploadFiles[1], { force: true });
+
+    // A click takes its coordinates from the element's box, so clicking one that is still
+    // sliding dispatches at where it was a moment ago. Playwright refuses to click until the
+    // box stops; we click, and say the box was moving. Both regimes must report it: a visible
+    // tab by sampling the rect across frames, a hidden one (no frames are delivered there, but
+    // the animation timeline still advances) by reading the running animation.
+    await test("a click on a moving target reports effect.stabilized", async () => {
+      await cmd("eval_js", { expression: "window.__slide()" });
+      const moving = await cmd("click", { selector: "#slider" });
+      assert(moving.effect && moving.effect.stabilized, `no stabilized block while animating: ${JSON.stringify(moving.effect)}`);
+      assert(moving.effect.stabilized.settled === false, "a 2s animation must not be reported as settled within the cap");
+      assert(/still moving/.test(moving.warning || ""), `expected a moving-target warning, got: ${moving.warning}`);
+
+      await cmd("eval_js", { expression: "window.__unslide()" });
+      const still = await cmd("click", { selector: "#slider" });
+      assert(!still.effect.stabilized, `a static element must report nothing: ${JSON.stringify(still.effect)}`);
+      const n = await cmd("eval_js", { expression: "window.__slid||0" });
+      assert(n.value === 2, `both clicks must land (got ${n.value})`);
     });
     await test("click shadow button by ref + effect", async () => {
       const ref = refByText(snap, "Shadow Button"); assert(ref, "no shadow button ref");
@@ -409,6 +471,26 @@ async function main() {
       r = await cmd("storage_get", { key: "k2" }); assert(r.value === null, "get after clear");
     });
 
+    // eval_js answers from two different engines depending on whether a debugger happens to be
+    // attached: chrome.scripting in the page's MAIN world, or Runtime.evaluate. They used to
+    // disagree — an async expression was `{}` on one and the resolved value on the other, with
+    // no error either way. These run BEFORE cdp_attach (scripting path) and again after it.
+    const evalShapes = async (where) => {
+      const p = await cmd("eval_js", { expression: "(async () => { await new Promise(r => setTimeout(r, 10)); return 'resolved'; })()" });
+      assert(p.value === "resolved", `${where}: a promise must be awaited, got ${JSON.stringify(p.value)}`);
+      const node = await cmd("eval_js", { expression: "document.body" });
+      assert(node.type === "HTMLBodyElement", `${where}: an unserialisable object must name its class, got ${node.type}`);
+      assert(/no JSON form/.test(node.note || ""), `${where}: {} must say it is not nothing, got ${node.note}`);
+      const map = await cmd("eval_js", { expression: "new Map([['a', 1]])" });
+      assert(map.type === "Map", `${where}: a Map must say so, got ${map.type}`);
+      const arr = await cmd("eval_js", { expression: "[1,2,3]" });
+      assert(Array.isArray(arr.value) && arr.value.length === 3, `${where}: an array must survive`);
+      assert(!arr.note, `${where}: a value that serialises cleanly gets no note`);
+      const undef = await cmd("eval_js", { expression: "void 0" });
+      assert(undef.value === null && undef.type === "undefined", `${where}: undefined is null + type undefined`);
+    };
+    await test("eval_js: the shapes it answers with (no debugger attached)", () => evalShapes("scripting"));
+
     // --- CDP-backed ---
     await test("cdp_attach", async () => { const r = await cmd("cdp_attach", {}); assert(r.attached, "not attached"); });
     await test("get_console_logs", async () => { const r = await cmd("get_console_logs", {}); assert(r.logs.some((l) => (l.text || "").includes("bctl-test-page-ready")), "console msg missing"); });
@@ -421,6 +503,7 @@ async function main() {
       assert((body.body || "").includes("ok"), `no/short response body: ${JSON.stringify(body.body)}`);
     });
     await test("eval_js compute", async () => { const r = await cmd("eval_js", { expression: "6*7" }); assert(r.value === 42, "eval math wrong"); });
+    await test("eval_js: the attached path answers the same way", () => evalShapes("Runtime.evaluate"));
     // --- CDP synthetic input: guard always, real behaviour only when opted in ---
     // The guards are asserted against a dedicated tab that is deliberately left in the
     // BACKGROUND, addressed by explicit tabId. Asserting them against the main test tab

@@ -17,7 +17,7 @@
 
 import { spawn, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve as resolvePath } from "node:path";
 import fs from "node:fs";
 import {
   getDaemonState,
@@ -78,6 +78,7 @@ Interaction:
   browserctl click <target>             Click element (@e1, ref_1, 0, --text "...", custom elements, ARIA roles)
   browserctl dblclick <target>          Double-click element
   browserctl fill <target> <text>       Clear input and fill text (recovers with candidate input refs if targeted element is not editable)
+  browserctl upload <file> [target]     Attach a local file to a file input (walks from a styled label/button to the hidden input)
   browserctl paste <target> <text>      Paste text/markdown into field or rich-text editor
   browserctl type <target> <text>       Type into input field (appends/types text)
   browserctl clear <target>             Clear input/textarea field
@@ -636,6 +637,25 @@ async function main() {
         break;
       }
 
+      case "upload": {
+        // `browserctl upload ./report.pdf` — paths are resolved against the SHELL's cwd here,
+        // because that is what the person typing them means; Chrome gets absolutes.
+        let i = 0;
+        while (i < args.length) {
+          if (args[i] === "--selector" && args[i + 1]) {
+            params.selector = args[++i];
+          } else if (args[i] === "--text" && args[i + 1]) {
+            params.text = args[++i];
+          } else if (/^@|^\d+$/.test(args[i])) {
+            parseTarget(args[i], params);
+          } else {
+            (params.files || (params.files = [])).push(resolvePath(args[i]));
+          }
+          i++;
+        }
+        break;
+      }
+
       case "paste":
       case "type": {
         let i = 0;
@@ -925,16 +945,45 @@ async function main() {
           console.log(`[Active Modal: <${result.pageState.activeModalTag || "dialog"}>]`);
         }
         const total = result.totalElementsCount ?? result.elements?.length ?? 0;
-        const visible = result.elements?.length || 0;
+        // What is in SCOPE, not the size of the page of the census just printed — the two
+        // diverged when the census learned to page.
+        const visible = result.window?.inScope ?? (result.elements?.length || 0);
         const folded = result.foldedCount ? `, ${result.foldedCount} folded` : "";
         if (result.scope === "viewport" && result.offscreenCount > 0) {
           console.log(`Elements: ${visible} visible in viewport (${total} total on page${folded})`);
-          // The compact view's own footer notice names the KINDS of element offscreen,
-          // which this line cannot. Printing both wasted tokens and gave two numbers.
         } else {
           console.log(`Interactive elements (${visible}${folded}):`);
         }
-        console.log(`\n${result.compactView}`);
+        if (result.structure) console.log(`Structure: ${result.structure}`);
+        console.log(`\n${result.census || result.compactView}`);
+
+        // The census carries rows; everything it withheld is reported as data, and a human
+        // reading the CLI needs it in words. These lines used to live inside the census
+        // itself, which is why they disappeared from here when it became a data field.
+        const notes = [];
+        if (result.window && result.next !== undefined) {
+          notes.push(`elements ${result.window.offset + 1}-${result.window.offset + result.window.shown} of ${result.window.inScope} listed — continue with --cursor ${result.next}`);
+        }
+        if (result.offscreenCount) notes.push(`${result.offscreenCount} offscreen — 'snapshot --all' lists them, or scroll`);
+        if (result.duplicateCount) notes.push(`${result.duplicateCount} duplicate link(s) suppressed (same destination and label)`);
+        // One line, and the reason said once. Per-item repetition of the same sentence is
+        // how a helpful note becomes wallpaper.
+        const hidden = result.hiddenContent || [];
+        if (hidden.length) {
+          const label = (h) => `"${String(h.text || "").replace(/\s+/g, " ").slice(0, 40)}" (@${h.ref})`;
+          const bits = [];
+          const more = hidden.filter((h) => h.kind === "load-more");
+          const tabs = hidden.filter((h) => h.kind === "tab");
+          const regions = hidden.filter((h) => h.kind === "scrollable-region");
+          if (more.length) bits.push(`loads more on click: ${more.map(label).join(", ")}`);
+          if (tabs.length) bits.push(`filter tabs: ${tabs.map(label).join(", ")}`);
+          for (const r of regions) bits.push(`a scrollable region with ~${r.hiddenPx}px below the fold (@${r.ref})`);
+          notes.push(`${bits.join("; ")} — rows behind these are not in the DOM, so no scope setting reveals them`);
+        }
+        for (const d of result.pageState?.openDialogs || []) {
+          notes.push(`dialog open: "${d.label}" (@${d.ref}) — read it with 'get text @${d.ref}', close it with 'dismiss'`);
+        }
+        if (notes.length) console.log("\n" + notes.map((n) => `  · ${n}`).join("\n"));
         return;
       }
     }

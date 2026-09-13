@@ -1,5 +1,122 @@
 # Changelog
 
+## 0.7.1 — a result is data, not a rendered page
+
+Breaking in one way that matters to anyone parsing output, despite the patch number: **a tool
+answers in compact JSON by default**, where it used to answer in the human-readable "smart" rendering, and the census no
+longer carries `[Notice: …]` / `[Next: …]` lines — what they said is in fields now. Pass
+`format: "smart"` for the old view. The CLI is unchanged: it asks for `smart` itself.
+
+- **Compact JSON is what a tool returns.** `format` defaults to `json` with no pretty-printing;
+  `pretty`, `smart` (the human-readable rendering) and `raw` are still there when you ask for
+  them. The CLI asks for `smart`, so a terminal session looks the same as before.
+
+- **Nothing is injected into a result any more.** The `[Notice: …]` / `[More: …]` lines, the
+  `[Next: …]` hints and the trailing suggestions block are gone. An agent could not tell which
+  of those lines were browserctl talking and which were the page — and neither could a page,
+  which is what made forging one worth trying. Guidance now lives where it costs once per
+  session instead of once per call: the server instructions and the tool descriptions.
+
+- **`browser_upload` — attach a local file to a file input.** The one thing on this surface a
+  page's own JavaScript genuinely cannot do: a `File` can only come from the browser process, so
+  `eval_js` was never a fallback for it. It runs through `DOM.setFileInputFiles`, which fires
+  `change`/`input` the way a human's picker does, and costs a debugger attach (Chrome's banner
+  on that tab).
+
+  Three things it handles because the naive version fails on them: the input is `display:none`
+  behind a styled label on nearly every real upload UI, so naming the *visible* control walks to
+  the input behind it and the response says which step answered; Chrome opens the paths itself,
+  so a relative or missing path is refused at the bridge, where there is a filesystem to check
+  against (measured first: a bad path attached nothing and still reported success); and an input
+  without `multiple` silently keeps the first file, so the response says how many were dropped
+  and why. Also fixed on the way: `chrome.debugger.attach` failing with "another debugger is
+  already attached" now detaches our own leftover session and retries once, and says what to do
+  when the holder is somebody else (DevTools open on that tab).
+
+- **A click no longer reads its coordinates off a moving box.** Playwright refuses to click
+  until the target has stopped moving; we dispatched at wherever it was, so a control sliding in
+  with a modal was clicked at last frame's position. `click` now waits for the box to stop
+  (capped at 300ms) and reports `effect.stabilized` when it had to wait, with a warning when it
+  never settled. The detection differs by regime, which is the part worth knowing: a tab that is
+  not visible receives **no animation frames**, yet its animation timeline keeps advancing
+  (measured on a background tab: a slide read 298 -> 310 -> 323 px across three calls) — so a
+  visible tab is checked by sampling the box across frames and a hidden one by reading the
+  running animations. A fade or a colour change is not a moving target. The first cut of this
+  used a 1px tolerance, which read a 400px-over-10s slide (0.66px per frame) as stationary.
+
+- **What the notices carried became fields.** `browser_snapshot` answers with
+  `offscreenCount`, `foldedCount`, `duplicateCount`, `structure`, `hiddenContent` and
+  `openDialogs[].ref` — the same facts, addressable, and no longer competing with page text for
+  the reader's attention. The rendered census stays available as `census` for a human reading
+  the CLI.
+
+- **`browser_open_url({read})` returns a structured object, and its census is paged.** A probe
+  asked it to open Hacker News with `read: "snapshot"` and got **63,000 characters**, past its
+  harness's inline budget, so the result was spilled to a file and the agent gave up on reading
+  the page and wrote `querySelectorAll` instead. The composite was bypassing the paging of the
+  census it composes. Same page now: **1,167 characters**, paged. [F98]
+
+- **`browser_snapshot` says what it does NOT carry.** The same probe concluded "no browserctl
+  tool maps DOM properties to pixel geometry" and hand-rolled `getBoundingClientRect` four
+  times. The census description now names the call that does:
+  `browser_get_property({selector, all: true, fields: {box: {property: "box"}, cls: {attr: "class"}}})`.
+
+- **An `all: true` read renders one line per row.** It was falling through to a raw JSON
+  dump — twelve lines a row, with `property`/`name`/`present` repeated on every one — so a
+  fifty-row survey cost six hundred lines to say fifty things. That is the token cost that
+  sends an agent back to `eval_js`. A box now renders as coordinates, a null field as `-`, an
+  absent attribute as `(not present)`, and a URL as its resolved absolute form. [F97]
+
+- **A field whose property answers outside `value` is no longer a silent null.**
+  `property: "box"` answers in x/y/width/height, and the fields reader read only `.value`, so
+  every box came back `null` — a wrong answer wearing a right answer's shape, on exactly the
+  call ("every button, its label, where it is") that the feature exists for. [F96]
+
+- **`note` is an array when there is more than one thing to say.** Two unrelated facts ("this
+  field matched nothing in the row" and "there are more rows than listed") were glued into one
+  string with a space.
+
+- **Each tool group now says it is a ladder.** The note prefixed onto every tool in a group
+  lists its siblings and says so outright: if one does not answer, the answer is almost
+  always another one in the list — work along it before reaching for `eval_js`. The member
+  lists are generated from the group definition; hand-written, the READ note named two tools
+  that had been merged away two releases earlier, and was therefore wrong on all seven READ
+  tools at once.
+
+- **The loop is stated where it is read.** `orient -> read -> act -> verify`, once in the
+  server instructions and again as the prefix on every tool description, so the shape is
+  present at the moment of choosing a call rather than only at connect.
+
+- **Two intents that had no line in the index now have one:** surveying a page (every
+  control's name, box and classes in one call) and `browser_describe_element` for "why is
+  THIS element not working", which lives in the `advanced` profile and was invisible.
+
+- The intent-index checks sliced to a fixed character count, so the index growing pushed
+  `browser_load_tools` out of the window and the check quietly stopped covering its tail.
+  Both slice to the index's real end now.
+
+- **The docs describe what exists, not how it got here.** Tool descriptions are a functional
+  sentence plus a pointer to the neighbour that answers the next question — half the characters
+  they were, with no mention of surfaces that were removed. The hand-written tool catalogue in
+  `docs/REFERENCE.md` became a pointer to `docs/TOOLS.md`, which is generated from the running
+  registry and gated; what stays in REFERENCE is the part a generated table cannot carry, plus
+  the parameters that behave the same way on several tools.
+
+- **The release gate runs every live suite, not one of four.** `run_multiframe.mjs`,
+  `run_labels.mjs` and `run_editors.mjs` were left to be run by hand, and three assertions in
+  the multi-frame suite went on asserting the census prose that this release removed — failing,
+  unnoticed, for two releases. A suite the release does not run is a suite that rots.
+
+- **`eval_js` answered differently depending on whether a debugger happened to be attached.**
+  An async expression returned `{}` through the `chrome.scripting` path (no await) and the
+  resolved value through `Runtime.evaluate` (which sets `awaitPromise`) — one expression, two
+  answers, no error either way. Both paths now await, and both report the same shape: a value
+  that has no JSON form (a DOM node, a `Map`, a `Set`) comes back with its class name and a
+  line saying `{}` is not the same as nothing.
+
+Unit 143/143; the four live suites (main 93/93, multi-frame 19/19, editors 12/12, label
+parity) are all green and all four are now run by the release gate; thirteen gates green.
+
 ## 0.7.0 — one name per capability, a census that answers, gates that derive
 
 Breaking. `core` is **23 tools**, down from 35. Every capability the removed names carried

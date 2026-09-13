@@ -25,6 +25,45 @@
     <option value="c">Cherry</option>
   </select>
 
+  <!-- A control that is still moving when it is clicked. The click reads the coordinates it
+       dispatches with off this box, so a sliding target has to be reported. The animation is
+       opt-in (window.__slide()) because a running animation would stop wait_settle settling
+       for every other check in the suite. -->
+  <style>
+    #slider { position: relative; }
+    #slider.sliding { animation: e2eslide 2s linear; }
+    @keyframes e2eslide { from { left: 0; } to { left: 300px; } }
+  </style>
+  <button id="slider">Sliding Button</button>
+  <script>
+    window.__slid = 0;
+    document.addEventListener("DOMContentLoaded", () => {
+      document.getElementById("slider").addEventListener("click", () => { window.__slid++; });
+    });
+    window.__slide = () => document.getElementById("slider").classList.add("sliding");
+    window.__unslide = () => document.getElementById("slider").classList.remove("sliding");
+  </script>
+
+  <!-- The shape every real upload UI has: the input is hidden, the visible control is a
+       styled label. Naming the label has to reach the input behind it. -->
+  <input type="file" id="fileinput" name="doc" style="display:none" />
+  <label for="fileinput" id="filelabel">Choose file</label>
+  <span id="filename">none</span>
+  <!-- A second one, inside a container and accepting several files: covers the drop-zone
+       shape, `multiple`, and the case where "the page's only file input" no longer applies. -->
+  <div id="dropzone"><input type="file" id="multiinput" name="docs" multiple /></div>
+  <span id="multinames">none</span>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      const show = (input, out) => input.addEventListener("change", () => {
+        document.getElementById(out).textContent =
+          [...input.files].map((f) => f.name + ":" + f.size).join(",") || "none";
+      });
+      show(document.getElementById("fileinput"), "filename");
+      show(document.getElementById("multiinput"), "multinames");
+    });
+  </script>
+
   <button id="hovertarget">hover me</button>
   <span id="hovered">no</span>
 

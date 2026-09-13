@@ -64,10 +64,12 @@ trivial pages — `[Structure: main 1]` above a single link is noise.
 
 ### Offscreen, by kind
 
+```json
+"offscreenCount": 12,
+"window": { "offset": 0, "shown": 108, "inScope": 108 }
 ```
-[Notice: 108/120 elements visible in viewport. 12 offscreen, including 2× "Online status indicator
- Active …", 1 "See previous notifications". Call 'snapshot --all' to see them, or scroll down]
-```
+
+The CLI renders that as a line naming the *kinds* withheld; an MCP client reads the fields.
 
 Counting elements is a token-budget note an agent cannot act on. A probe read `46 elements offscreen`
 as "46 more notifications" and hedged an answer that was already complete; on the same page it

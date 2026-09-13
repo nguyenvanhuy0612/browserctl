@@ -129,8 +129,11 @@ async function main() {
       assert(/folded 3 repetitive <button> "Remove"/.test(snap.compactView), `no folded-run line found:\n${snap.compactView}`);
     });
 
-    await test("compact view keeps duplicate-link suppression notice", async () => {
-      assert(/\[Notice: 1 duplicate link suppressed/.test(snap.compactView), "missing duplicate-suppression notice");
+    await test("the merge keeps duplicate-link suppression, and counts it", async () => {
+      // The notice line became a field when results stopped carrying prose (0.7.1). The
+      // behaviour under test is the same: one row printed, and the page says how many it
+      // collapsed — the count is what tells a reader the census is not the whole DOM.
+      assert(snap.duplicateCount >= 1, `expected a duplicate to be counted, got ${snap.duplicateCount}`);
       // Only ONE "View Details" *anchor row* should be printed, not two. (Matched on the
       // `<a> "View Details"` listing form specifically — not on the substring anywhere in
       // the page, which would also catch the unrelated "(row: ...)" context annotations
@@ -139,8 +142,10 @@ async function main() {
       assert(count === 1, `expected exactly 1 "View Details" anchor row, found ${count}`);
     });
 
-    await test("compact view keeps the full-page fold notice (scope=all)", async () => {
-      assert(/\[Notice: full-page scope, but 3 repetitive elements are folded above/.test(snap.compactView), "missing full-page fold notice");
+    await test("scope=all still folds repetitive runs, and says how many", async () => {
+      // scope:"all" is what an agent escalates to for completeness, so it folding silently
+      // was the worst case of a census not admitting what it withheld.
+      assert(snap.foldedCount >= 3, `expected folding to be reported at full scope, got ${snap.foldedCount}`);
     });
 
     await test("compact view keeps the truncation hint for a 200+ char label", async () => {
@@ -163,9 +168,12 @@ async function main() {
       assert(/f\d+:ref_\d+/.test(snap.compactView), "no frame-qualified ref (f<id>:ref_N) found in compact view");
     });
 
-    await test("exactly ONE guidance footer for the whole page", async () => {
-      const count = (snap.compactView.match(/\[(Quick Actions|Next):/g) || []).length;
-      assert(count === 1, `expected exactly one guidance footer, found ${count}\n${snap.compactView}`);
+    await test("the merged census carries no server prose at all", async () => {
+      // There used to be a guidance footer, and the merge could emit one per frame. Results
+      // are data now: the census is page content and nothing else, so the invariant is
+      // stronger and simpler — no footer, from any frame.
+      const strays = snap.compactView.match(/\[(Quick Actions|Next|More):/g) || [];
+      assert(strays.length === 0, `the census must carry no advice, found: ${strays.join(", ")}`);
     });
 
     // --- menuitemradio: present in both readers, with ARIA state, clickable by ref ---

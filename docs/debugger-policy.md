@@ -1,6 +1,6 @@
 # chrome.debugger dependency map, and how to forbid it per site
 
-Captured 2026-08-04 against v0.5, by reading the source (not from memory). Re-derive with
+Captured 2026-08-04 against v0.5, re-derived 2026-09-13. Read from the source, not from memory. Re-derive with
 the script at the end if the command surface changes.
 
 ## Why this document exists
@@ -97,14 +97,13 @@ debugger acquisition** — including the auto-reattach path, which is easy to mi
 
 | Command | How it gets its capability |
 |---|---|
-| `eval_js` | CDP only if already attached; else chrome.scripting MAIN world (page CSP applies) |
+| `eval_js` | chrome.scripting MAIN world first; **auto-attaches** only when the page's CSP or Trusted Types refuses that eval |
 | `screenshot` | active tab -> captureVisibleTab (no banner); BACKGROUND tab -> auto-attaches |
 
 ### Tier C — Requires an existing session — fails cleanly if attach is denied
 
 | Command | How it gets its capability |
 |---|---|
-| `a11y_snapshot` | needs an existing session; errors cleanly if attach is blocked |
 | `audit` | needs an existing session; errors cleanly if attach is blocked |
 | `capture_screenshot` | needs an existing session; errors cleanly if attach is blocked |
 | `cdp_send` | needs an existing session; errors cleanly if attach is blocked |
@@ -127,6 +126,9 @@ debugger acquisition** — including the auto-reattach path, which is easy to mi
 |---|---|
 | `cdp_attach` | auto-attaches — WILL raise the banner unprompted |
 | `spoof_visibility` | auto-attaches — WILL raise the banner unprompted |
+| `a11y_snapshot` | auto-attaches — WILL raise the banner unprompted |
+| `eval_js` | auto-attaches when, and only when, page CSP / Trusted Types blocked the MAIN-world eval |
+| `screenshot` | auto-attaches on a BACKGROUND tab only (an active tab uses captureVisibleTab) |
 ## What a per-site denial actually costs
 
 Blocking the debugger on a site leaves **45 of 65 commands (tier A) fully working**: every
@@ -141,13 +143,15 @@ Tier B degrades rather than fails:
 - `screenshot` still works via `chrome.tabs.captureVisibleTab` **when the tab is active**
   (that path has never used the debugger). Only a *background*-tab screenshot needs it.
 
-Tier C (16 commands) stops working, but **fails cleanly** — those all call
+Tier C (15 commands) stops working, but **fails cleanly** — those all call
 `requireSession` / `requireDomains` and already produce "not attached: call cdp_attach
 first". With a policy in place the message should say the site is forbidden, not that the
 caller forgot to attach.
 
-Tier D is the honest cost: `cdp_attach` (explicit intent, so refusing it is
-straightforward) and `spoof_visibility`. Plus the background-tab branch of `screenshot`.
+Tier D is the honest cost: `cdp_attach` (explicit intent, so refusing it is straightforward),
+`spoof_visibility`, `a11y_snapshot`, the background-tab branch of `screenshot`, and `eval_js` on a
+page whose CSP blocked the scripting path. The last three are the ones that raise the banner
+without the caller asking for CDP — and a session, once acquired, is never released on its own.
 
 Net: on a forbidden site you lose console/network/HAR capture, pixel input, PDF print,
 element screenshots, background-tab screenshots, cookie read/write, and CSP-bypass eval.

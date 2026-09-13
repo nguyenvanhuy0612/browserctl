@@ -293,6 +293,7 @@ function loadHiddenContentHints() {
     extractConst(SRC, "TEXT_IS_CONTENT"),
     extractFunction(SRC, "controlLabelOf"),
     extractFunction(SRC, "fullElementText"),
+    extractFunction(SRC, "fromPage"),
     extractFunction(SRC, "elementTextInfo"),
     extractFunction(SRC, "getOrAssignRef"),
     extractFunction(SRC, "hiddenContentHints"),
@@ -368,6 +369,7 @@ function loadDescribeElements() {
     extractFunction(SRC, "slotLabelOf"),
     extractConst(SRC, "TEXT_IS_CONTENT"),
     extractFunction(SRC, "controlLabelOf"),
+    extractFunction(SRC, "fromPage"),
     extractFunction(SRC, "fullElementText"),
     extractFunction(SRC, "elementTextInfo"),
     extractFunction(SRC, "describeElements"),
@@ -525,6 +527,7 @@ function mkEl(sel, ref, { text = "", attrs = {} } = {}) {
 function loadGetProperty(elements) {
   const slices = [
     extractConst(SRC, "MATCH_COUNTED"),
+    extractFunction(SRC, "fromPage"),
     extractFunction(SRC, "get_property"),
     extractFunction(SRC, "readOneProperty"),
   ];
@@ -660,7 +663,7 @@ test("select_option: the explicit value/label params still work", () => {
 //
 // all:true reads ONE property across many elements, which still left the common shape —
 // a list of rows each with a title, a link and a number — at one call per field. A Haiku
-// probe on 0.8.0 used eval_js exactly once, for exactly this, and said so: "1 call instead
+// probe on the previous build used eval_js exactly once, for exactly this, and said so: "1 call instead
 // of 30+". Fields close that gap.
 
 function mkRow(sel, ref, children) {
@@ -681,6 +684,7 @@ function mkRow(sel, ref, children) {
 function loadGetPropertyFields(rows) {
   const slices = [
     extractConst(SRC, "MATCH_COUNTED"),
+    extractFunction(SRC, "fromPage"),
     extractFunction(SRC, "get_property"),
     extractFunction(SRC, "readOneProperty"),
   ];
@@ -745,11 +749,205 @@ test("get_property: the field note and the paging note do not overwrite each oth
   const rows = Array.from({ length: 5 }, (_, i) => mkRow("li.result", `ref_${i}`, { h3: leaf(`row ${i}`) }));
   const get_property = loadGetPropertyFields(rows);
   const res = get_property({ selector: "li.result", all: true, max: 2, fields: { title: "h3", points: ".score" } });
-  assert.match(res.note, /no match inside the row for/);
-  assert.match(res.note, /5 elements matched; the first 2 are listed/);
+  // Two unrelated facts arrive as two entries, not as one joined sentence.
+  const notes = [].concat(res.note);
+  assert.equal(notes.length, 2);
+  assert.match(notes[0], /no match inside the row for/);
+  assert.match(notes[1], /5 elements matched; the first 2 are listed/);
 });
 
 test("get_property: fields without all:true explains itself instead of being ignored", () => {
   const get_property = loadGetPropertyFields([]);
   assert.throws(() => get_property({ selector: "li", fields: { title: "h3" } }), /needs all:true/);
+});
+
+test("get_property: a field whose property answers outside 'value' is not a silent null (F96)", () => {
+  // property:'box' answers in x/y/width/height, not in `value`. The fields reader took only
+  // `.value`, so every box field came back null — on a survey call ("every button, its label
+  // and where it is") that is a silent wrong answer, which is the failure this whole
+  // mechanism exists to prevent.
+  const el = {
+    __sel: "button",
+    __ref: "ref_1",
+    tagName: "BUTTON",
+    innerText: "Submit",
+    textContent: "Submit",
+    hasAttribute: (n) => n === "class",
+    getAttribute: (n) => (n === "class" ? "btn primary" : null),
+    getBoundingClientRect: () => ({ x: 10, y: 20, width: 80, height: 30 }),
+    querySelector: () => null,
+  };
+  const get_property = loadGetPropertyFields([el]);
+  const res = get_property({
+    selector: "button",
+    all: true,
+    fields: { label: { property: "text" }, box: { property: "box" }, cls: { attr: "class" } },
+  });
+  assert.equal(res.matches[0].label, "Submit");
+  assert.equal(res.matches[0].cls, "btn primary");
+  assert.deepEqual({ ...res.matches[0].box }, { x: 10, y: 20, width: 80, height: 30 });
+});
+
+// =====================================================================================
+// fromPage — the marker a page must not be able to forge
+// =====================================================================================
+
+test("fromPage is a pass-through now: the boundary is structural, not a marker", () => {
+  // A JSON result needs no marker — a KEY is browserctl's, a VALUE is the page's. The hook
+  // is kept so the page-text path has one place to change if that ever stops being true.
+  const { fromPage } = loadFromContentJs([extractFunction(SRC, "fromPage")], ["fromPage"]);
+  assert.equal(fromPage("ordinary text"), "ordinary text");
+  assert.equal(fromPage(undefined), undefined);
+});
+
+
+// =====================================================================================
+// waitForStableRect — a click must not read its coordinates off a moving box
+// =====================================================================================
+
+// extractFunction() slices from `function <name>`, which drops a leading `async`; put it back.
+const STABILITY_SRC = [
+  extractConst(SRC, "GEOMETRY_PROPS"),
+  extractFunction(SRC, "composedContains"),
+  extractFunction(SRC, "runningMotion"),
+  "async " + extractFunction(SRC, "waitForStableRect"),
+];
+
+// A box that reports `boxes[i]` on the i-th read and then holds the last value.
+function movingEl(boxes) {
+  let i = 0;
+  return {
+    getBoundingClientRect() {
+      const b = boxes[Math.min(i++, boxes.length - 1)];
+      return { x: b[0], y: b[1], width: b[2], height: b[3] };
+    },
+  };
+}
+
+// One entry in document.getAnimations(): `props` are the keyframe properties, `left` the
+// milliseconds of active duration still to run (Infinity for an endless one).
+function animation(target, { props = ["left"], left = 1000, playState = "running" } = {}) {
+  return {
+    playState,
+    effect: {
+      target,
+      getKeyframes: () => [Object.fromEntries(props.map((p) => [p, 0]))],
+      getComputedTiming: () => ({ activeDuration: left === Infinity ? Infinity : left + 1 }),
+    },
+    currentTime: 1,
+  };
+}
+
+function stabilityCtx({ visibilityState = "visible", animations = [] } = {}) {
+  let frames = 0;
+  return {
+    document: {
+      visibilityState,
+      getAnimations: () => animations,
+    },
+    requestAnimationFrame: (cb) => { frames++; setTimeout(cb, 16); },
+    setTimeout,
+    Date,
+    Infinity,
+    Number,
+    Math,
+    Object,
+    get frames() { return frames; },
+  };
+}
+
+function loadStability(ctx) {
+  return loadFromContentJs(STABILITY_SRC, ["waitForStableRect", "runningMotion"], ctx);
+}
+
+test("a visible box that is not moving costs one frame and reports nothing", async () => {
+  const ctx = stabilityCtx();
+  const { waitForStableRect } = loadStability(ctx);
+  const res = await waitForStableRect(movingEl([[10, 20, 100, 30]]));
+  assert.deepEqual({ ...res }, { moved: false }, "a static element must not add a field to the result");
+});
+
+test("a visible box that settles after a few frames says it moved, and that it settled", async () => {
+  const { waitForStableRect } = loadStability(stabilityCtx());
+  const res = await waitForStableRect(movingEl([
+    [10, 0, 100, 30], [10, 40, 100, 30], [10, 60, 100, 30], [10, 60, 100, 30],
+  ]));
+  assert.equal(res.moved, true);
+  assert.equal(res.settled, true);
+});
+
+test("sub-pixel drift still counts as movement", async () => {
+  // 400px over 10s is 0.66px per frame. A 1px tolerance read that as "not moving", and the
+  // slow animations are the ones a click is most likely to land in the middle of.
+  const { waitForStableRect } = loadStability(stabilityCtx());
+  const res = await waitForStableRect(movingEl([
+    [0, 0, 10, 10], [0.66, 0, 10, 10], [1.32, 0, 10, 10], [1.98, 0, 10, 10],
+  ]), { maxMs: 100 });
+  assert.equal(res.moved, true);
+});
+
+test("a visible box that never stops is clicked anyway, and says it never settled", async () => {
+  const { waitForStableRect } = loadStability(stabilityCtx());
+  let y = 0;
+  const el = { getBoundingClientRect: () => ({ x: 0, y: (y += 10), width: 50, height: 50 }) };
+  const res = await waitForStableRect(el, { maxMs: 100 });
+  assert.equal(res.moved, true);
+  assert.equal(res.settled, false, "it must give up and let the click through, not hang");
+  assert.ok(res.waitedMs >= 100);
+});
+
+// A hidden tab gets no animation frames, but its animation timeline keeps advancing —
+// measured on a background tab, a slide read 298 -> 310 -> 323 px across three calls. So the
+// hidden path reads the animation instead of watching for movement.
+test("a hidden tab with nothing animating reports nothing, and never waits for a frame", async () => {
+  const ctx = stabilityCtx({ visibilityState: "hidden" });
+  const { waitForStableRect } = loadStability(ctx);
+  const res = await waitForStableRect(movingEl([[0, 0, 10, 10]]));
+  assert.deepEqual({ ...res }, { moved: false });
+  assert.equal(ctx.frames, 0, "driving a background tab must not wait on a frame that never comes");
+});
+
+test("a hidden tab with a long animation reports the moving target without waiting for it", async () => {
+  const el = movingEl([[0, 0, 10, 10]]);
+  const ctx = stabilityCtx({ visibilityState: "hidden", animations: [animation(el, { left: Infinity })] });
+  const { waitForStableRect } = loadStability(ctx);
+  const res = await waitForStableRect(el, { maxMs: 300 });
+  assert.equal(res.moved, true);
+  assert.equal(res.settled, false);
+  assert.equal(res.waitedMs, 0, "an endless animation must not be waited on");
+  assert.equal(ctx.frames, 0);
+});
+
+test("a hidden tab with a short animation waits it out and then reports it settled", async () => {
+  const el = movingEl([[0, 0, 10, 10]]);
+  const anim = animation(el, { left: 40 });
+  const animations = [anim];
+  const ctx = stabilityCtx({ visibilityState: "hidden", animations });
+  const { waitForStableRect } = loadStability(ctx);
+  const p = waitForStableRect(el, { maxMs: 300 });
+  anim.playState = "finished";   // it ends while we are waiting
+  const res = await p;
+  assert.equal(res.moved, true);
+  assert.equal(res.settled, true);
+  assert.ok(res.waitedMs > 0);
+});
+
+test("an animation that does not move the box is not a moving target", async () => {
+  const el = movingEl([[0, 0, 10, 10]]);
+  const ctx = stabilityCtx({
+    visibilityState: "hidden",
+    animations: [animation(el, { props: ["opacity"] }), animation(el, { props: ["backgroundColor"] })],
+  });
+  const { waitForStableRect, runningMotion } = loadStability(ctx);
+  assert.equal(runningMotion(el), null, "a fade must not make every click in the subtree warn");
+  assert.deepEqual({ ...(await waitForStableRect(el)) }, { moved: false });
+});
+
+test("an animation on an ancestor counts — a sliding modal carries its buttons with it", async () => {
+  const button = movingEl([[0, 0, 10, 10]]);
+  const modal = { contains: (n) => n === button };
+  button.parentNode = modal;
+  const ctx = stabilityCtx({ visibilityState: "hidden", animations: [animation(modal, { left: Infinity })] });
+  const { runningMotion } = loadStability(ctx);
+  assert.ok(runningMotion(button), "an animation on the container must count for the control inside it");
 });

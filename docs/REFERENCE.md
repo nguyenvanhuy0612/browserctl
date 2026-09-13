@@ -1,6 +1,6 @@
 # browserctl — complete reference
 
-Version 0.6.3. The extension, bridge, and MCP server are versioned together.
+Version 0.7.1. The extension, bridge, and MCP server are versioned together.
 
 This is the **operator's guide**: how to install it, what each tool is for, recipes, and the failure
 modes worth recognising. Three neighbours, so you land in the right one:
@@ -20,7 +20,7 @@ modes worth recognising. Three neighbours, so you land in the right one:
 
 ## What it is
 
-**browserctl** (v0.6.3, 80 tools) gives an AI agent DOM-level control of a *real*, already-logged-in Chrome
+**browserctl** (v0.7.1) gives an AI agent DOM-level control of a *real*, already-logged-in Chrome
 or Edge, through a neutral HTTP/WebSocket API and an MCP server. It drives one pinned tab
 **in the background**, without stealing focus and without a debugger banner on the common
 path, so you can keep working in your own tab while the agent works in its own.
@@ -89,71 +89,17 @@ Four dispatch layers, and every action belongs to exactly one:
 | `CDP_ACTIONS` | `chrome.debugger` | yes | yes, **except synthetic input** |
 | everything else | `chrome.tabs` / `chrome.windows` in the worker | no | yes |
 
-## Install & Setup
+## Install
 
-### 1. Load the Chrome Extension
+Installation, MCP client configuration (npx, global, local path) and the bridge-daemon commands
+are in the [README](../README.md#quickstart--installation); they are not repeated here.
 
-1. `chrome://extensions` (or `edge://extensions`) → enable **Developer mode**
-2. **Load unpacked** → select the `extension/` folder
-3. Click the extension icon → **Connect**
-
-Step 3 is required on a fresh load: a newly installed extension stays idle by design and
-makes no connection attempt. After the first successful Connect it remembers and
-auto-reconnects with capped exponential backoff (max 30s), and never permanently gives up
-on a transient outage — only an explicit **Disconnect** stops it.
-
-### 2. Using with MCP Clients (Claude Code, Antigravity, Cursor, Windsurf)
-
-**Zero-Manual-Server**: The bridge daemon is started automatically in the background when the MCP server launches. No separate `npm start` terminal required!
-
-#### Option A: Run via `npx` (from NPM Registry)
-
-Add to your `claude_desktop_config.json`, `.mcp.json`, or Antigravity MCP settings:
-
-```jsonc
-{
-  "mcpServers": {
-    "browserctl": {
-      "command": "npx",
-      "args": ["-y", "browserctl-mcp"],
-      "env": {
-        "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765",
-        "BROWSERCTL_MCP_PROFILE": "core" // 'core' (35 tools) or 'all' (all 80)
-      }
-    }
-  }
-}
-```
-
-Or with Claude CLI:
-```bash
-claude mcp add browserctl -- npx -y browserctl-mcp
-```
-
-#### Option B: Global Install via NPM
-
-```bash
-npm install -g browserctl-mcp
-```
-
-#### Option C: Local Path
-
-```jsonc
-{
-  "mcpServers": {
-    "browserctl": {
-      "command": "node",
-      "args": ["/absolute/path/to/browserctl/mcp/index.js"],
-      "env": {
-        "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765",
-        "BROWSERCTL_MCP_PROFILE": "core"
-      }
-    }
-  }
-}
-```
-
-Tools appear as `mcp__browserctl__browser_*`. In `core` mode, `browser_action` is always available to dynamically invoke any protocol action (CDP, cookies, storage, HAR export, recordings, etc.).
+One behaviour of the extension is worth knowing because it looks like a failure: **Connect in the
+popup is required once on a fresh load.** A newly installed extension stays idle by design and
+makes no connection attempt, so `browserctl status` reports the bridge up and the extension
+absent. After the first successful Connect it remembers, and auto-reconnects with capped
+exponential backoff (max 30s) — it never permanently gives up on a transient outage. Only an
+explicit **Disconnect** stops reconnection.
 
 ## The control model
 
@@ -246,13 +192,13 @@ The census tells you what the rows are: `[Structure: 18 repeated <li> rows (~1 c
 Reads pierce **open shadow DOM** and cover **iframes including cross-origin** (all_frames
 injection, frame-qualified refs). Pass a frame-qualified ref back verbatim.
 
-A **stale ref is not a dead end** (0.6.0). Refs remember the label they were assigned to, so if the page
+A **stale ref is not a dead end**. Refs remember the label they were assigned to, so if the page
 re-rendered and the same label is still present, the error names its replacement:
 `ref "@ref_2" is stale — the control labelled "Hacker News" is now @ref_199; retry with that ref.`
 No re-snapshot needed. This matters on SPAs, where a menu can re-render between the snapshot and the
 click that follows it.
 
-**Names come from the browser's own resolution** (0.6.0): `aria-label`, `aria-labelledby`, a descendant
+**Names come from the browser's own resolution**: `aria-label`, `aria-labelledby`, a descendant
 image's `alt`, `title`/`placeholder`, a form control's `<label for>` / wrapping `<label>` / row text,
 then slotted shadow content. A control's `value` is never its name — that had every
 `<input type="radio" value="on">` in a group called "on". Verified at 100% of Chrome's own named
@@ -264,162 +210,109 @@ Some controls are listed even though they are not plainly visible, each marked s
 `[hidden until hover/focus]` is a carousel arrow or skip link. Both are genuinely operable and both are
 in Chrome's accessibility tree.
 
+## The loop
+
+Every task is the same four steps, and each one has its own group of tools. Every tool
+description opens by naming the step it belongs to, so the shape is visible at the moment of
+choosing a call — not only in the instructions read once at connect.
+
+| Step | Group | Tools |
+|---|---|---|
+| 1. **Orient** | `ORIENT` | `browser_open_url`, `browser_list_tabs`, `browser_switch_tab`, `browser_close_tab`, `browser_reload` |
+| 2. **Read** | `READ` | `browser_snapshot`, `browser_get_property`, `browser_find`, `browser_read_page`, `browser_get_page_content`, `browser_screenshot` |
+| 3. **Act** | `ACT` | `browser_click`, `browser_fill`, `browser_press_key`, `browser_scroll`, `browser_hover` |
+| 4. **Verify** | — | the `effect` block every ACT returns, then step 2 again |
+
+Two rules carry most of the value: **act on a ref you just read**, and **verify with the
+effect block rather than assuming**. An action that reports success with no change to the
+page has not happened, and `effect` is how you can tell — it reports DOM mutations, URL
+changes, and for a stateful control whether its own state actually moved.
+
+`WAIT` sits between act and verify, for pages that change on their own schedule.
+`CAPABILITY` and `SESSION` are outside the loop.
+
 ## Tools
 
-The names below are MCP tool names. Three kinds of row do not map one-to-one onto a protocol
-action, so read them before assuming a name is callable as-is:
+An MCP tool name is not always a protocol action name, and three cases are worth knowing before
+you assume a name is callable as-is:
 
-- **Composites have no action of their own.** `browser_open_url` is `new_tab`/`navigate` → wait
-  → `read_pdf` probe → optional read, in one call.
-- **One name per capability.** The reader is `get_property` at every layer — MCP tool, CLI and
-  raw HTTP. The old convenience action names (`get_text`, `get_value`, `get_html`, `get_box`,
-  `get_attribute`, `get_count`) still resolve at the extension's dispatch entry, so an old script
-  keeps working, but there is no MCP tool by those names any more.
-- **Rows marked ¹ are protocol actions with no MCP tool.** Reach them with
-  `browser_action({action: "check", params: {…}})`, or from the CLI as `browserctl check <target>`.
-  There is no `browser_check` tool to call.
-- **Eight tool names were removed in 0.6.4/0.7.0; their job is a parameter now.**
-  `browser_type` / `browser_paste` / `browser_select_option` → `browser_fill` with `method` or
-  `option`. `browser_screenshot_fullpage` → `browser_screenshot({fullPage: true})`.
-  `browser_wait_settle` → `browser_wait_for({for: "settle"})`. `browser_get_text` /
-  `browser_get_attribute` / `browser_get_count` → **`browser_get_property`** with
-  `property: "text" | "attr" | "count"`. No aliases were kept: one name per capability, at every
-  layer. The underlying protocol actions all still run — `browser_action({action: "paste", …})`
-  reaches them, and they are listed in its catalogue.
-- **0.8.0 removed four more.** `browser_navigate` and `browser_new_tab` → **`browser_open_url`**
-  with `target: "current" | "new" | <tabId>` (and `read:` folds in the old
-  `browser_open_and_read`). `browser_find_text` → `browser_find({query, in: "text"})`.
-  `browser_dismiss_modal` → click the dialog's own close control, or
-  `browser_action({action: "dismiss"})`. `browser_reload` moved INTO core.
-- **Rows marked ³ left `core` in 0.6.4** — zero calls across 43 measured agent sessions, or
-  (for `browser_exec_system_cmd`) no business being one keystroke away from a page-reading
-  agent. Load them with `browser_load_tools({profile: "advanced" | "system"})`.
+- **Composites have no action of their own.** `browser_open_url` is `new_tab`/`navigate` → wait →
+  `read_pdf` probe → optional read, in one call.
+- **One name per capability, at every layer.** The element read is `get_property` as an MCP tool,
+  as a CLI command and over raw HTTP. Convenience action names (`get_text`, `get_value`,
+  `get_html`, `get_box`, `get_attribute`, `get_count`) still resolve at the extension's dispatch
+  entry, so an old script keeps working; there is no MCP tool by those names.
+- **Some protocol actions have no tool.** `check`, `uncheck`, `clear`, `dismiss` and a few others
+  are reached with `browser_action({action: "check", params: {…}})`, or from the CLI as
+  `browserctl check <target>`. `browser_action` called with no arguments prints every action the
+  bridge will dispatch.
 
-For the authoritative list of everything callable, run `browserctl --help` or call
-`browser_action` with no arguments. Every tab-scoped tool also accepts `tabId` (and `tab_id`).
+Every tab-scoped tool also accepts `tabId` (and the `tab_id` spelling), and every tool accepts
+`format` — `json` (default, compact), `pretty`, `smart` (a human-readable rendering) or `raw`.
 
-**Tool profiles.** `core` (default) loads 23 tools; `all` loads everything. Everything else is one
-`browser_load_tools` call away: `network`, `cdp`, `cookies`, `storage`, `console`, `record`,
-`tabs`, `advanced`, `system`.
+### Uploading a file
 
-### Read the page
+`browser_upload({files: ["/abs/path"], text: "Choose file"})` attaches local files to an
+`<input type=file>` and fires the page's `change`/`input` handlers, the way a human's file
+picker does. Three things about it are not obvious:
 
-| Tool | Purpose | Params |
-|---|---|---|
-| `browser_snapshot` | Primary tool to inspect UI, controls, notifications & badges | `maxText`, `scope`, `compact`, `format` |
-| `browser_get_property` | **The element read.** One element, a whole region, every match, or a whole row-shaped list — text, value, HTML, box, attribute or count, without eval_js | `selector`, `ref`, `index`, `placeholder`, `property` (`text`\|`value`\|`html`\|`box`\|`attr`\|`count`), `attr`, `all`, `max`, `fields` |
-| `browser_read_page` | Read page (accessibility tree) | `mode`, `depth`, `ref_id`, `maxChars` |
-| `browser_find` | Find controls by label/text or CSS selector, or search the page's prose with `in: "text"` | `query`, `selector`, `in` (`controls`\|`text`), `regex`, `contextChars`, `max` |
-| `browser_get_page_content` | Get readable article/documentation text (prose only) | `maxChars` |
-| `browser_describe_element` | Describe element tag, attributes, box, and visibility | `selector`, `ref`, `index`, `placeholder` |
-| `browser_a11y_snapshot` | Accessibility snapshot | — |
-| `browser_read_pdf` | Read a PDF tab | — |
+- **Only the browser process can mint a `File`.** No amount of page JavaScript can put a real
+  file into an input, so `browser_eval_js` is not a fallback here. This runs through
+  `DOM.setFileInputFiles`, which means it attaches the debugger and Chrome shows its banner on
+  that tab.
+- **Name the control you can see.** On nearly every real upload UI the input is
+  `display:none` behind a styled label or button. Naming that control resolves to the input
+  behind it (the response's `matchedBy` says which step answered: the element itself, an input
+  inside it, the input a label points at, or the page's only file input). With several inputs
+  and no target it refuses rather than guessing.
+- **Paths are absolute, and Chrome opens them**, from the machine the bridge runs on. A
+  relative or missing path is refused before the command reaches the browser — without that
+  check a bad path attaches nothing and still reports success. An input without `multiple`
+  holds one file, and the response says how many of yours were dropped.
 
-### Interact (DOM — works on a background tab)
+The response reads back what the input is holding (`files`, `count`, `bytes`). That the file is
+attached is not the same as the site having accepted it — read the page to confirm.
 
-| Tool | Purpose | Params |
-|---|---|---|
-| `browser_click` | Click element by ref/selector/text | `ref`, `selector`, `text`, `index`, `waitFor`, `settleMs`, `autoSettle` |
-| `browser_fill` | **The one text-entry verb.** Any editable target (input, textarea, contenteditable, rich-text) or a `<select>` | `ref`, `selector`, `placeholder`, `index`, `text`, `option`, `method` (`set`\|`type`\|`paste`), `waitFor`, `submit`, `settleMs`, `autoSettle` |
-| `clear` ¹ | Clear input/textarea element | `ref`, `selector` |
-| `check` ¹ | Check checkbox or radio button | `ref`, `selector`, `text` |
-| `uncheck` ¹ | Uncheck checkbox | `ref`, `selector`, `text` |
-| `browser_hover` ³ | Hover element | `ref`, `selector`, `text` |
-| `browser_press_key` | Press a key | `key`, `ref`, `modifiers`, `allowSynthetic` |
-| `browser_scroll` | Scroll page or container (smart nested container detection) | `direction`, `amount`, `ref`, `selector`, `index` |
-| `browser_insert_text` | Insert text (CDP) | `text` |
+### Parameters that cut across tools
 
-### Daemon & Dynamic Tool Management
+Every tool's own parameters are in [TOOLS.md](TOOLS.md). These are the ones that behave the same
+way on several tools, and the ones whose default is worth knowing before you override it.
 
-| Tool | Purpose | Params |
-|---|---|---|
-| `browser_status` | Bridge & extension connectivity, daemon state | `format` |
-| `browser_start` | Start bridge daemon in background if stopped | — |
-| `browser_stop` | Stop bridge daemon (records explicit stopped state) | — |
-| `browser_load_tools` | Dynamically load tool categories (`network`, `cdp`, `cookies`, `storage`, etc.) into prompt | `profile`, `tools` |
-| `browser_unload_tools` ³ | Unload extra tools and reset back to the `core` profile | `profile`, `tools` |
-| `browser_list_available_tools` | List all tool profiles and currently active/inactive status | `format` |
+- **Settling, on the act tools.** `browser_click` and `browser_fill` both take `autoSettle`
+  (default true) — wait for DOM mutations to stop before answering, which is what lets the
+  `effect` block report what changed. Turn it off only for an action you know is inert; without
+  it there is nothing to distinguish a real action from a no-op. `settleMs` caps that wait (150
+  for click, 100 for fill), and `waitFor` takes a CSS selector that must appear before the call
+  returns — the modal, or the textarea, the action was supposed to produce.
+- **Timeouts.** `browser_wait_for({timeoutMs})` defaults to 8000 (1000 for a fixed wait).
+  `browser_open_url({timeoutMs})` defaults to 15000 and covers the navigation, not the read.
+- **Output caps.** A read that can return a lot of text stops at `maxChars` and says it did:
+  `browser_read_page` at 50000, `browser_get_page_content` and `browser_open_url({read})` at
+  8000. The census does not use a cap — `browser_snapshot` pages with `limit`/`cursor` instead.
+- **One-offs worth knowing.** `browser_find({regex: true})` treats `query` as a JS regex
+  (`in: "text"` only) and `contextChars` (default 80) sets how much surrounding prose comes back
+  with each match. `browser_scroll({amount})` is in pixels, default 600.
+  `browser_screenshot({quality})` is JPEG quality 1-100, default 55.
+  `browser_reload({bypassCache: true})` is a hard reload. `browser_eval_js` takes `expression`,
+  the one parameter on a core tool that is required.
 
-### Interact (pixel — FOREGROUND tab only)
+### Upgrading from 0.6.x
 
-| Tool | Purpose | Params |
-|---|---|---|
-| `browser_coordinate_click` | Click at coordinates | `x`, `y`, `button`, `clickCount` |
-| `browser_coordinate_drag` | Drag between coordinates | `fromX`, `fromY`, `toX`, `toY` |
+One capability, one name: where a name disappeared, its job became a parameter on the tool that
+remains, and no aliases were kept at the MCP layer. The rename table is in
+[CHANGELOG.md](../CHANGELOG.md) under 0.7.0. Every protocol action behind a removed name still
+runs, so `browser_action({action, params})` reaches one directly.
 
-### Navigate & wait
+### The catalogue
 
-| Tool | Purpose | Params |
-|---|---|---|
-| `browser_go_back` | Go back | — |
-| `browser_go_forward` | Go forward | — |
-| `browser_reload` | Reload the target tab | `bypassCache` |
-| `browser_wait_for` | Wait for a condition, or for the page itself to stop moving | `for` (`settle`), `selector`, `text`, `gone`, `timeoutMs` |
-| `browser_wait_network_idle` | Wait for network quiet period (supports tolerance for persistent sockets) | `idleMs`, `timeoutMs`, `maxInFlight` |
+Every tool, its exact parameters and its one-line purpose: **[TOOLS.md](TOOLS.md)**, grouped by
+profile and generated from the running server. A release gate fails when it and the registry
+disagree, so it is the list to trust. It was a hand-written table here until it claimed a
+parameter a tool did not have.
 
-### Screenshots & PDF
+What belongs here instead is the part a generated table cannot carry — which tool to reach for,
+and what its answer means. That is the rest of this document.
 
-| Tool | Purpose | Params |
-|---|---|---|
-| `browser_screenshot` | Screenshot the viewport, or the whole page with `fullPage` | `fullPage`, `format`, `quality` |
-| `browser_element_screenshot` | Screenshot one element | `index`, `ref`, `format` |
-| `browser_print_pdf` | Print page to PDF | — |
-
-### Tabs & windows
-
-| Tool | Purpose | Params |
-|---|---|---|
-| `browser_status` | Bridge/extension readiness, no browser command needed | — |
-| `browser_list_tabs` | List tabs | — |
-| `browser_switch_tab` | Switch tab | `id`, `focus` |
-| `browser_close_tab` | Close tab | — |
-| `browser_current_tab` | Current target tab | — |
-| `browser_group_tab` | Group a tab (visual marker) | `id`, `title`, `color` |
-| `browser_ungroup_tab` | Ungroup a tab | — |
-| `browser_list_windows` | List windows | — |
-| `browser_focus_window` | Focus window | — |
-| `browser_spoof_visibility` | Spoof page visibility (unblock background lazy-load) | — |
-
-### Console, network & HAR
-
-| Tool | Purpose | Params |
-|---|---|---|
-| `browser_cdp_attach` | Attach debugger | — |
-| `browser_cdp_detach` | Detach debugger | — |
-| `browser_get_console_logs` | Get console logs | `limit`, `clear` |
-| `browser_get_network_requests` | Get network requests | `urlContains` |
-| `browser_get_response_body` | Get response body | — |
-| `browser_export_har` | Export HAR | — |
-| `browser_net_start` | Start network capture (light) | — |
-| `browser_net_stop` | Stop network capture (light) | — |
-| `browser_net_get` | Get captured network (light) | `urlContains`, `limit` |
-| `browser_net_clear` | Clear network capture (light) | — |
-
-### State: cookies & storage
-
-| Tool | Purpose | Params |
-|---|---|---|
-| `browser_get_cookies` | Get cookies | — |
-| `browser_set_cookie` | Set cookie | `name`, `url`, `secure` |
-| `browser_delete_cookies` | Delete cookies | — |
-| `browser_storage_get` | Read web storage | — |
-| `browser_storage_set` | Write web storage | — |
-| `browser_storage_remove` | Remove web storage key | — |
-| `browser_storage_clear` | Clear web storage | — |
-
-### Scripting, record/replay, ops
-
-| Tool | Purpose | Params |
-|---|---|---|
-| `browser_exec_system_cmd` ³ | Execute system shell command on bridge host (`system` profile) | `command`, `cwd`, `env`, `timeoutMs` |
-| `browser_cdp_send` | Send a raw CDP command (power tool) | `method`, `params` |
-| `browser_eval_js` | Evaluate JavaScript in page context (auto-bypasses CSP and Trusted Types via CDP) | `expression`, `format` |
-| `browser_audit` | Audit page | — |
-| `browser_record_start` | Start recording | — |
-| `browser_record_stop` | Stop recording | — |
-| `browser_record_get` | Get recorded steps | — |
-| `browser_replay` | Replay steps | `startUrl`, `steps` |
-| `browser_reload_extension` | Reload the extension | — |
 ## Actionability: why an action reports a warning
 
 `click` / `type` / `hover` / `select_option` / `click_selector` / `fill_selector` check the
@@ -435,7 +328,20 @@ target before acting.
 So: a `warning` means "it ran, but the element did not look actionable — verify the
 effect". An error means "it could not have worked".
 
-**Did it actually take?** (0.6.0) Every action returns an `effect` block: `domMutated`, `mutationCount`,
+**Was it still moving?** A click dispatches at the centre of the element's box, so a control
+that is still sliding in gets clicked where it was a moment ago. Before dispatching, `click`
+waits — briefly, capped at 300ms — for the box to stop, and reports `effect.stabilized`
+(`waitedMs`, `settled`) when it had to. `settled: false` means it was clicked mid-animation and
+the coordinates may be stale.
+
+How it detects this depends on where the tab is, because a tab that is not the visible one
+receives **no animation frames** — but its animation timeline keeps advancing (measured: a slide
+read 298 -> 310 -> 323 px across three calls on a background tab). So a visible tab is checked
+by sampling the box across frames, which also catches movement driven by a plain `rAF` loop, and
+a hidden tab is checked by reading the running animations directly. An animation that only fades
+or recolours is not a moving target and is ignored.
+
+**Did it actually take?** Every action returns an `effect` block: `domMutated`, `mutationCount`,
 `urlChanged`, `targetStillPresent`. For a control carrying `aria-checked`/`selected`/`pressed`/
 `expanded`, it also reports `controlState` — whether the control's *own* state moved:
 
@@ -542,51 +448,48 @@ on its own to work around that.
 Attaching `chrome.debugger` makes Chrome show `"browserctl" started debugging this browser`.
 It **cannot be suppressed** — that is a Chrome security guarantee, not a gap here.
 
-What matters in practice is that most commands never touch the debugger, and only two acquire a
-session on their own (`browser_cdp_attach`, which is explicit intent, and
-`browser_spoof_visibility`) plus the background-tab branch of `browser_screenshot`.
-`docs/debugger-policy.md` holds the per-action table, and a script to re-derive it when the
-command surface changes. A screenshot of an *active* tab uses `chrome.tabs.captureVisibleTab` and
-raises nothing.
+Most commands never touch the debugger. Five acquire a session on their own:
 
-The banner therefore appears when you opt into CDP — but note it then **stays** until
-`browser_cdp_detach` or the tab closes; there is no idle auto-detach yet. If you see it
-unexpectedly, the usual cause is a background-tab screenshot earlier in the task.
+| | When |
+|---|---|
+| `browser_cdp_attach` | always — that is what it is for |
+| `browser_spoof_visibility` | always |
+| `browser_a11y_snapshot` | always |
+| `browser_screenshot` | only on a **background** tab; an active tab uses `chrome.tabs.captureVisibleTab` and raises nothing |
+| `browser_eval_js` | only when the page's CSP or Trusted Types refuses the MAIN-world eval, and it falls back to CDP |
+
+A session, once acquired, is **never released on its own** — it lasts until
+`browser_cdp_detach` or until the tab closes. So in a task that screenshots a background tab
+once, the banner is up from that point on, and every later CDP-only tool works without asking.
+That is the usual answer to "why is the banner showing when I never called cdp_attach".
+
+`docs/debugger-policy.md` holds the per-action table and a script that re-derives it from the
+source; run that script rather than trusting either table by hand.
 
 Full dependency map, the cost of forbidding the debugger per site, and where to enforce such a
 policy: `debugger-policy.md`.
 
 ## Security posture
 
-Single-user, trusted-machine tool. **No auth, no access control, by design.** Accepted
-risks, unchanged:
-
-- **Any page you visit can reach the bridge.** It binds `127.0.0.1`, but page JS can
-  `fetch("http://127.0.0.1:8765/command")` as a no-preflight simple request and drive your
-  browser. Only an `Origin` allowlist plus a shared token would stop that; neither is
-  implemented.
-- **The extension↔bridge link is unauthenticated cleartext ws**, and the host is
-  user-configurable. Whatever answers on that socket gets full browser control.
-- **`get_cookies` reads the whole browser profile**, not just the target tab, and network
-  /HAR output returns `Cookie` / `Authorization` headers verbatim — the point of a local
-  debug tool, a liability anywhere else.
-- **Prompt injection applies.** A page can embed hidden text aimed at whatever agent is
-  driving. No login removes that. Keep a human in the loop for anything destructive.
-
-Revisit all of the above before this leaves a trusted machine.
+Single-user, trusted-machine tool: **no auth, no access control, by design.** The accepted risks
+— the bridge's default bind, any page being able to reach it, the unauthenticated
+extension-to-bridge socket, whole-profile cookie reads, unredacted headers in network/HAR output,
+and prompt injection from page content — are enumerated in the
+[README](../README.md#security), which is where they are kept current. Revisit all of them before
+this leaves a trusted machine.
 
 ## Tests
 
 ```bash
-# unit: no Chrome needed. 81 tests, ~2s, safe to run with a live bridge.
+# unit: no Chrome needed, ~2s, safe to run with a live bridge. The run prints its own count.
 npm test
 
 # e2e: drives the real stack. Bridge must be running and the extension connected.
-node tests/e2e/run.mjs                      # 70 checks; never steals focus
+node tests/e2e/run.mjs                      # the main suite; never steals focus
 E2E_FOREGROUND=1 node tests/e2e/run.mjs     # + the 2 synthetic-input tests (steals focus)
-node tests/e2e/run_multiframe.mjs           # 19 checks on a page with a real iframe
+node tests/e2e/run_multiframe.mjs           # a page with a real iframe
 node tests/e2e/run_labels.mjs               # 9 label-resolution shapes, all four readers agree
-node tests/e2e/run_editors.mjs              # 12 checks: text goes in EXACTLY once, and a form
+node tests/e2e/run_editors.mjs              # text goes in EXACTLY once, and a form
                                             # submits exactly once, across editor architectures
 
 # against ANY live site — these need no fixture and are the ones worth running after
@@ -605,8 +508,8 @@ excused there, with the reason printed. A "missed" action may still be covered b
 
 **`run_multiframe.mjs` exists because every other fixture was single-frame**, and that blind spot let a
 severe regression ship invisibly: on any page with an iframe — i.e. every real site — the frame merge
-rebuilt the compact view from scratch and discarded landmark grouping, folding and every notice. All 81
-unit tests stayed green throughout.
+rebuilt the compact view from scratch and discarded landmark grouping, folding and every notice. Every unit test
+stayed green throughout.
 
 **`run_editors.mjs` guards the "exactly once" family.** Insertion and activation are each done by two
 mechanisms that both work — a ClipboardEvent and `execCommand`, an Enter key and `requestSubmit()` —

@@ -9,6 +9,7 @@ import { handleNet, NET_ACTIONS, dropTab as netDropTab } from "./netlog.js";
 
 // DOM-level commands that run in the active tab's content script.
 const CONTENT_ACTIONS = [
+  "upload_mark",
   "snapshot",
   "read_page",
   "find",
@@ -265,6 +266,45 @@ async function dispatch({ action, params = {} }) {
   // ride a fresh auto-pin onto whatever tab the user is looking at. See freshPinGuard.
   const guard = await freshPinGuard(action, params);
   if (guard) return guard;
+
+  // upload is two steps: the content script owns target resolution (ref/index/selector, shadow
+  // DOM, and the label-to-hidden-input hop that every styled upload button needs), then CDP
+  // puts the file in. Only the browser process can mint a File, so this is one of the few
+  // capabilities that cannot be done from the page side at all.
+  if (action === "upload") {
+    const tab = await targetTab(params);
+    const { frameId, params: p } = frameRoute(params);
+    const marked = await toContent(
+      "upload_mark",
+      { index: p.index, ref: p.ref, selector: p.selector, text: p.text, placeholder: p.placeholder, tabId: params.tabId },
+      frameId
+    );
+    if (!marked.ok) return marked;
+    const files = Array.isArray(params.files) ? params.files : params.file ? [params.file] : [];
+    const set = await handleCdp("upload_set", { files }, tab.id);
+    if (!set.ok) return set;
+    // CDP takes the first file and drops the rest when the input is not `multiple`, without
+    // a word. Two files in, one file attached, ok:true is the silent partial success this
+    // codebase treats as a bug.
+    const dropped = files.length - (set.result.count || 0);
+    const warning =
+      dropped > 0
+        ? marked.result.multiple
+          ? `${files.length} files given, ${set.result.count} attached \u2014 the page's input took what it wanted and dropped ${dropped}`
+          : `this input has no 'multiple' attribute, so it holds ONE file: ${dropped} of the ${files.length} given were dropped and only ${set.result.files?.[0] || set.result.count} is attached`
+        : null;
+    return {
+      ok: true,
+      result: {
+        ...set.result,
+        input: marked.result,
+        ...(warning ? { warning } : {}),
+        // The page reacts to change/input, which CDP fires for us; whether IT did anything
+        // with the file is a separate question, and the only honest answer is "read the page".
+        note: "the file is attached to the input and change/input have fired; read the page to confirm the site accepted it",
+      },
+    };
+  }
 
   // element_screenshot needs a rect the content script resolves (by ref/index, incl.
   // shadow DOM), then CDP clips to it. Resolve the rect first, then hand it to the CDP
@@ -957,6 +997,35 @@ async function focusWindow({ id }) {
   return { id };
 }
 
+// A click can answer BEFORE the navigation it started commits: the content script measures
+// 0 mutations and the same location.href, so the response says the click did not happen — on
+// a click that did. Measured on example.com's "Learn more" (2026-09-13): effect.urlChanged
+// false with a "NOT confirmed" warning, while the tab was already on iana.org. A verdict of
+// "nothing changed at all" is the one an agent acts on hardest, so it has to be checked
+// against the tab itself before it is allowed to stand.
+async function confirmNothingHappened(reply, tabId, urlBefore) {
+  const eff = reply && reply.ok && reply.result && reply.result.effect;
+  if (!eff || !eff.measured || eff.domMutated || eff.urlChanged || !urlBefore) return reply;
+  const deadline = Date.now() + 800;
+  for (;;) {
+    let after = null;
+    try { after = await chrome.tabs.get(tabId); } catch {}
+    if (after && after.url && after.url !== urlBefore) {
+      eff.urlChanged = true;
+      eff.navigatedTo = after.url;
+      delete reply.result.warning;
+      reply.result.note =
+        `this action navigated the page (${urlBefore} -> ${after.url}); it answered before the ` +
+        `navigation committed, so its mutation count describes the old document. Refs from before ` +
+        `it are gone — read the new page.`;
+      return reply;
+    }
+    // Nothing is in flight and the URL is unchanged: the verdict was right.
+    if (!after || after.status !== "loading" || Date.now() > deadline) return reply;
+    await new Promise((r) => setTimeout(r, 80));
+  }
+}
+
 // Send a message to a specific frame's content script, injecting it if missing.
 // With all_frames injection every frame has a listener, so we ALWAYS target one
 // frame (frameId 0 = the top document) — otherwise every frame would reply and race.
@@ -965,7 +1034,7 @@ async function toContent(action, params, frameId = 0) {
   const urlBefore = tab.url;
   const opts = { frameId };
   try {
-    return await chrome.tabs.sendMessage(tab.id, { action, params }, opts);
+    return await confirmNothingHappened(await chrome.tabs.sendMessage(tab.id, { action, params }, opts), tab.id, urlBefore);
   } catch (err) {
     // Two very different things land here, and they used to be treated as one.
     //
@@ -999,7 +1068,7 @@ async function toContent(action, params, frameId = 0) {
       };
     }
     await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [frameId] }, files: ["content.js"] });
-    return await chrome.tabs.sendMessage(tab.id, { action, params }, opts);
+    return await confirmNothingHappened(await chrome.tabs.sendMessage(tab.id, { action, params }, opts), tab.id, urlBefore);
   }
 }
 

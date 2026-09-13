@@ -263,3 +263,40 @@ test("oversized inbound WS message is closed with a friendly 'payload too large'
   assert.equal(data.ok, false);
   assert.match(data.error, /payload too large/);
 });
+
+// Chrome opens an upload's paths itself, from this host's filesystem — a path it cannot read
+// leaves the input empty and the CDP call still succeeds. Measured: a relative path and a
+// missing file both came back ok:true with bytes:0. The bridge is the layer with a filesystem
+// to check against, so it refuses before the command reaches the extension at all (these run
+// with no extension connected, which would otherwise 503).
+test("POST /command upload: a relative path is refused, naming the reason", async () => {
+  const r = await post("upload", { files: ["report.pdf"] });
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /not an absolute path/);
+  assert.match(r.data.error, /Chrome opens these paths itself/);
+});
+
+test("POST /command upload: a path that does not exist is refused", async () => {
+  const r = await post("upload", { files: ["/definitely/not/here/report.pdf"] });
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /no such file/);
+});
+
+test("POST /command upload: a directory is not a file", async () => {
+  const r = await post("upload", { files: [process.cwd()] });
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /not a regular file/);
+});
+
+test("POST /command upload with no files at all says what it needs", async () => {
+  const r = await post("upload", {});
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /absolute paths/);
+});
+
+test("POST /command upload: a readable file gets past the check and on to the extension", async () => {
+  // No extension is connected here, so 503 is proof it passed validation rather than
+  // a 400 from it — the check must not reject a path that is genuinely fine.
+  const r = await post("upload", { files: [new URL(import.meta.url).pathname] });
+  assert.equal(r.status, 503, `expected the relay to take it, got ${r.status}: ${JSON.stringify(r.data)}`);
+});

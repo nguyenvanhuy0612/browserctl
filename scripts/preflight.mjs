@@ -54,6 +54,22 @@ gate("versions agree", () => {
   if (!/const SERVER_VERSION = \(\(\) =>/.test(read("mcp/index.js"))) {
     throw new Error("SERVER_VERSION must be derived from package.json, not restated");
   }
+  // The docs claim a version too, and nothing was checking them: PROTOCOL.md said 0.6.3
+  // while the package was at 0.7.1, and docs/REFERENCE.md claimed "80 tools" when there
+  // were 67. A number in prose is a number that rots.
+  const stale = [];
+  for (const f of ["PROTOCOL.md", "README.md", "docs/REFERENCE.md", "docs/TOOLS.md", "skills/browserctl/SKILL.md"]) {
+    if (!existsSync(join(ROOT, f))) continue;
+    const doc = read(f);
+    for (const m of doc.matchAll(/(?:Version|version:?|v)\s*\**(\d+\.\d+\.\d+)\**/g)) {
+      if (m[1] !== pkg.version) stale.push(`${f}: says ${m[1]}`);
+    }
+    for (const m of doc.matchAll(/(\d+)\s+tools\b/g)) {
+      const n = Number(m[1]);
+      if (n !== TOOL_NAMES.length && n !== CORE.length) stale.push(`${f}: claims ${n} tools (there are ${TOOL_NAMES.length}, ${CORE.length} in core)`);
+    }
+  }
+  if (stale.length) throw new Error(stale.join("; ") + " — a number in prose rots; state it once or derive it");
   return `v${pkg.version}`;
 });
 
@@ -220,17 +236,80 @@ gate("e2e covers every protocol action", () => {
   return `${surface.length} actions`;
 });
 
+// ------------------------------------- 7b. the loop, and the group notes that carry it
+// The group note is prefixed onto every description in its group, so a stale one is wrong on
+// every tool at once — the READ note listed "find_text, get_text" for two releases after both
+// were merged away. The member lists are generated now; this gate keeps them that way, and
+// keeps the loop itself present on both surfaces an agent reads.
+gate("the loop is stated, and group notes are generated", () => {
+  const src = read("mcp/index.js");
+  // The loop must be STATED, not phrased one particular way. What matters is that an agent
+  // reading the instructions once can see the shape: open, read, act, then check the effect.
+  const iStart = src.indexOf("const INSTRUCTIONS = `");
+  const instructions = src.slice(iStart, src.indexOf("`;", iStart));
+  if (!/THE LOOP/.test(instructions)) throw new Error("the instructions do not state the loop");
+  for (const step of ["browser_open_url", "browser_snapshot", "browser_click", "effect"]) {
+    if (!instructions.includes(step)) {
+      throw new Error(`the loop in the instructions never mentions ${step} — an agent cannot follow a loop it is not told about`);
+    }
+  }
+  if (!/const members = \(g\) =>/.test(src)) {
+    throw new Error("group notes must generate their member lists from TOOL_GROUPS — a hand-written list is wrong on every tool in the group at once");
+  }
+  const noteBlock = src.slice(src.indexOf("const GROUP_NOTE"), src.indexOf("const GROUP_NOTE") + 2500);
+  const hardcoded = [...noteBlock.matchAll(/\(([a-z_]+(?:, [a-z_]+){2,})\)/g)].map((m) => m[1]);
+  if (hardcoded.length) {
+    throw new Error(`group notes still hard-code a tool list: ${hardcoded[0]}`);
+  }
+  // Every step of the loop must map to a group an agent can see on a tool.
+  for (const g of ["ORIENT", "READ", "ACT"]) {
+    if (!new RegExp(`^\\s*${g}:`, "m").test(src)) throw new Error(`no ${g} group — the loop has a step with no tools behind it`);
+  }
+  return "loop stated, notes generated";
+});
+
 // ------------------------------------------------ 8. the intent index names the new calls
 gate("the intent index is not stale", () => {
   const src = read("mcp/index.js");
-  const index = src.split("WHAT YOU WANT")[1]?.slice(0, 3000) || "";
-  const missing = CORE
-    .filter((n) => !["browser_start", "browser_stop", "browser_status", "browser_list_available_tools"].includes(n))
-    .filter((n) => !index.includes(n));
-  if (missing.length) {
-    throw new Error(`absent from the server instructions an agent reads at connect: ${missing.join(", ")} — a core tool not in the intent index is reachable only by luck`);
+  // Not every core tool: the instructions carry the tools an agent needs to START, and the
+  // rest live in their own descriptions — the same division playwright-mcp makes, and the
+  // reason its server instructions are empty. What must never go missing is the entry point
+  // for each kind of work.
+  const iStart2 = src.indexOf("const INSTRUCTIONS = `");
+  const index = src.slice(iStart2, src.indexOf("`;", iStart2));
+  const entryPoints = [
+    "browser_open_url", "browser_snapshot", "browser_get_page_content", "browser_get_property",
+    "browser_find", "browser_click", "browser_fill", "browser_eval_js", "browser_action",
+    "browser_load_tools",
+  ];
+  // A count typed into the instructions is read by every agent at connect and is wrong the
+  // first time a tool moves between profiles: it said 45 when there were 44. Interpolate it.
+  const handCount = index.match(/\b\d+ (further capabilities|tools|actions)\b/);
+  if (handCount) {
+    throw new Error(`the server instructions state "${handCount[0]}" as a literal — derive it from the registry instead`);
   }
-  return "every core tool routed";
+
+  const missing = entryPoints.filter((n) => !index.includes(n));
+  if (missing.length) {
+    throw new Error(`absent from the server instructions an agent reads at connect: ${missing.join(", ")} — an entry point not named there is reachable only by luck`);
+  }
+  return `${entryPoints.length} entry points routed`;
+});
+
+// -------------------------------------------- 8b. child test scripts are real files
+gate("child test scripts parse on their own", () => {
+  const dir = join(ROOT, "tests/unit/children");
+  if (!existsSync(dir)) return "none yet";
+  const files = execFileSync("sh", ["-c", `ls ${dir}/*.mjs 2>/dev/null || true`], { encoding: "utf8" })
+    .trim().split("\n").filter(Boolean);
+  for (const f of files) {
+    try {
+      execFileSync("node", ["--check", f], { stdio: ["ignore", "pipe", "pipe"] });
+    } catch (err) {
+      throw new Error(`${f.split("/").pop()} does not parse — a fixture is a real source file, so this is a plain syntax error`);
+    }
+  }
+  return `${files.length} checked`;
 });
 
 // --------------------------------------------------------------- 9. the shipped tarball
@@ -260,29 +339,48 @@ gate("end-to-end (live browser)", () => {
     throw new Error("bridge unreachable or extension not connected — start it (npm start) and load the extension; if you just reloaded the extension, give it a second");
   }
 
-  const runOnce = () => {
+  // Every suite that drives the live stack, not just run.mjs. The gate used to run one of
+  // four, and the other three were left to be run by hand — so three assertions in
+  // run_multiframe.mjs went on asserting a census shape that had been replaced two releases
+  // earlier, and nothing said a word. A suite the release does not run is a suite that rots.
+  const SUITES = [
+    ["tests/e2e/run.mjs", null],
+    ["tests/e2e/run_multiframe.mjs", null],
+    ["tests/e2e/run_labels.mjs", /all label paths agree/],
+    ["tests/e2e/run_editors.mjs", null],
+  ];
+  const runOnce = (file) => {
     try {
-      return execFileSync("node", ["tests/e2e/run.mjs"], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      return execFileSync("node", [file], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     } catch (err) {
-      // The suite prints its failures to stdout and exits non-zero; surface those instead
-      // of node's "Command failed", which says nothing about what broke.
+      // A suite prints its failures to stdout and exits non-zero; surface those instead of
+      // node's "Command failed", which says nothing about what broke.
       return String(err.stdout || "") || null;
     }
   };
-  let out = runOnce();
-  const clean = (o) => {
+  const clean = (o, ok) => {
+    if (o && ok && ok.test(o)) return ["ok", "ok", "ok"];
     const m = o && o.match(/==== (\d+)\/(\d+) checks passed ====/);
     return m && m[1] === m[2] ? m : null;
   };
-  if (!clean(out)) out = runOnce(); // one retry: the live stack has genuine transients
-  const m = clean(out);
-  if (!m) {
-    const failures = (out || "").split("FAILURES:")[1]?.trim().slice(0, 500);
-    throw new Error(failures ? `\n      ${failures.replace(/\n/g, "\n      ")}` : "e2e did not report a clean run");
+  const counts = [];
+  for (const [file, ok] of SUITES) {
+    let out = runOnce(file);
+    if (!clean(out, ok)) out = runOnce(file); // one retry: the live stack has genuine transients
+    const m = clean(out, ok);
+    if (!m) {
+      const failures = (out || "").split("FAILURES:")[1]?.trim().slice(0, 400);
+      throw new Error(
+        `${file}:` + (failures ? `\n      ${failures.replace(/\n/g, "\n      ")}` : " did not report a clean run")
+      );
+    }
+    if (file.endsWith("run.mjs")) {
+      const missed = out.match(/(\d+) missed/)?.[1];
+      if (missed && missed !== "0") throw new Error(`${missed} protocol actions neither exercised nor excused`);
+    }
+    counts.push(m[1] === "ok" ? file.split("/").pop() : `${file.split("/").pop()} ${m[1]}/${m[2]}`);
   }
-  const missed = out.match(/(\d+) missed/)?.[1];
-  if (missed && missed !== "0") throw new Error(`${missed} protocol actions neither exercised nor excused`);
-  return `${m[1]}/${m[2]} checks`;
+  return counts.join(", ");
 });
 
 // ----------------------------------------------------------------------- report

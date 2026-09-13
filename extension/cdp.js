@@ -108,13 +108,37 @@ async function requireForegroundForInput(tabId, what) {
   );
 }
 
-async function attach(tabId) {
-  await new Promise((resolve, reject) => {
+function attachOnce(tabId) {
+  return new Promise((resolve, reject) => {
     chrome.debugger.attach({ tabId }, "1.3", () => {
       const e = chrome.runtime.lastError;
       if (e) reject(new Error(e.message)); else resolve();
     });
   });
+}
+
+async function attach(tabId) {
+  try {
+    await attachOnce(tabId);
+  } catch (err) {
+    // Chrome allows exactly one debugger per tab. Two very different situations land here
+    // and Chrome words them identically:
+    //   - OUR OWN session, left behind when the service worker was recycled or the extension
+    //     was reloaded. Detaching and retrying recovers it, and that detach is ours to make.
+    //   - Somebody else's: DevTools open on that tab, or another automation tool. The detach
+    //     fails, and the raw Chrome string ("Another debugger is already attached") tells a
+    //     caller nothing about what to do, so say what to do.
+    if (!/another debugger is already attached/i.test(err.message || "")) throw err;
+    try { await detach(tabId); } catch {}
+    try {
+      await attachOnce(tabId);
+    } catch {
+      throw new Error(
+        "another debugger is already attached to this tab \u2014 Chrome allows only one. " +
+        "Close DevTools on that tab (or stop the other automation tool holding it), or drive a different tab."
+      );
+    }
+  }
   // Force deviceScaleFactor to 1 so CDP screenshots are captured in CSS-pixel space,
   // matching the coordinates coordinate_click / coordinate_drag dispatch. Without this,
   // HiDPI/Retina displays (e.g. Apple Silicon) produce 2x screenshots, so every pixel
@@ -368,14 +392,45 @@ function pushConsole(s, entry) {
   if (s.console.length > MAX_CONSOLE) s.console.shift();
 }
 
+// returnByValue:true is the obvious way to evaluate, and it throws away the one thing that
+// makes an empty answer readable: a DOM node, a Map, a Set and a Promise all come back as
+// `{}` with type "object" and nothing to say which. Evaluate to a HANDLE instead (one pass,
+// so a side-effecting expression still runs exactly once), read the class name off it, then
+// serialise through that handle.
 async function runtimeEval(tabId, expression) {
   const res = await send(tabId, "Runtime.evaluate", {
     expression,
-    returnByValue: true,
+    returnByValue: false,
     awaitPromise: true,
   });
   if (res.exceptionDetails) throw new Error(res.exceptionDetails.text || "eval error");
-  return { value: res.result.value, type: res.result.type };
+  const r = res.result || {};
+  // Primitives (and null) are already in hand.
+  if (!r.objectId) {
+    if (r.type === "undefined") return { value: null, type: "undefined" };
+    return { value: r.value !== undefined ? r.value : r.description ?? null, type: r.type };
+  }
+  try {
+    const ser = await send(tabId, "Runtime.callFunctionOn", {
+      objectId: r.objectId,
+      functionDeclaration: "function(){ try { return { ok: true, v: JSON.parse(JSON.stringify(this)) } } catch (e) { return { ok: false, why: String(e) } } }",
+      returnByValue: true,
+    });
+    const out = (ser.result && ser.result.value) || { ok: false, why: "no result" };
+    const kind = r.className || r.subtype || r.type;
+    if (!out.ok) return { value: null, type: kind, note: `${kind} could not be serialised (${out.why}) \u2014 return its fields instead` };
+    const empty = out.v && typeof out.v === "object" && !Array.isArray(out.v) && Object.keys(out.v).length === 0;
+    if (empty && kind && kind !== "Object") {
+      return {
+        value: out.v,
+        type: kind,
+        note: `${kind} has no JSON form, so this is {} rather than nothing \u2014 return its fields instead (.textContent, [...set], Object.fromEntries(map))`,
+      };
+    }
+    return { value: out.v, type: kind };
+  } finally {
+    try { await send(tabId, "Runtime.releaseObject", { objectId: r.objectId }); } catch {}
+  }
 }
 
 function toHeaders(h) {
@@ -643,21 +698,43 @@ export async function handleCdp(action, params, tabId) {
         const [out] = await chrome.scripting.executeScript({
           target: { tabId },
           world: "MAIN",
-          func: (expr) => {
+          func: async (expr) => {
             try {
-              const v = eval(expr);
+              const raw = eval(expr);
+              // An async expression returned `{}` here while the SAME expression answered
+              // correctly whenever a debugger happened to be attached (Runtime.evaluate sets
+              // awaitPromise). One expression, two answers, no error either way.
+              const v = raw && typeof raw.then === "function" ? await raw : raw;
               // JSON.stringify(undefined) returns undefined (not "undefined"), and
               // JSON.parse(undefined) throws — surfacing a misleading error for a
               // successful eval that simply returns nothing (assignments, void, DOM calls).
-              if (v === undefined) return { ok: true, value: null };
-              return { ok: true, value: JSON.parse(JSON.stringify(v)) };
+              if (v === undefined) return { ok: true, value: null, type: "undefined" };
+              if (typeof v === "function") return { ok: true, value: String(v), type: "function" };
+              // Same field shape the attached path reports, so one expression does not get two
+              // different answers depending on whether a debugger happens to be attached.
+              const kind = v === null ? "null" : typeof v === "object" ? (v.constructor && v.constructor.name) || "Object" : typeof v;
+              let json;
+              try { json = JSON.parse(JSON.stringify(v)); }
+              catch (err) { return { ok: true, value: null, type: kind, note: `${kind} could not be serialised (${String(err)}) — return its fields instead` }; }
+              // A DOM node, a Map, a Set and a Promise all serialise to {}. Returning that
+              // bare reads as "the page has nothing", which is a different answer.
+              if (v && typeof v === "object" && !Array.isArray(v) && json && Object.keys(json).length === 0 && kind !== "Object") {
+                return {
+                  ok: true,
+                  value: json,
+                  type: kind,
+                  note: `${kind} has no JSON form, so this is {} rather than nothing — return its fields instead (.textContent, [...set], Object.fromEntries(map))`,
+                };
+              }
+              return { ok: true, value: json, type: kind };
             }
             catch (err) { return { ok: false, error: String(err) }; }
           },
           args: [params.expression],
         });
         if (out?.result?.ok) {
-          return { ok: true, result: { value: out.result.value } };
+          const { value, type, note } = out.result;
+          return { ok: true, result: { value, ...(type ? { type } : {}), ...(note ? { note } : {}) } };
         }
 
         const errStr = out?.result?.error || "";
@@ -786,6 +863,60 @@ export async function handleCdp(action, params, tabId) {
       const { nodes: axNodes } = await send(tabId, "Accessibility.getFullAXTree");
       const nodes = collectAxNodes(axNodes, max);
       return { ok: true, result: { count: nodes.length, nodes } };
+    }
+
+    case "upload_set": {
+      // The one capability here that genuinely needs CDP: nothing in a page's JS can put a
+      // real file into an <input type=file>, because a File must come from the browser
+      // process. DOM.setFileInputFiles hands it the paths and fires input/change itself, the
+      // same way a human's file picker does. Paths are read by CHROME, on the bridge host.
+      await ensureAttached(tabId);
+      const files = params.files || [];
+      // Find the element the content script stamped. Runtime.evaluate (not DOM.querySelector)
+      // because the stamped input may live in a shadow root, which DOM.querySelector does not
+      // pierce, and because an objectId is what setFileInputFiles wants anyway.
+      const found = await send(tabId, "Runtime.evaluate", {
+        expression: `(() => {
+          const seen = new Set();
+          const walk = (root) => {
+            const hit = root.querySelector && root.querySelector('[data-bctl-upload]');
+            if (hit) return hit;
+            const all = root.querySelectorAll ? root.querySelectorAll("*") : [];
+            for (const el of all) {
+              if (el.shadowRoot && !seen.has(el.shadowRoot)) {
+                seen.add(el.shadowRoot);
+                const inner = walk(el.shadowRoot);
+                if (inner) return inner;
+              }
+            }
+            return null;
+          };
+          return walk(document);
+        })()`,
+      });
+      const objectId = found.result && found.result.objectId;
+      if (!objectId) throw new Error("the marked file input was gone by the time CDP looked for it (did the page re-render?)");
+      try {
+        try { await send(tabId, "DOM.enable"); } catch {}
+        await send(tabId, "DOM.setFileInputFiles", { objectId, files });
+        // Read back what the input is actually holding: the point of this tool is that the
+        // page now has the file, and "the call returned" is not that.
+        const readBack = await send(tabId, "Runtime.callFunctionOn", {
+          objectId,
+          functionDeclaration: "function(){return {count:this.files.length,names:[...this.files].map(f=>f.name),bytes:[...this.files].reduce((n,f)=>n+f.size,0)}}",
+          returnByValue: true,
+        });
+        const attached = (readBack.result && readBack.result.value) || { count: 0, names: [] };
+        return { ok: true, result: { files: attached.names, count: attached.count, bytes: attached.bytes } };
+      } finally {
+        try {
+          await send(tabId, "Runtime.callFunctionOn", {
+            objectId,
+            functionDeclaration: "function(){this.removeAttribute('data-bctl-upload')}",
+          });
+        } catch {}
+        try { await send(tabId, "Runtime.releaseObject", { objectId }); } catch {}
+      }
     }
 
     case "element_screenshot": {
@@ -968,6 +1099,7 @@ export async function handleCdp(action, params, tabId) {
 }
 
 export const CDP_ACTIONS = [
+  "upload_set",
   "cdp_attach",
   "cdp_detach",
   "get_console_logs",
