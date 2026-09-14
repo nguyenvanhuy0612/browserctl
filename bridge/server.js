@@ -1,14 +1,3 @@
-// Bridge server: relays AI-agent commands to the Chrome extension.
-//
-//   Agent  --HTTP-->  this server  --WebSocket-->  extension
-//
-// Endpoints:
-//   POST /command         { action, params? }  -> runs a command, returns its result
-//   GET  /status                               -> { extensionConnected }
-//   WS   /extension                            -> the extension connects here
-//
-// No auth, localhost only. See README "Security".
-
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, statSync, renameSync, existsSync } from "node:fs";
@@ -16,14 +5,10 @@ import { dirname, join, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execa } from "execa";
 import { WebSocketServer } from "ws";
-import { markDaemonRunning, markDaemonStopped } from "./state.js";
+import { markDaemonRunning } from "./state.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// Read a numeric env var, falling back only when it is unset/empty/not-a-number — NOT
-// when it is a legitimate 0. `Number(process.env.PORT) || 8765` silently ignored
-// PORT=0 ("let the OS pick a free port"), so the unit tests, which set exactly that,
-// bound 8765 instead and hung forever on EADDRINUSE whenever a real bridge was running.
 function envNum(name, fallback) {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
@@ -38,33 +23,14 @@ function envStr(name, fallback) {
 
 const PORT = envNum("PORT", 8765);
 const HOST = envStr("HOST", "0.0.0.0");
-// Overridable via env so tests can exercise real timeout firing without a 30s wait;
-// unset in normal operation, so production behavior is unchanged.
 const COMMAND_TIMEOUT_MS = envNum("COMMAND_TIMEOUT_MS", 30_000);
-// A few actions legitimately run longer than the default (multi-step replay chains,
-// each with its own navigation wait; export_har{bodies:true} can be slow to collect).
-// Give them a larger ceiling so the bridge doesn't 504 while the extension is still
-// legitimately working.
 const ACTION_TIMEOUT_MS = { replay: 120_000, export_har: 120_000 };
-// wait_for / wait_network_idle accept a caller-supplied timeoutMs that can legitimately
-// exceed the default command timeout (or be shorter). Honor it end-to-end by using
-// timeoutMs + a buffer (time for the extension to notice its own wait expired and
-// reply) as this request's bridge-side timeout, instead of the fixed default.
 const WAIT_ACTIONS = new Set(["wait_for", "wait_network_idle"]);
 const TIMEOUT_BUFFER_MS = 5_000;
-const MAX_TIMEOUT_MS = 300_000; // hard ceiling regardless of what a caller requests
-// App-level heartbeat. The inbound ping resets the extension's MV3 service-worker
-// idle timer (~30s), keeping the socket genuinely open instead of churning; the
-// pong lets us detect and drop a dead extension. Must be an application message,
-// not a protocol ws.ping() frame — the browser answers those itself without ever
-// waking the service worker's message handler.
+const MAX_TIMEOUT_MS = 300_000;
 const HEARTBEAT_MS = 20_000;
-// Explicit inbound WS payload cap (matches ws's own default, named here so it's
-// visible/tunable and paired with a friendly error instead of a bare 1009 close).
-// Overridable via env for tests.
 const MAX_WS_PAYLOAD_BYTES = envNum("MAX_WS_PAYLOAD_BYTES", 100 * 1024 * 1024);
 
-// Per-command timeout, aware of the action being run. See WAIT_ACTIONS/ACTION_TIMEOUT_MS above.
 function computeTimeoutMs(action, params) {
   let ms = ACTION_TIMEOUT_MS[action] || COMMAND_TIMEOUT_MS;
   if (WAIT_ACTIONS.has(action)) {
@@ -74,10 +40,8 @@ function computeTimeoutMs(action, params) {
   return Math.min(ms, MAX_TIMEOUT_MS);
 }
 
-// The single connected extension socket (we support one browser for now).
 let extensionSocket = null;
 
-// id -> { resolve, reject, timer } for in-flight commands awaiting a reply.
 const pending = new Map();
 
 const server = http.createServer((req, res) => {
@@ -94,11 +58,8 @@ const server = http.createServer((req, res) => {
   sendJson(res, 404, { ok: false, error: "not found" });
 });
 
-// WebSocket endpoint for the extension.
 const wss = new WebSocketServer({ server, path: "/extension", maxPayload: MAX_WS_PAYLOAD_BYTES });
 
-// Fail every in-flight command instead of letting its HTTP caller hang until its
-// own timeout: called on socket replacement and on close/error of the live socket.
 function rejectAllPending(reason) {
   for (const entry of pending.values()) {
     clearTimeout(entry.timer);
@@ -109,10 +70,10 @@ function rejectAllPending(reason) {
 
 wss.on("connection", (ws) => {
   if (extensionSocket) {
-    // A new connection replaces the old one; anything still waiting on the old
-    // socket will never get a reply, so fail it now rather than at its own timeout.
     rejectAllPending("extension disconnected");
-    try { extensionSocket.close(); } catch {}
+    try {
+      extensionSocket.close();
+    } catch {}
   }
   extensionSocket = ws;
   ws.isAlive = true;
@@ -123,11 +84,14 @@ wss.on("connection", (ws) => {
     try {
       msg = JSON.parse(data.toString());
     } catch {
-      return; // ignore malformed frames
+      return;
     }
-    if (msg.type === "pong") { ws.isAlive = true; return; } // heartbeat reply
+    if (msg.type === "pong") {
+      ws.isAlive = true;
+      return;
+    }
     const entry = pending.get(msg.id);
-    if (!entry) return; // unknown / already-timed-out id
+    if (!entry) return;
     clearTimeout(entry.timer);
     pending.delete(msg.id);
     entry.resolve(msg);
@@ -136,14 +100,12 @@ wss.on("connection", (ws) => {
   ws.on("close", () => {
     const wasActive = extensionSocket === ws;
     if (wasActive) extensionSocket = null;
-    // Only a genuine disconnect of the currently-active socket should fail pending
-    // commands here — replacement already rejected (and cleared) pending at connect
-    // time, so a stale socket's belated close must not clobber requests already
-    // in flight against the new one.
     if (wasActive) {
       const reason = ws.bctlOversized ? "payload too large" : "extension disconnected";
       rejectAllPending(reason);
-      log(ws.bctlOversized ? "extension disconnected (payload too large)" : "extension disconnected");
+      log(
+        ws.bctlOversized ? "extension disconnected (payload too large)" : "extension disconnected"
+      );
     } else {
       log("stale extension socket closed");
     }
@@ -151,65 +113,49 @@ wss.on("connection", (ws) => {
 
   ws.on("error", (err) => {
     log("extension socket error:", err.message);
-    // ws aborts the connection on an oversized inbound frame; remember why so the
-    // close handler above can reject pending callers with a friendlier reason than
-    // a bare disconnect.
     if (err.code === "WS_ERR_UNSUPPORTED_MESSAGE_LENGTH") ws.bctlOversized = true;
   });
 });
 
-// Heartbeat: ping the extension every HEARTBEAT_MS. If the previous ping went
-// unanswered by the next tick, the socket is dead (SW gone, machine slept) —
-// terminate it so /status flips to disconnected and the extension re-links.
 const heartbeat = setInterval(() => {
   const ws = extensionSocket;
   if (!ws) return;
   if (ws.isAlive === false) {
     log("extension heartbeat timeout; dropping stale socket");
-    try { ws.terminate(); } catch {}
+    try {
+      ws.terminate();
+    } catch {}
     return;
   }
   ws.isAlive = false;
-  try { ws.send(JSON.stringify({ type: "ping" })); } catch {}
+  try {
+    ws.send(JSON.stringify({ type: "ping" }));
+  } catch {}
 }, HEARTBEAT_MS);
 
 wss.on("close", () => clearInterval(heartbeat));
 
-// ---------------------------------------------------------------------------
-// Optional per-call log (F32)
-//
-// Five probe runs, five wrong self-reported call counts, one fabricated wholesale —
-// and no way to tell from this side which was which, because the bridge kept no record
-// of what it actually served. Off by default so ordinary use does not grow a file.
-//
-//   BROWSERCTL_CALL_LOG=1                 -> bridge/calls.jsonl
-//   BROWSERCTL_CALL_LOG=/path/to/log      -> that path
-//
-// Parameter VALUES are never written: fill/type/paste carry what the user typed and
-// eval_js carries code. Only key names and a size are recorded.
 const CALL_LOG_ENV = process.env.BROWSERCTL_CALL_LOG || "";
-const CALL_LOG_PATH = !CALL_LOG_ENV || CALL_LOG_ENV === "0" || CALL_LOG_ENV === "false"
-  ? null
-  : (CALL_LOG_ENV === "1" || CALL_LOG_ENV === "true"
+const CALL_LOG_PATH =
+  !CALL_LOG_ENV || CALL_LOG_ENV === "0" || CALL_LOG_ENV === "false"
+    ? null
+    : CALL_LOG_ENV === "1" || CALL_LOG_ENV === "true"
       ? join(__dirname, "calls.jsonl")
-      : CALL_LOG_ENV);
+      : CALL_LOG_ENV;
 const RUN_ID = randomUUID().slice(0, 8);
 const RUN_STARTED_AT = new Date().toISOString();
 
-// Bounded on purpose. The log holds a record of everything driven through the bridge, so
-// it must not grow until someone notices: at the cap the current file becomes `.1`
-// (replacing any previous `.1`) and a fresh one starts. Two files, so the ceiling on disk
-// is 2x the cap and never more.
-//
-// Size is tracked in memory rather than stat()ed per call — one syscall per command is
-// pure waste, and the count only has to be right to within one entry.
 const CALL_LOG_MAX_BYTES = (() => {
   const mb = Number(process.env.BROWSERCTL_CALL_LOG_MAX_MB);
   return Number.isFinite(mb) && mb > 0 ? Math.round(mb * 1024 * 1024) : 8 * 1024 * 1024;
 })();
 let callLogBytes = 0;
 if (CALL_LOG_PATH) {
-  try { callLogBytes = statSync(CALL_LOG_PATH).size; } catch { callLogBytes = 0; }
+  try {
+    callLogBytes = statSync(CALL_LOG_PATH).size;
+  } catch {
+    callLogBytes = 0;
+  }
 }
 let callSeq = 0;
 
@@ -217,7 +163,10 @@ function paramShape(params) {
   if (!params || typeof params !== "object") return null;
   const out = {};
   for (const [k, v] of Object.entries(params)) {
-    if (v === null || v === undefined) { out[k] = "null"; continue; }
+    if (v === null || v === undefined) {
+      out[k] = "null";
+      continue;
+    }
     if (typeof v === "string") out[k] = `str:${v.length}`;
     else if (typeof v === "number" || typeof v === "boolean") out[k] = v;
     else if (Array.isArray(v)) out[k] = `array:${v.length}`;
@@ -231,21 +180,16 @@ function logCall(entry) {
   try {
     const line = JSON.stringify(entry) + "\n";
     if (callLogBytes + line.length > CALL_LOG_MAX_BYTES) {
-      // rename() over an existing path replaces it, so this keeps exactly one old file.
-      try { renameSync(CALL_LOG_PATH, CALL_LOG_PATH + ".1"); } catch {}
+      try {
+        renameSync(CALL_LOG_PATH, CALL_LOG_PATH + ".1");
+      } catch {}
       callLogBytes = 0;
     }
     appendFileSync(CALL_LOG_PATH, line);
     callLogBytes += line.length;
-  } catch (err) {
-    // Logging must never take the bridge down.
-  }
+  } catch (_err) {}
 }
 
-// GET /status (the CLI) and action:"status" (MCP) answer the same question, and used to
-// answer it differently: the GET returned only { extensionConnected }, so the CLI could
-// not report the call log even after the bridge started tracking it. One builder, so a
-// field added for one caller cannot go missing for the other.
 function statusPayload() {
   return {
     bridgeUrl: `http://${HOST === "0.0.0.0" ? "127.0.0.1" : HOST}:${PORT}`,
@@ -263,13 +207,10 @@ function handleCommand(body, res) {
     return sendJson(res, 400, { ok: false, error: "missing 'action'" });
   }
 
-  // The bridge can answer this itself, so an agent that reaches for the name it saw on
-  // the browser_status tool gets the status rather than a redirect to another endpoint.
   if (action === "status") {
     return sendJson(res, 200, { ok: true, result: statusPayload() });
   }
 
-  // Handle local system execution command directly on the bridge host
   if (action === "exec_system_cmd") {
     const { command, cwd, env, timeoutMs } = params || {};
     if (!command || typeof command !== "string") {
@@ -277,7 +218,6 @@ function handleCommand(body, res) {
     }
     const timeout = Math.min(Number(timeoutMs) || 30000, 300000);
 
-    // Merge custom env with process.env if provided
     const mergedEnv = env && typeof env === "object" ? { ...process.env, ...env } : process.env;
 
     execa(command, {
@@ -301,7 +241,7 @@ function handleCommand(body, res) {
             timedOut: Boolean(result.timedOut),
             isCanceled: Boolean(result.isCanceled),
             signal: result.signal || null,
-            error: result.failed ? (result.shortMessage || result.message || null) : null,
+            error: result.failed ? result.shortMessage || result.message || null : null,
           },
         });
       })
@@ -315,13 +255,13 @@ function handleCommand(body, res) {
     return;
   }
 
-  // Chrome reads the file itself, from the bridge host's filesystem, so a bad path fails
-  // silently on the CDP side (the input just stays empty). Check it here, where there is a
-  // filesystem to check against, and say which path was wrong.
-  if (action === "upload") {
+  if (action === "upload" || action === "file_upload") {
     const given = Array.isArray(params?.files) ? params.files : params?.file ? [params.file] : [];
     if (given.length === 0) {
-      return sendJson(res, 400, { ok: false, error: "upload needs 'files' (absolute paths on this machine)" });
+      return sendJson(res, 400, {
+        ok: false,
+        error: "upload needs 'files' (absolute paths on this machine)",
+      });
     }
     const bad = [];
     for (const f of given) {
@@ -345,18 +285,19 @@ function handleCommand(body, res) {
   const message = { id, action, params: params || {} };
   const seq = ++callSeq;
   const startedAt = Date.now();
-  const record = (ok, extra) => logCall({
-    ts: new Date().toISOString(),
-    runId: RUN_ID,
-    runStartedAt: RUN_STARTED_AT,
-    seq,
-    action,
-    tabId: (params && (params.tabId ?? params.tab_id)) ?? null,
-    params: paramShape(params),
-    ok,
-    durationMs: Date.now() - startedAt,
-    ...(extra || {}),
-  });
+  const record = (ok, extra) =>
+    logCall({
+      ts: new Date().toISOString(),
+      runId: RUN_ID,
+      runStartedAt: RUN_STARTED_AT,
+      seq,
+      action,
+      tabId: (params && (params.tabId ?? params.tab_id)) ?? null,
+      params: paramShape(params),
+      ok,
+      durationMs: Date.now() - startedAt,
+      ...(extra || {}),
+    });
 
   const timeoutMs = computeTimeoutMs(action, params);
   const wait = new Promise((resolve, reject) => {
@@ -371,19 +312,15 @@ function handleCommand(body, res) {
     extensionSocket.send(JSON.stringify(message));
   } catch (err) {
     const entry = pending.get(id);
-    if (entry) { clearTimeout(entry.timer); pending.delete(id); }
+    if (entry) {
+      clearTimeout(entry.timer);
+      pending.delete(id);
+    }
     record(false, { failure: "send" });
     return sendJson(res, 502, { ok: false, error: "failed to reach extension: " + err.message });
   }
 
   wait
-    // A command that the extension executed and reported as failed is a CLIENT error
-    // (bad params, wrong state — "tab not found", "not attached", "needs foreground"),
-    // so 400, not 500. This matters for the raw-HTTP integration path the README
-    // documents: a generic client (requests' raise_for_status, axios defaults) turns a
-    // 5xx into a transport exception and usually discards the body, hiding the
-    // actionable `error` message. Transport-level problems keep their own 5xx codes
-    // above (503 no extension, 502 send failed, 504 timeout).
     .then((reply) => {
       record(!!reply.ok, reply.ok ? null : { code: reply.code || null });
       return sendJson(res, reply.ok ? 200 : 400, reply);
@@ -398,25 +335,28 @@ function readBody(req) {
   return new Promise((resolve, reject) => {
     let raw = "";
     let settled = false;
-    const done = (fn, arg) => { if (!settled) { settled = true; fn(arg); } };
+    const done = (fn, arg) => {
+      if (!settled) {
+        settled = true;
+        fn(arg);
+      }
+    };
     req.on("data", (chunk) => {
       if (settled) return;
       raw += chunk;
       if (raw.length > 5_000_000) {
-        // Reject now, but keep letting the stream drain to 'end' (the `settled`
-        // guard above stops us from buffering more into `raw`). Neither destroying
-        // nor pausing the request is safe here: destroying tears down the shared
-        // socket and kills the 400 response we're about to send; pausing leaves the
-        // rest of this oversized body unread on the socket, which then corrupts the
-        // next request if the connection is reused (keep-alive).
         raw = "";
         done(reject, new Error("request body too large"));
       }
     });
     req.on("end", () => {
       if (!raw) return done(resolve, {});
-      try { const parsed = JSON.parse(raw); done(resolve, parsed); }
-      catch { done(reject, new Error("invalid JSON body")); }
+      try {
+        const parsed = JSON.parse(raw);
+        done(resolve, parsed);
+      } catch {
+        done(reject, new Error("invalid JSON body"));
+      }
     });
     req.on("error", (err) => done(reject, err));
   });
@@ -443,16 +383,11 @@ server.on("error", (err) => {
   console.error("bridge server error:", err);
 });
 
-// Last-resort safety nets: log to stderr and keep running instead of dying silently
-// (or crashing the whole process) on a stray/unawaited rejection or thrown error.
 process.on("uncaughtException", (err) => {
-  // A failure to bind the port is fatal, not something to survive: without a socket the
-  // bridge can serve nothing. The previous behaviour (log and keep running) left a silent
-  // hung process that no client could tell apart from a healthy one — and because the
-  // listen error arrives here rather than at server.on("error"), it printed nothing
-  // useful and never exited. Exit loudly instead.
   if (err && err.code === "EADDRINUSE") {
-    console.error(`bridge: cannot listen on ${HOST}:${PORT} — already in use (another bridge running?). Exiting.`);
+    console.error(
+      `bridge: cannot listen on ${HOST}:${PORT} — already in use (another bridge running?). Exiting.`
+    );
     process.exit(1);
   }
   console.error("uncaught exception:", err);
@@ -468,7 +403,7 @@ server.listen(PORT, HOST, () => {
     const mb = (n) => (n / 1024 / 1024).toFixed(1);
     log(
       `call log ON -> ${CALL_LOG_PATH} (${mb(callLogBytes)}MB, rotates at ${mb(CALL_LOG_MAX_BYTES)}MB, ` +
-      `keeps one .1 file; parameter values are never written). Unset BROWSERCTL_CALL_LOG to stop.`
+        `keeps one .1 file; parameter values are never written). Unset BROWSERCTL_CALL_LOG to stop.`
     );
   }
   if (PORT !== 0) {

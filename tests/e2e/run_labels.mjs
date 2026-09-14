@@ -3,6 +3,9 @@
 // about the same elements.
 import http from "node:http";
 import { readFileSync } from "node:fs";
+import { openMainTab, teardown, verifyClean, installReaper } from "./harness.mjs";
+
+installReaper();
 
 const BRIDGE = "http://127.0.0.1:8765";
 const call = (action, params = {}) => new Promise((resolve) => {
@@ -22,8 +25,7 @@ const EXPECT = ["Only me", "Public", "Accept terms", "Subscribe to updates", "Qu
                 "Shipping country", "Dark mode", "Delete item", "Search products"];
 
 const main = async () => {
-  const opened = (await call("new_tab", { url: `http://127.0.0.1:${port}/` })).result;
-  const ownTabId = opened && opened.id;
+  await openMainTab(`http://127.0.0.1:${port}/`);
   // Wait for the fixture to actually be there, not for a fixed number of milliseconds.
   // A fixed 1200ms passed alone and failed when five suites ran back to back — every one
   // of the nine labels reported missing, which reads as a total regression rather than a
@@ -32,12 +34,13 @@ const main = async () => {
   for (let i = 0; i < 25; i++) {
     const probe = await call("get_property", { property: "count", selector: "#plain, #smart, input[type=radio]" });
     if (probe.ok && probe.result && probe.result.value > 0) break;
-    if (i === 24) { console.log("SKIP: fixture never rendered"); srv.close(); process.exit(0); }
+    if (i === 24) { console.log("SKIP: fixture never rendered"); await teardown(); srv.close(); process.exit(0); }
     await new Promise((r) => setTimeout(r, 200));
   }
 
   const snap = (await call("snapshot", { scope: "all", compact: true, maxText: 0 })).result || {};
-  const cv = snap.compactView || "";
+  // compactView exists only when sub-frames were merged in; census is the single-frame view.
+  const cv = snap.compactView || snap.census || "";
   const tree = ((await call("read_page", { mode: "interactive" })).result || {}).tree || "";
 
   console.log(`${"label expected".padEnd(24)} ${"snapshot".padEnd(9)} ${"read_page".padEnd(10)} ${"find".padEnd(6)} click(text)`);
@@ -55,7 +58,13 @@ const main = async () => {
   }
   console.log("-".repeat(64));
   console.log(fails === 0 ? "all label paths agree" : `${fails}/${EXPECT.length} labels are missing from at least one tool`);
-  if (ownTabId != null) await call("close_tab", { id: ownTabId });
+  await teardown();
+  try {
+    await verifyClean(`127.0.0.1:${port}`);
+  } catch (e) {
+    fails++;
+    console.log(`cleanup FAILED: ${e.message}`);
+  }
   srv.close();
   process.exit(fails === 0 ? 0 : 1);
 };

@@ -1,6 +1,3 @@
-// Reflects pipeline health by asking the service worker for its connection
-// state, and lets the user Connect / Disconnect on demand. No /status fetch:
-// when the bridge is down, a fetch would itself log a console error.
 const dot = document.getElementById("dot");
 const status = document.getElementById("status");
 const btn = document.getElementById("toggle");
@@ -18,8 +15,6 @@ function render(state) {
     btn.dataset.act = "disconnect";
     btn.disabled = false;
   } else if (s === "connecting") {
-    // Retries with capped backoff until the bridge answers. Keep Disconnect
-    // available so the user can stop the auto-retry loop while it's dialing.
     set("off", "Connecting...");
     btn.textContent = "Disconnect";
     btn.dataset.act = "disconnect";
@@ -36,9 +31,7 @@ async function refresh() {
   try {
     const state = await chrome.runtime.sendMessage({ __bctl_getState: true });
     render(state);
-  } catch {
-    // Service worker not reachable yet; leave the last rendered state.
-  }
+  } catch {}
 }
 
 btn.addEventListener("click", async () => {

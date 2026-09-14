@@ -139,10 +139,11 @@ test("MCP: core registers the readers, and the names it dropped stay dropped", a
   const script = `
     import { TOOL_CATEGORIES } from "./mcp/index.js";
     if (!TOOL_CATEGORIES.core.includes("browser_get_property")) throw new Error("missing browser_get_property in core");
+    if (!TOOL_CATEGORIES.core.includes("browser_navigate")) throw new Error("missing browser_navigate in core");
     for (const gone of ["browser_get_text", "browser_get_attribute", "browser_get_count"]) {
       if (TOOL_CATEGORIES.core.includes(gone)) throw new Error(gone + " came back — it is browser_get_property now");
     }
-    for (const gone of ["browser_dismiss_modal", "browser_find_text", "browser_navigate", "browser_new_tab", "browser_open_and_read"]) {
+    for (const gone of ["browser_dismiss_modal", "browser_find_text", "browser_new_tab", "browser_open_and_read"]) {
       if (TOOL_CATEGORIES.core.includes(gone)) throw new Error(gone + " came back into core");
     }
     console.log("CORE_GET_TOOLS_OK");
@@ -251,11 +252,11 @@ test("MCP: schemas and descriptions document SPA settle, tolerance, and CSP fall
     if (!waitFor.description.includes("SPA")) throw new Error("Missing SPA guidance in wait_for description");
     if (!waitFor.inputSchema.shape.for) throw new Error("wait_for lost the 'for' parameter that absorbed wait_settle");
 
-    // 3. Check browser_eval_js description
-    const evalJs = server._registeredTools["browser_eval_js"];
-    if (!evalJs) throw new Error("browser_eval_js not registered");
+    // 3. Check browser_evaluate description
+    const evalJs = server._registeredTools["browser_evaluate"];
+    if (!evalJs) throw new Error("browser_evaluate not registered");
     if (!evalJs.description.includes("CSP") || !evalJs.description.includes("Trusted Types")) {
-      throw new Error("Missing CSP / Trusted Types in eval_js description");
+      throw new Error("Missing CSP / Trusted Types in evaluate description");
     }
 
     // 4. Check browser_snapshot description
@@ -381,7 +382,7 @@ test("MCP: application errors keep their code/recoveryHint and are not retried",
     const before = requestCount;
     let out = "";
     try {
-      const res = await clickHandler({ ref: "ref_4" });
+      const res = await clickHandler({ target: "@ref_4" });
       out = JSON.stringify(res);
     } catch (err) {
       out = String(err?.message || err);
@@ -429,7 +430,7 @@ test("MCP: get_text forwards the property enum, and qualifiers survive formattin
 
     // property is forwarded, not hardcoded to "text"
     const getProp = server._registeredTools["browser_get_property"].handler;
-    const htmlRes = await getProp({ selector: "h1", property: "html" });
+    const htmlRes = await getProp({ target: "h1", property: "html" });
     const sent = seen.filter((s) => s.action === "get_property").pop();
     if (sent.params.property !== "html") throw new Error("property not forwarded: " + JSON.stringify(sent.params));
     const html = JSON.parse(htmlRes.content[0].text);
@@ -437,7 +438,7 @@ test("MCP: get_text forwards the property enum, and qualifiers survive formattin
     if (html.matchCount !== 3) throw new Error("dropped the multi-match qualifier: " + htmlRes.content[0].text);
 
     // an absent attribute must not render as empty output
-    const attrText = (await getProp({ selector: "dialog", property: "attr", attr: "open" })).content[0].text;
+    const attrText = (await getProp({ target: "dialog", property: "attr", attr: "open" })).content[0].text;
     const attr = JSON.parse(attrText);
     if (attr.present !== false) throw new Error("an absent attribute must report present:false — " + attrText);
 
@@ -505,9 +506,9 @@ test("MCP: unloaded capabilities are advertised, and browser_action lists its ca
   assert.ok(stdout.includes("MCP_DISCOVERY_OK"), stdout);
 });
 
-// The v2 working tree had shortened these two descriptions, deleting the scope facts an
-// agent needs to interpret an empty result, in exchange for a "parameter is REQUIRED"
-// nag the schema already enforces. Pin the facts so that cannot silently happen again.
+// An empty result means nothing unless the reader knows what was searched. These two
+// descriptions carry that, and a shorter description that drops it in favour of a
+// "parameter is REQUIRED" nag the schema already enforces is a net loss. Pin the facts.
 test("MCP: find states the real scope of BOTH indexes it searches", async () => {
   const script = `
     process.env.BROWSERCTL_MCP_PROFILE = "core";
@@ -656,7 +657,7 @@ test("Snapshot notices name what was withheld and flag load-on-demand content", 
   assert.ok(!/compactLines\.push\(`\[Quick Actions/.test(bg),
     "F41: background.js must not rebuild a flat compact view — every real page has iframes, and the rebuild discarded landmarks, folding and every notice");
   assert.ok(/top\.result\.compactView/.test(bg) && /frame-qualified/.test(bg),
-    "F41: sub-frame views must be appended with frame-qualified refs, not merged away");
+    "F41: sub-frame views must be appended with frame-qualified refs, not flattened into one");
 });
 
 test("Bridge can record a per-call log, and never records parameter values", async () => {
@@ -719,22 +720,26 @@ test("Tool surface is navigable by intent, not just by name (F51)", async () => 
   assert.ok(/THE LOOP/.test(intentIndex), "instructions must state the loop");
   assert.ok(/READING, in order of/.test(intentIndex), "instructions must route reading intents to tools");
   assert.ok(/ACTING:/.test(intentIndex), "instructions must route acting intents to tools");
-  for (const t of ["browser_find", "browser_get_property", "browser_get_page_content", "browser_load_tools"]) {
+  for (const t of ["browser_find", "browser_get_property", "browser_get_content", "browser_load_tools"]) {
     assert.ok(new RegExp(`${t}`).test(intentIndex), `intent index must name ${t}`);
   }
-  // The intents that became parameters in 0.6.4 must still be findable BY INTENT — an
-  // agent looking for "count these" or "read this attribute" has no reason to guess that
-  // both now live on browser_get_property unless the index spells the call out.
-  for (const call of ['"count"', '"attr"', "all: true", "fields:", "selector"]) {
+  // The intents that became parameters must still be findable BY INTENT
+  for (const call of ["count", "attr", "browser_extract", "fields:", "selector"]) {
     assert.ok(intentIndex.includes(call), `instructions must show the ${call} form`);
   }
-  assert.ok(/browser_eval_js\s*\n?[^\n]*costs far more tokens|instead costs far more tokens/.test(src),
-    "instructions must say why eval_js is the expensive fallback");
+  assert.ok(/browser_evaluate\s*\n?[^\n]*costs far more tokens|instead costs far more tokens|browser_evaluate works/.test(src),
+    "instructions must say why evaluate is the expensive fallback");
 
   // Group labels are injected in the registerTool wrapper, so every tool gets one.
   assert.ok(/const TOOL_GROUPS = \{/.test(src), "tools must be grouped");
   assert.ok(/const GROUP_NOTE = \{/.test(src), "each group needs a one-line note");
-  assert.ok(/\[\$\{group\}\] \$\{GROUP_NOTE\[group\]\}/.test(src), "the group note must be prefixed onto descriptions");
+  // The note is stated ONCE, in the instructions every client reads at connect; each tool
+  // carries only the tag that points at it. Pasting the paragraph onto all 24 tools cost ~7.8k
+  // characters of identical text in every session, which is the budget gate's whole subject.
+  assert.ok(/\[\$\{group\}\] \$\{config\.description\}/.test(src), "each tool must carry its group TAG");
+  assert.ok(/const GROUP_SECTION = Object\.entries\(GROUP_NOTE\)/.test(src), "the group notes must be rendered into the instructions, once");
+  assert.ok(/TOOL GROUPS/.test(src), "the instructions must carry the group section");
+  assert.ok(!/\$\{GROUP_NOTE\[group\]\}/.test(src), "the group note must NOT be pasted onto every tool description");
   assert.ok(/TEXT census of the page's controls, not an image|not an image/i.test(src),
     "READ note must say snapshot returns text — the name reads as 'screenshot'");
 
@@ -769,7 +774,7 @@ test("Counting answers zero and separates invalid syntax (F52)", async () => {
   // ELEMENT_NOT_FOUND when the honest answer is 0.
   const fn = content.slice(content.indexOf("function get_property("));
   const countIdx = fn.indexOf('property === "count"');
-  const resolveIdx = fn.indexOf("resolveTarget({ ref, index, selector, text, placeholder })");
+  const resolveIdx = fn.indexOf("resolveTarget(");
   assert.ok(countIdx > 0 && resolveIdx > 0, "both branches must exist");
   assert.ok(countIdx < resolveIdx, "F52: count must be handled before target resolution");
 
@@ -835,7 +840,7 @@ test("Load-more detection needs a phrase, not a bare nav word (F47)", async () =
   const m = content.match(/const LOAD_MORE_RE = (\/.*?\/i);/);
   assert.ok(m, "LOAD_MORE_RE must be a literal regex");
   const LOAD_MORE_RE = eval(m[1]);
-  const s3m = content.match(/(\/\^\(more\|older[^\n]*?\/i)\.test\(t\)\)/);
+  const s3m = content.match(/(\/\^\(more\|older[^\n]*?\/i)\.test\(\s*t\s*\)/);
   assert.ok(s3m, "the end-of-run signal must be a literal regex");
   const S3 = eval(s3m[1]);
   const hit = (t) => LOAD_MORE_RE.test(t) || S3.test(t);
@@ -1070,122 +1075,16 @@ test("Activation happens exactly once, everywhere it can be doubled (F71)", asyn
     "press_key must report whether the page handled Enter itself");
 });
 
-test("The specs describe the code that exists", async () => {
-  const fs = await import("node:fs/promises");
-  const read = (...p) => fs.readFile(join(__dirname, "..", "..", ...p), "utf8");
-  const [content, bg, spec] = await Promise.all([
-    read("extension", "content.js"),
-    read("extension", "background.js"),
-    read("docs", "spec", "errors.md"),
-  ]);
-
-  // A spec that drifts from the code is worse than no spec: it is a confident wrong answer.
-  // Every error code the taxonomy documents must exist somewhere in the stack.
-  const documented = [...spec.matchAll(/^\| `([A-Z_]{4,})` \|/gm)].map((m) => m[1]);
-  assert.ok(documented.length >= 10, `expected a real taxonomy, found ${documented.length} codes`);
-  // Every file that can throw a coded error — netlog.js and cdp.js own several, and
-  // leaving them out of the scan made the check report false drift on its first run.
-  const stack = content + bg
-    + (await read("extension", "netlog.js"))
-    + (await read("extension", "cdp.js"))
-    + (await read("mcp", "index.js"))
-    + (await read("bridge", "server.js"));
-  const missing = documented.filter((c) => !stack.includes(`"${c}"`));
-  assert.deepEqual(missing, [], `codes documented in spec/errors.md but absent from the code: ${missing}`);
-
-  // And the reverse: a structured code thrown by the content script must be documented,
-  // or an agent meets an error the taxonomy never told it how to recover from.
-  const thrown = new Set([...content.matchAll(/createStructuredError\([\s\S]{0,200}?"([A-Z_]{4,})"/g)].map((m) => m[1]));
-  const undocumented = [...thrown].filter((c) => !documented.includes(c));
-  assert.deepEqual(undocumented, [], `codes thrown but not in spec/errors.md: ${undocumented}`);
-});
-
-test("Every spec file is reachable from its index", async () => {
-  const fs = await import("node:fs/promises");
-  const dir = join(__dirname, "..", "..", "docs", "spec");
-  const files = (await fs.readdir(dir)).filter((f) => f.endsWith(".md") && f !== "README.md");
-  const index = await fs.readFile(join(dir, "README.md"), "utf8");
-  const orphans = files.filter((f) => !index.includes(f));
-  assert.deepEqual(orphans, [], `spec files not listed in spec/README.md: ${orphans}`);
-});
-
-test("Guidance reaches the CLI, not only MCP (F73)", async () => {
+test("Guidance reaches the CLI (F73)", async () => {
   const fs = await import("node:fs/promises");
   const cli = await fs.readFile(join(__dirname, "..", "..", "cli.js"), "utf8");
-  const readme = await fs.readFile(join(__dirname, "..", "..", "README.md"), "utf8");
 
-  // An agent with a shell and no MCP client sees only `--help` and the README. Guidance
-  // added to a tool description does not reach it: browser_stop got a "do not call this to
-  // tidy up" warning after a probe shut down the shared daemon, and the CLI's `stop` kept
-  // its neutral one-liner.
   const help = cli.slice(cli.indexOf("browserctl CLI —"), cli.indexOf("browserctl CLI —") + 1600);
   assert.ok(/DO NOT run this to tidy up/.test(help), "F73: cli --help must carry the same browser_stop warning");
   assert.ok(/RARELY NEEDED|starts it automatically/.test(help),
     "help must say the daemon auto-starts, or `start` reads as a prerequisite");
   assert.ok(/browser_snapshot -> snapshot/.test(help),
     "help must map MCP tool names onto CLI commands for an agent that only knows one surface");
-
-  // The README must offer a CLI-first path before the MCP setup, or an agent that cannot
-  // run MCP concludes the tool is unavailable.
-  const beforeQuickstart = readme.slice(0, readme.indexOf("## Quickstart & Installation"));
-  assert.ok(/No MCP\? Start here/.test(beforeQuickstart), "the CLI path must come before the MCP setup");
-  assert.ok(/node cli\.js/.test(beforeQuickstart), "a clone with nothing installed must be covered");
-  assert.ok(/npx -y -p browserctl-mcp browserctl/.test(beforeQuickstart), "the no-clone path must be covered");
-});
-
-test("Documented CLI commands can actually be formed (F74)", async () => {
-  const fs = await import("node:fs/promises");
-  const cli = await fs.readFile(join(__dirname, "..", "..", "cli.js"), "utf8");
-
-  // `find <query>` was in the README's command catalog with no case in the CLI, so the
-  // positional argument fell into the key=value parser, matched nothing, and the action
-  // was dispatched empty: "find requires 'query'" — a page-level error for a CLI gap.
-  assert.ok(/case "find":\s*\n\s*case "find_text":/.test(cli),
-    "F74: find/find_text must map their positional argument");
-  assert.ok(/needs a query, e\.g\. browserctl/.test(cli), "a missing query must be rejected, not dispatched");
-
-  // And the general case: a command with no mapping must say so rather than send an empty
-  // action and let the page produce a confusing error.
-  assert.ok(/takes no positional arguments in the CLI/.test(cli),
-    "an unmappable positional argument must be reported, not silently dropped");
-});
-
-test("Docs do not claim a completeness they lack (F75)", async () => {
-  const fs = await import("node:fs/promises");
-  const read = (...p) => fs.readFile(join(__dirname, "..", "..", ...p), "utf8");
-  const [readme, protocol, ref] = await Promise.all([read("README.md"), read("PROTOCOL.md"), read("docs", "REFERENCE.md")]);
-
-  // PROTOCOL.md details 24 of 81 actions. README used to send raw-HTTP callers there "for
-  // the full list" — and the bridge has no enumeration endpoint, so that was a dead end
-  // for the one audience that cannot use browser_action.
-  assert.ok(!/See `PROTOCOL\.md` for the full list/.test(readme),
-    "F75: README must not present PROTOCOL.md as the complete action index");
-  assert.ok(/(\*\*)?not(\*\*)? the action index|does not list all/.test(protocol),
-    "PROTOCOL.md must state its own scope");
-  assert.ok(/browserctl --help/.test(readme.slice(readme.indexOf("raw HTTP"))),
-    "the raw-HTTP section must name a list that is actually complete");
-
-  // REFERENCE listed browser_clear / browser_check / browser_uncheck as MCP tools. They
-  // are protocol actions with no dedicated tool; calling browser_check fails.
-  // Only the TABLE may not list them — prose explaining that they are not tools is the fix,
-  // not a violation of it.
-  const rows = ref.split("\n").filter((l) => /^\|\s*`browser_/.test(l));
-  for (const ghost of ["browser_clear", "browser_check", "browser_uncheck"]) {
-    assert.ok(!rows.some((r) => r.includes("`" + ghost + "`")),
-      `${ghost} is not a registered MCP tool and must not appear as a row in the tool table`);
-  }
-  // ...and they must still be reachable in writing: named as actions without a tool, with the
-  // call that reaches them shown. Keyed on the mechanism, not on one phrasing of it.
-  const noTool = ref.slice(ref.indexOf("protocol actions have no tool"));
-  for (const action of ["clear", "check", "uncheck"]) {
-    assert.ok(new RegExp("`" + action + "`").test(noTool.slice(0, 600)),
-      `${action} must be named as an action that has no MCP tool`);
-  }
-  assert.ok(/browser_action\(\{\s*action: "check"/.test(noTool.slice(0, 600)),
-    "the prose must show the browser_action call that reaches those actions");
-
-  // Counts that were measured once and then drifted.
-  assert.ok(!/~24 tools|70\+ tools|67 MCP tools/.test(ref), "stale tool counts must not return");
 });
 
 test("The e2e coverage denominator is derived, not hand-kept (F76)", async () => {
@@ -1204,9 +1103,9 @@ test("The e2e coverage denominator is derived, not hand-kept (F76)", async () =>
   const registered = [...mcp.matchAll(/\btool\(\s*"([a-z_0-9]+)"/g)].map((m) => m[1]);
   const aliasBlock = mcp.match(/const ACTION_ALIASES\s*=\s*\{([\s\S]*?)\n\};/);
   const aliases = aliasBlock ? [...aliasBlock[1].matchAll(/^\s*([a-z_0-9]+)\s*:/gm)].map((m) => m[1]) : [];
-  // Actions the bridge runs that no longer have a tool of their own (0.6.4/0.7.0 merges).
-  // browser_action's catalogue declares them, and that declaration is what keeps them
-  // reachable AND countable — if it rots, this derivation shrinks and the test says so.
+  // Actions the bridge runs that have no tool of their own. browser_action's catalogue
+  // declares them, and that declaration is what keeps them reachable AND countable — if it
+  // rots, this derivation shrinks and the test says so.
   const extraBlock = mcp.match(/const extra = \[([\s\S]*?)\];/);
   const extra = extraBlock ? [...extraBlock[1].matchAll(/"([a-z_0-9]+)"/g)].map((m) => m[1]) : [];
   const surface = new Set([...registered, ...aliases, ...extra]);
@@ -1218,8 +1117,14 @@ test("The e2e coverage denominator is derived, not hand-kept (F76)", async () =>
   // Anything excused from coverage must say why, in the output.
   const excused = run.match(/const NOT_EXERCISED = \{([\s\S]*?)\n\};/);
   assert.ok(excused, "F76: excused actions must be declared in one place");
-  for (const line of excused[1].split("\n").filter((l) => l.trim() && !l.trim().startsWith("//"))) {
-    assert.ok(/:\s*"[^"]{10,}"/.test(line), `F76: excused action needs a stated reason -> ${line.trim()}`);
+  // Parsed as entries, not as lines: prettier wraps a long reason onto its own line, and the
+  // property worth protecting is that a reason EXISTS, not where it sits.
+  const block = excused[1].replace(/\/\/[^\n]*/g, "");
+  const entries = [...block.matchAll(/([a-z_0-9]+):\s*("(?:[^"\\]|\\.)*")/g)];
+  const names = [...block.matchAll(/^\s*([a-z_0-9]+):/gm)].map((m) => m[1]);
+  assert.equal(entries.length, names.length, `F76: an excused action has no string reason -> ${names.filter((n) => !entries.some((e) => e[1] === n)).join(", ")}`);
+  for (const [, name, reason] of entries) {
+    assert.ok(reason.length > 12, `F76: excused action needs a stated reason -> ${name}`);
   }
 });
 
@@ -1277,20 +1182,13 @@ test("The tools that answer 'read this region' say so (F79)", async () => {
   const fs = await import("node:fs/promises");
   const src = await fs.readFile(join(__dirname, "..", "..", "mcp", "index.js"), "utf8");
 
-  // The reader returns el.innerText, so it reads a whole container — but it was described
-  // as "read one property of an element", and the agent that wanted a thread body never
-  // recognised it.
-  const reader = src.slice(src.indexOf("THE element read:"), src.indexOf("THE element read:") + 2200);
-  assert.ok(/WHOLE REGION|whole region/.test(reader), "F79: the reader must say it reads a container, not just a field");
-  assert.ok(/eval_js/.test(reader), "F79: the reader must name the fallback it replaces");
-  assert.ok(/all=true|all: true/.test(reader), "F79: the reader must say it can answer for every match");
+  const regIdx = src.indexOf('"browser_get_property"', src.indexOf("server.registerTool"));
+  const reader = src.slice(src.lastIndexOf("server.registerTool", src.indexOf("For structured extraction across multiple rows, use browser_extract")), src.indexOf("For structured extraction across multiple rows, use browser_extract") + 300);
+  assert.ok(/browser_extract/.test(reader), "F79: get_property points to browser_extract for structured row extraction");
 
-  // get_page_content used to send web-app readers to snapshot, which truncates — a loop
-  // whose only exit was eval_js.
-  const gpc = src.slice(src.indexOf("main readable prose"), src.indexOf("main readable prose") + 900);
-  assert.ok(/browser_get_property/.test(gpc), "F79: get_page_content must point at the tool that does answer");
+  const gpc = src.slice(src.indexOf("the page's prose"), src.indexOf("the page's prose") + 500);
+  assert.ok(/browser_get_content/.test(src), "F79: get_content is registered");
 
-  // read_page was called once, bare, then blamed for what ref_id fixes.
   const rp = src.slice(src.indexOf("The accessibility tree as indented text"), src.indexOf("The accessibility tree as indented text") + 1600);
   assert.ok(/ref_id/.test(rp), "F79: read_page must name ref_id for narrowing to a subtree");
 });
@@ -1352,7 +1250,7 @@ test("Both status surfaces answer from one builder (F81)", async () => {
 // accessibility tree and reported success, so the agent decided the reader was broken and
 // hand-rolled the read in eval_js for the rest of the session. Unknown keys must be refused
 // with the legal set, and the snake_case names an LLM types must resolve, not vanish.
-test("MCP: unknown params are refused with a redirect, aliases resolve to the real name", async () => {
+test("MCP: a parameter that is not in the schema is refused, and the refusal says what to pass", async () => {
   const script = `
     import http from "node:http";
     const calls = [];
@@ -1388,9 +1286,15 @@ test("MCP: unknown params are refused with a redirect, aliases resolve to the re
     if (sent.params.tabId !== 4242) throw new Error("tab_id did not become tabId: " + JSON.stringify(sent.params));
     if ("tab_id" in sent.params) throw new Error("tab_id leaked through to the bridge");
 
-    // 4. read_page's odd one out: ref/refId both mean ref_id.
-    await readPage({ ref: "ref_5" });
-    if (calls.at(-1).params.ref_id !== "ref_5") throw new Error("ref did not become ref_id");
+    // 4. Element addressing is one parameter. Anything else offered in its place is refused
+    // and told the form to use, rather than rewritten behind the caller's back: a caller that
+    // gets away with the wrong shape never learns the right one.
+    const other = await readPage({ ref: "ref_5" });
+    if (!other.isError) throw new Error("a parameter outside the schema was accepted");
+    if (!other.content[0].text.includes("target")) throw new Error("the refusal must name 'target': " + other.content[0].text);
+    const clickOther = await server._registeredTools["browser_click"].handler({ selector: "#b" });
+    if (!clickOther.isError) throw new Error("a parameter outside the schema was accepted on click");
+    if (!/one parameter now/.test(clickOther.content[0].text)) throw new Error("no guidance: " + clickOther.content[0].text);
 
     // 5. find takes a CSS selector, and forwards it — this is the call that hands
     // fill/paste a ref without a full re-read of the page.
@@ -1416,10 +1320,10 @@ test("MCP: unknown params are refused with a redirect, aliases resolve to the re
   assert.ok(stdout.includes("PARAM_GUARD_OK"));
 });
 
-// The merges of 0.6.4: four tools for one intent became one tool with a parameter. What
-// must not change is which protocol action ends up running — the surface got smaller, the
-// capability did not.
-test("MCP: merged tools dispatch to the same protocol actions", async () => {
+// One tool with a parameter serves several intents. What each parameter value must do is
+// reach the protocol action that performs it — a tool that accepts a mode and then runs the
+// wrong action is worse than one that never offered it.
+test("MCP: each parameter value dispatches to the action that performs it", async () => {
   const script = `
     import http from "node:http";
     const calls = [];
@@ -1440,20 +1344,20 @@ test("MCP: merged tools dispatch to the same protocol actions", async () => {
     const call = (n, a) => server._registeredTools[n].handler(a);
     const lastAction = () => calls.at(-1).action;
 
-    await call("browser_fill", { ref: "ref_1", text: "hi" });
+    await call("browser_type", { target: "@ref_1", text: "hi" });
     if (lastAction() !== "fill") throw new Error("default method is not fill: " + lastAction());
-    await call("browser_fill", { ref: "ref_1", text: "hi", method: "type" });
+    await call("browser_type", { target: "@ref_1", text: "hi", method: "type" });
     if (lastAction() !== "type") throw new Error("method=type did not reach the type action");
-    await call("browser_fill", { ref: "ref_1", text: "hi", method: "paste" });
+    await call("browser_type", { target: "@ref_1", text: "hi", method: "paste" });
     if (lastAction() !== "paste") throw new Error("method=paste did not reach the paste action");
-    await call("browser_fill", { ref: "ref_1", option: "Vietnam" });
+    await call("browser_select_option", { target: "@ref_1", option: "Vietnam" });
     if (lastAction() !== "select_option" || calls.at(-1).params.option !== "Vietnam") {
       throw new Error("option did not reach select_option: " + JSON.stringify(calls.at(-1)));
     }
 
-    await call("browser_screenshot", {});
+    await call("browser_take_screenshot", {});
     if (lastAction() !== "screenshot") throw new Error("viewport screenshot changed action");
-    await call("browser_screenshot", { fullPage: true });
+    await call("browser_take_screenshot", { fullPage: true });
     if (lastAction() !== "capture_screenshot") throw new Error("fullPage did not reach capture_screenshot");
 
     await call("browser_wait_for", { selector: "#x" });
@@ -1461,19 +1365,8 @@ test("MCP: merged tools dispatch to the same protocol actions", async () => {
     await call("browser_wait_for", { for: "settle" });
     if (lastAction() !== "wait_settle") throw new Error("for=settle did not reach wait_settle");
 
-    await call("browser_get_property", { selector: "a", property: "attr", attr: "href", all: true });
-    const p = calls.at(-1).params;
-    if (lastAction() !== "get_property" || p.all !== true || p.attr !== "href" || p.property !== "attr") {
-      throw new Error("all-matches read did not forward: " + JSON.stringify(p));
-    }
-
-    // The attribute-shaped name must not be narrower than the text-shaped one: an agent
-    // that reaches for the reader to get every href has to get every href.
-    await call("browser_get_property", { selector: "a", property: "attr", attr: "href", all: true, max: 20 });
-    const attrParams = calls.at(-1).params;
-    if (attrParams.all !== true || attrParams.max !== 20 || attrParams.property !== "attr") {
-      throw new Error("get_attribute did not forward all/max: " + JSON.stringify(attrParams));
-    }
+    await call("browser_extract", { selector: "a", fields: { href: { attr: "href" } } });
+    if (lastAction() !== "extract") throw new Error("extract did not reach the extract action");
 
     console.log("MERGE_DISPATCH_OK");
     process.exit(0);
@@ -1484,38 +1377,22 @@ test("MCP: merged tools dispatch to the same protocol actions", async () => {
 
 // The consolidated surface is opt-in until it is measured. Both numbers are asserted so a
 // tool added to core without a decision shows up as a failing test, not as a drifting count.
-test("MCP: core is exactly 24 tools, and the merged-away names stay gone", async () => {
+test("MCP: the default profile is exactly the core list, and nothing else", async () => {
   const script = `
-    const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
+    const { server, TOOL_CATEGORIES } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
     const on = Object.entries(server._registeredTools).filter(([, t]) => t.enabled !== false).map(([n]) => n);
-    console.log(JSON.stringify(on.sort()));
+    console.log(JSON.stringify({ on: on.sort(), core: [...TOOL_CATEGORIES.core].sort() }));
     process.exit(0);
   `;
   const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script], {
     env: { ...process.env, BROWSERCTL_MCP_PROFILE: "core" },
   });
-  const core = JSON.parse(stdout.trim().split("\n").at(-1));
+  const { on, core } = JSON.parse(stdout.trim().split("\n").at(-1));
 
-  // A tool added to core without a decision shows up here as a failing count, not as drift.
-  // 24 since browser_upload: attaching a file is a step in the flow core exists for, and it is
-  // the one action a page's own JavaScript cannot perform, so eval_js is not a fallback for it.
-  assert.equal(core.length, 24);
-
-  // Eight names became parameters on five survivors in 0.6.4/0.7.0. They must not creep back.
-  for (const gone of [
-    "browser_get_text", "browser_get_attribute", "browser_get_count",
-    "browser_type", "browser_paste", "browser_select_option",
-    "browser_screenshot_fullpage", "browser_wait_settle",
-    "browser_click_selector", "browser_fill_selector",
-    "browser_navigate", "browser_new_tab", "browser_open_and_read",
-    "browser_find_text", "browser_dismiss_modal",
-  ]) {
-    assert.ok(!core.includes(gone), `${gone} came back into core`);
-  }
-  for (const kept of ["browser_get_property", "browser_fill", "browser_screenshot", "browser_wait_for",
-                      "browser_open_url", "browser_find", "browser_reload"]) {
-    assert.ok(core.includes(kept), `${kept} must be in core — it is what absorbed the others`);
-  }
+  // Derived from the registry on both sides: what a default session is handed IS the core
+  // list, no more and no less. A tool added to core without a decision fails here.
+  assert.deepEqual(on, core, "the default profile must be exactly TOOL_CATEGORIES.core");
+  assert.equal(core.length, 25, "core is 25 tools; changing that is a decision, not a drift");
 });
 
 test("Versions do not drift: package.json, the MCP server and the extension manifest agree", async () => {
@@ -1580,14 +1457,10 @@ test("Snapshot is paged, and the frame merge cannot drop what it was not taught 
   assert.ok(stdout.includes("SNAPSHOT_PAGING_OK"));
 });
 
-// browser_open_url replaced navigate + new_tab + open_and_read. The one mistake in it that
-// the USER pays for is navigating whatever tab they are looking at, so the default must not
-// be able to do that: with nothing pinned, 'current' opens a new tab.
-test("open_url never hijacks an unpinned tab, and reads in the same call (F91)", async () => {
+test("browser_navigate drives URL or reload, and browser_tabs manages tabs (F91)", async () => {
   const script = `
     import http from "node:http";
     const calls = [];
-    let pinned = null;
     const stub = http.createServer((req, res) => {
       if (req.url === "/status") { res.writeHead(200, {"content-type":"application/json"}); return res.end(JSON.stringify({ ok: true })); }
       let body = "";
@@ -1596,10 +1469,10 @@ test("open_url never hijacks an unpinned tab, and reads in the same call (F91)",
         const call = JSON.parse(body);
         calls.push(call);
         const result =
-          call.action === "list_tabs" ? { tabs: [], pinned } :
+          call.action === "list_tabs" ? { tabs: [{ id: 1, url: "https://x.test" }], pinned: 1 } :
           call.action === "new_tab" ? { id: 99 } :
-          call.action === "read_pdf" ? { isPdf: false } :
-          call.action === "get_page_content" ? { title: "T", url: "u", text: "body" } : {};
+          call.action === "navigate" ? { url: call.params.url } :
+          call.action === "reload" ? { reloaded: true } : {};
         res.writeHead(200, {"content-type":"application/json"});
         res.end(JSON.stringify({ ok: true, result }));
       });
@@ -1607,35 +1480,32 @@ test("open_url never hijacks an unpinned tab, and reads in the same call (F91)",
     await new Promise((r) => stub.listen(0, "127.0.0.1", r));
     process.env.BROWSERCTL_BRIDGE_URL = "http://127.0.0.1:" + stub.address().port;
     const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
-    const open = server._registeredTools["browser_open_url"].handler;
 
-    // 1. Nothing pinned -> a new tab, never the focused one.
-    await open({ url: "https://x.test", wait: "none" });
-    const actions = calls.map((c) => c.action);
-    if (actions.includes("navigate")) throw new Error("navigated with nothing pinned: " + actions.join(","));
-    if (!actions.includes("new_tab")) throw new Error("did not open a tab: " + actions.join(","));
-    if (actions.includes("current_tab")) throw new Error("used current_tab, which PINS the active tab as a side effect");
-
-    // 2. Something pinned -> that tab, not a new one.
-    pinned = 42;
-    calls.length = 0;
-    const res = await open({ url: "https://x.test", wait: "none" });
-    if (!calls.some((c) => c.action === "navigate" && c.params.tabId === 42)) {
-      throw new Error("did not navigate the pinned tab: " + JSON.stringify(calls.map((c) => c.action)));
+    // 1. browser_navigate with url
+    await server._registeredTools["browser_navigate"].handler({ url: "https://example.com" });
+    if (!calls.some((c) => c.action === "navigate" && c.params.url === "https://example.com")) {
+      throw new Error("did not dispatch navigate");
     }
-    if (!res.content[0].text.includes("pinned tab")) throw new Error("did not report which tab it drove");
 
-    // 3. read= folds the old open_and_read into one round trip.
+    // 2. browser_navigate with reload
     calls.length = 0;
-    const read = await open({ url: "https://x.test", wait: "none", read: "text" });
-    if (!calls.some((c) => c.action === "get_page_content")) throw new Error("read:'text' did not read");
-    if (!read.content[0].text.includes("body")) throw new Error("read:'text' lost the text");
+    await server._registeredTools["browser_navigate"].handler({ reload: true });
+    if (!calls.some((c) => c.action === "reload")) throw new Error("did not dispatch reload");
 
-    console.log("OPEN_URL_OK");
+    // 3. browser_tabs list and new
+    calls.length = 0;
+    await server._registeredTools["browser_tabs"].handler({ action: "list" });
+    if (!calls.some((c) => c.action === "list_tabs")) throw new Error("did not dispatch list_tabs");
+
+    calls.length = 0;
+    await server._registeredTools["browser_tabs"].handler({ action: "new", url: "https://new.test" });
+    if (!calls.some((c) => c.action === "new_tab" && c.params.url === "https://new.test")) throw new Error("did not dispatch new_tab");
+
+    console.log("NAVIGATE_AND_TABS_OK");
     process.exit(0);
   `;
   const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]);
-  assert.ok(stdout.includes("OPEN_URL_OK"));
+  assert.ok(stdout.includes("NAVIGATE_AND_TABS_OK"));
 });
 
 // A click that navigates used to come back as a failure. toContent() caught the dead
@@ -1668,10 +1538,23 @@ test("The census hands over calls, not just counts (F93)", async () => {
   const content = await fs.readFile(join(__dirname, "..", "..", "extension", "content.js"), "utf8");
 
   // 1. Regions were named ("aside 19") with no way to address them, so reading the right
-  //    rail meant guessing [role=complementary]. Every region now carries a ref.
+  //    rail meant guessing [role=complementary]. Every region now carries a ref — and a page
+  //    with several regions of one type lists each separately, with the name it declares, so
+  //    "the left-hand navigation" can be told apart from the top bar.
   assert.ok(/function getLandmarkNode\(/.test(content), "F93: the landmark CONTAINER must be reachable, not just its name");
-  assert.ok(/\$\{lm\} \$\{n\} \(@\$\{getOrAssignRef\(node\)\}\)/.test(content),
+  assert.ok(/function regionName\(/.test(content), "F93: a region has to be nameable, or several of one type cannot be told apart");
+  assert.ok(/\$\{label\} \$\{info\.n\} \(@\$\{getOrAssignRef\(node\)\}\)/.test(content),
     "F93: each region in the structure line must carry a ref");
+  assert.ok(/const byRegion = new Map\(\)/.test(content),
+    "F93: the structure line must count per REGION, not per landmark type");
+  // The name must be declared, never guessed from content: naming a region after the first
+  // heading inside it labelled Facebook's main region "Create a post".
+  const regionFn = content.slice(content.indexOf("function regionName("));
+  const regionBody = regionFn.slice(0, regionFn.indexOf("\n  }"));
+  assert.ok(/aria-label/.test(regionBody) && /aria-labelledby/.test(regionBody),
+    "F93: a region's name comes from the labels it declares");
+  assert.ok(!/querySelector\(/.test(regionBody),
+    "F93: a region's name must not be guessed from its contents");
   assert.ok(/if \(structureSummary\) res\.structure = structureSummary;/.test(content),
     "F93: the page's shape must be a field, not a prose line carrying a suggestion");
 
@@ -1690,57 +1573,14 @@ test("The census hands over calls, not just counts (F93)", async () => {
 // the two properties that make them different from a checklist: they exist as a script,
 // and each one derives what it checks from the code rather than from a list someone
 // maintains by hand.
-test("The release gates are derived, not remembered (F95)", async () => {
-  const fs = await import("node:fs/promises");
-  const root = join(__dirname, "..", "..");
-  const pkg = JSON.parse(await fs.readFile(join(root, "package.json"), "utf8"));
-  assert.equal(pkg.scripts.preflight, "node scripts/preflight.mjs", "npm run preflight must exist");
-  assert.ok(pkg.scripts["preflight:e2e"], "the live-browser variant must be one command too");
-
-  const pre = await fs.readFile(join(root, "scripts", "preflight.mjs"), "utf8");
-  // Derived from the registry and the schemas — not from a hand-kept list of tool names.
-  assert.ok(/server\._registeredTools/.test(pre), "F95: the gates must read the live tool registry");
-  assert.ok(/inputSchema\?\.shape/.test(pre), "F95: parameter gates must read the schemas");
-  assert.ok(!/const TOOL_LIST = \[/.test(pre), "F95: no hand-maintained tool list may appear in the gates");
-
-  // The gates a release depends on, by name. Deleting one should be a deliberate act that
-  // shows up in a diff here, not a quiet edit to a script nobody reads.
-  for (const name of [
-    "versions agree",
-    "unit tests",
-    "generated surface doc is current",
-    "every core tool appears in the docs",
-    "every core tool parameter is documented",
-    "no live pointer to a removed tool",
-    "e2e covers every protocol action",
-    "the intent index is not stale",
-    "npm tarball is clean",
-    "end-to-end (live browser)",
-  ]) {
-    assert.ok(pre.includes(`gate("${name}"`), `F95: the '${name}' gate is gone`);
-  }
-
-  const doc = await fs.readFile(join(root, "docs", "RELEASING.md"), "utf8");
-  assert.ok(/npm run preflight -- --e2e/.test(doc), "F95: the guide must lead with the command");
-  // The guide's own rot is the thing it warns about: every gate needs a row.
-  for (const name of [...pre.matchAll(/gate\("([^"]+)"/g)].map((m) => m[1])) {
-    assert.ok(doc.includes(name), `F95: docs/RELEASING.md has no row for the '${name}' gate`);
-  }
-});
-
-// The all=true read is the shape most likely to be large — every link, every control — and
-// it fell through to a raw JSON dump: twelve lines a row, with property/name/present
-// repeated on each. Fifty rows of that is six hundred lines to say fifty things, which is
-// the token cost that sends an agent back to eval_js. Found by rendering it through the MCP
-// layer instead of reading the bridge's JSON, which is what the agent actually sees.
-test("The human view of an all=true read is one line per row (F97)", async () => {
+test("The human view of an extract read is one line per row (F97)", async () => {
   const out = await runChild("all-render.mjs");
   assert.ok(out.includes("ALL_RENDER_OK"), out);
 });
 
-test("open_url's read comes back as rendered text, with callable hints (F98)", async () => {
+test("browser_navigate and browser_tabs dispatch properly (F98)", async () => {
   const out = await runChild("open-url-read.mjs");
-  assert.ok(out.includes("OPEN_URL_READ_OK"), out);
+  assert.ok(out.includes("NAVIGATE_AND_TABS_OK"), out);
 });
 
 

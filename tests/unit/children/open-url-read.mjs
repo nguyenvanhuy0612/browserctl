@@ -13,31 +13,31 @@ const stub = http.createServer((req, res) => {
   req.on("data", (c) => (body += c));
   req.on("end", () => {
     const { action, params } = JSON.parse(body);
-    const result =
-      action === "list_tabs" ? { tabs: [], pinned: null }
-      : action === "new_tab" ? { id: 7 }
-      : action === "read_pdf" ? { isPdf: false }
-      : action === "snapshot" ? {
-          census: '  [@ref_1] <a> "x"',
-          structure: "main 3",
-          window: { offset: 0, shown: 1, inScope: 1 },
-        }
-      : {};
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, result }));
+      const result =
+        action === "list_tabs" ? { tabs: [], pinned: null }
+        : action === "new_tab" ? { id: 7 }
+        : action === "navigate" ? { url: "https://x.test" }
+        : {};
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, result }));
+    });
   });
-});
-await new Promise((r) => stub.listen(0, "127.0.0.1", r));
-process.env.BROWSERCTL_BRIDGE_URL = "http://127.0.0.1:" + stub.address().port;
+  await new Promise((r) => stub.listen(0, "127.0.0.1", r));
+  process.env.BROWSERCTL_BRIDGE_URL = "http://127.0.0.1:" + stub.address().port;
 
-const { server } = await import(new URL("../../../mcp/index.js", import.meta.url).href);
-const out = (await server._registeredTools.browser_open_url.handler({
-  url: "https://x.test", wait: "none", read: "snapshot",
-})).content[0].text;
+  const { server } = await import(new URL("../../../mcp/index.js", import.meta.url).href);
+  const navOut = (await server._registeredTools.browser_navigate.handler({
+    url: "https://x.test",
+  })).content[0].text;
+  const navObj = JSON.parse(navOut);
+  if (navObj.url !== "https://x.test") throw new Error("navigate must return url: " + navOut);
 
-const o = JSON.parse(out); // a read is structured now, not prose
-if (o.tabId !== 7) throw new Error("the tab it drove must be a field: " + out);
-if (!String(o.census).includes("[@ref_1]")) throw new Error("the census must be in the census field: " + out);
-if (/\[Next:|suggestions/.test(out)) throw new Error("a result must carry no advice block: " + out);
-console.log("OPEN_URL_READ_OK");
-process.exit(0);
+  const tabOut = (await server._registeredTools.browser_tabs.handler({
+    action: "new",
+    url: "https://x.test",
+  })).content[0].text;
+  const tabObj = JSON.parse(tabOut);
+  if (tabObj.id !== 7) throw new Error("new tab must return id: " + tabOut);
+
+  console.log("NAVIGATE_AND_TABS_OK");
+  process.exit(0);

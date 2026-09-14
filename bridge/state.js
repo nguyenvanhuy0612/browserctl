@@ -1,6 +1,3 @@
-// State manager for browserctl daemon lifecycle
-// Stores state in ~/.browserctl/daemon.json
-
 import fs from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";

@@ -34,15 +34,6 @@ const size = (v) => (v === undefined ? 0 : JSON.stringify(v).length);
 
 // Read-only actions only. Anything that writes to the page, the account, the user's
 // tabs or the filesystem is excluded — this audit runs against real sites.
-const SKIP = new Set([
-  "exec_system_cmd", "stop", "start", "reload_extension", "close_tab", "switch_tab",
-  "focus_window", "new_tab", "navigate", "go_back", "go_forward", "reload",
-  "set_cookie", "delete_cookies", "storage_set", "storage_remove", "storage_clear",
-  "net_clear", "replay", "record_start", "record_stop", "print_pdf", "spoof_visibility",
-  "coordinate_click", "coordinate_drag", "insert_text", "click_selector", "fill_selector",
-  "click", "fill", "type", "paste", "press_key", "select_option", "dismiss", "close_modal",
-  "ungroup_tab", "group_tab", "cdp_detach", "load_tools", "unload_tools", "audit",
-]);
 
 async function main() {
   // Open our OWN tab. Navigating the pinned target hijacks whatever tab the user is

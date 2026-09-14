@@ -1,35 +1,18 @@
-// Light network capture using chrome.webRequest only (NO chrome.debugger, so no
-// "is being debugged" banner). Trade-off: we get method/url/type/status/headers/
-// timing but NOT response bodies — that's expected and acceptable here.
-//
-// MANIFEST REQUIREMENTS (added by the integrator, not here):
-//   - "permissions" must include "webRequest"
-//   - "host_permissions" must include "<all_urls>"
-// Without these the listeners below silently receive nothing.
-
-
 const MAX_BUFFER = 2000;
 
-// tabIds currently capturing.
 const capturing = new Set();
 
-// tabId -> { list: [record], byId: Map(requestId -> record) }
-// `list` keeps insertion order (and is what we cap/shift); `byId` gives O(1) merge.
 const buffers = new Map();
 
-// tabId -> number of currently in-flight requests. This is maintained for ALL
-// tabs, independent of the `capturing` set, so `wait_network_idle` works even
-// when detailed capture was never started. Updated in the webRequest listeners
-// below (incremented on start, decremented on completion/error, floored at 0).
-// Per-tab in-flight requests, tracked by requestId with a start timestamp so a
-// request that never reports completion (long-poll, hung socket, aborted on
-// navigation) can be pruned by age instead of leaking and blocking idle forever.
-const inFlight = new Map(); // tabId -> Map(requestId -> startMs)
+const inFlight = new Map();
 const STALE_MS = 15000;
 
 function incInFlight(tabId, requestId) {
   let m = inFlight.get(tabId);
-  if (!m) { m = new Map(); inFlight.set(tabId, m); }
+  if (!m) {
+    m = new Map();
+    inFlight.set(tabId, m);
+  }
   m.set(requestId, Date.now());
 }
 
@@ -38,7 +21,6 @@ function decInFlight(tabId, requestId) {
   if (m) m.delete(requestId);
 }
 
-// Count in-flight requests for a tab, pruning any older than STALE_MS first.
 function inFlightCount(tabId) {
   const m = inFlight.get(tabId);
   if (!m) return 0;
@@ -56,9 +38,6 @@ function getBuffer(tabId) {
   return b;
 }
 
-// Drop all per-tab state for a closed tab. Called from background.js's
-// tabs.onRemoved so buffers/inFlight/capturing don't accumulate one entry per
-// tab that ever loaded a URL for the life of the service worker.
 export function dropTab(tabId) {
   capturing.delete(tabId);
   buffers.delete(tabId);
@@ -70,10 +49,6 @@ function clearBuffer(tabId) {
   buffers.set(tabId, { list: [], byId: new Map() });
 }
 
-// Persist which tabs are being captured, so net_get can tell "never started" apart from
-// "was capturing, then the service worker recycled and lost the in-memory buffer" — the
-// buffered requests can't be recovered, so the goal is an honest error, not a silent
-// empty/zero read.
 const CAPTURING_KEY = "bctl_net_capturing_tabs";
 function persistCapturing() {
   chrome.storage.session.set({ [CAPTURING_KEY]: [...capturing] }).catch(() => {});
@@ -87,14 +62,12 @@ async function wasCapturingBeforeRestart(tabId) {
   }
 }
 
-// Convert a webRequest header array ([{name,value}]) to a map (verbatim, no redaction).
 function headersToMap(list) {
   const map = {};
   for (const h of list || []) map[h.name] = h.value;
   return map;
 }
 
-// Best-effort byte size of a request body from details.requestBody.
 function requestBodySize(requestBody) {
   if (!requestBody) return 0;
   let size = 0;
@@ -111,8 +84,6 @@ function requestBodySize(requestBody) {
   return size;
 }
 
-// Get-or-create the record for a requestId within the tab's buffer.
-// New records are pushed onto the list (and capped) and indexed by requestId.
 function getRecord(tabId, requestId) {
   const b = getBuffer(tabId);
   let rec = b.byId.get(requestId);
@@ -128,17 +99,11 @@ function getRecord(tabId, requestId) {
   return rec;
 }
 
-// ---------------------------------------------------------------------------
-// webRequest listeners — registered ONCE at module load, observational only
-// (never blocking). We only record events for tabs in `capturing`.
-// ---------------------------------------------------------------------------
-
 const FILTER = { urls: ["<all_urls>"] };
 
 if (typeof chrome !== "undefined" && chrome?.webRequest) {
   chrome.webRequest.onBeforeRequest.addListener(
     (details) => {
-      // Always track in-flight requests (independent of `capturing`).
       incInFlight(details.tabId, details.requestId);
       if (!capturing.has(details.tabId)) return;
       const rec = getRecord(details.tabId, details.requestId);
@@ -177,7 +142,6 @@ if (typeof chrome !== "undefined" && chrome?.webRequest) {
 
   chrome.webRequest.onCompleted.addListener(
     (details) => {
-      // Always track in-flight requests (independent of `capturing`).
       decInFlight(details.tabId, details.requestId);
       if (!capturing.has(details.tabId)) return;
       const rec = getRecord(details.tabId, details.requestId);
@@ -191,34 +155,23 @@ if (typeof chrome !== "undefined" && chrome?.webRequest) {
     ["responseHeaders", "extraHeaders"]
   );
 
-  chrome.webRequest.onErrorOccurred.addListener(
-    (details) => {
-      // Always track in-flight requests (independent of `capturing`).
-      decInFlight(details.tabId, details.requestId);
-      if (!capturing.has(details.tabId)) return;
-      const rec = getRecord(details.tabId, details.requestId);
-      rec.error = details.error;
-      rec.endTime = details.timeStamp;
-      rec.done = true;
-    },
-    FILTER
-  );
+  chrome.webRequest.onErrorOccurred.addListener((details) => {
+    decInFlight(details.tabId, details.requestId);
+    if (!capturing.has(details.tabId)) return;
+    const rec = getRecord(details.tabId, details.requestId);
+    rec.error = details.error;
+    rec.endTime = details.timeStamp;
+    rec.done = true;
+  }, FILTER);
 }
-
-// ---------------------------------------------------------------------------
-// Action dispatch
-// ---------------------------------------------------------------------------
 
 function requireTabId(tabId) {
   if (tabId == null) throw new Error("this net action requires a tabId");
 }
 
-// Map a stored record to the brief shape returned to the agent / LLM.
 function briefRecord(rec) {
   const timeMs =
-    rec.endTime != null && rec.startTime != null
-      ? Math.max(0, rec.endTime - rec.startTime)
-      : null;
+    rec.endTime != null && rec.startTime != null ? Math.max(0, rec.endTime - rec.startTime) : null;
   return {
     method: rec.method,
     url: rec.url,
@@ -228,20 +181,14 @@ function briefRecord(rec) {
     ip: rec.ip != null ? rec.ip : null,
     error: rec.error != null ? rec.error : null,
     timeMs,
-    // Verbatim, no redaction — this is a local debug aid (see cross-cutting decision).
     requestHeaders: rec.requestHeaders || null,
     responseHeaders: rec.responseHeaders || null,
   };
 }
 
-// Resolve once the tab has had no in-flight requests for `idleMs` continuous
-// milliseconds, or reject on timeout. Uses the always-on `inFlight` counter, so
-// it works regardless of whether detailed capture (`capturing`) is started.
 export function waitNetworkIdle(tabId, idleMs = 500, timeoutMs = 10000, maxInFlight = 0) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
-    // Timestamp when the tab was last observed idle (<= maxInFlight in-flight requests).
-    // Reset to null whenever in-flight requests exceed maxInFlight.
     let idleSince = inFlightCount(tabId) <= maxInFlight ? start : null;
 
     const timer = setInterval(() => {
@@ -267,14 +214,14 @@ export function waitNetworkIdle(tabId, idleMs = 500, timeoutMs = 10000, maxInFli
         );
         err.code = "NETWORK_IDLE_TIMEOUT";
         err.diagnostics = { timeoutMs, inFlight: count, maxInFlight };
-        err.recoveryHint = "Modern SPAs often keep persistent WebSockets or telemetry active. Use 'wait --settle' (or browser_wait_for with for:'settle') instead, or pass maxInFlight: 1.";
+        err.recoveryHint =
+          "Modern SPAs often keep persistent WebSockets or telemetry active. Use 'wait --settle' (or browser_wait_for with for:'settle') instead, or pass maxInFlight: 1.";
         reject(err);
       }
     }, 100);
   });
 }
 
-// Dispatch a network-related action. `tabId` is the resolved active tab.
 export async function handleNet(action, params, tabId) {
   switch (action) {
     case "net_start": {
@@ -295,12 +242,11 @@ export async function handleNet(action, params, tabId) {
     case "net_get": {
       requireTabId(tabId);
       if (!capturing.has(tabId) && (await wasCapturingBeforeRestart(tabId))) {
-        throw new Error("capture state was reset by a service-worker restart — call net_start again");
+        throw new Error(
+          "capture state was reset by a service-worker restart — call net_start again"
+        );
       }
       const b = getBuffer(tabId);
-      // "Never started" and "started, and the page made no requests" are different
-      // answers, and an empty array says both. An agent reading the empty array
-      // concludes the page is idle and moves on.
       if (!capturing.has(tabId) && b.list.length === 0) {
         const err = new Error(
           "network capture is not running for this tab, so nothing was recorded — this is NOT the same as the page making no requests"
@@ -314,7 +260,7 @@ export async function handleNet(action, params, tabId) {
       if (params.urlContains) {
         records = records.filter((r) => (r.url || "").includes(params.urlContains));
       }
-      const limit = params.limit ?? 200;  // ?? so limit:0 returns none rather than 200
+      const limit = params.limit ?? 200;
       const newest = records.slice(-limit);
       return {
         ok: true,

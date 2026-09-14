@@ -1,6 +1,30 @@
 <!doctype html>
 <html>
-<head><meta charset="utf-8"><title>bctl e2e test page</title></head>
+<head><meta charset="utf-8"><title>bctl e2e test page</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 8px; }
+  section { border: 1px solid #ddd; padding: 6px; margin: 6px 0; }
+  /* --- stacking: a transparent lid that eats the click aimed at the button under it --- */
+  #coverwrap { position: relative; display: inline-block; }
+  #cover { position: absolute; inset: 0; z-index: 5; background: transparent; }
+  /* --- a sticky bar that overlaps whatever scrolls under it --- */
+  #sticky { position: sticky; top: 0; z-index: 9; background: #fffa; }
+  /* --- the state matrix: every row is "there" in a different, incompatible sense --- */
+  #st-opacity0   { opacity: 0; }
+  #st-visibility { visibility: hidden; }
+  #st-display    { display: none; }
+  #st-offscreen  { position: absolute; left: -9999px; }
+  #st-zerosize   { width: 0; height: 0; overflow: hidden; padding: 0; border: 0; }
+  #st-nopointer  { pointer-events: none; }
+  #slider { position: relative; }
+  #slider.sliding { animation: e2eslide 2s linear; }
+  @keyframes e2eslide { from { left: 0; } to { left: 300px; } }
+  #toast { display: none; }
+  #toast.up { display: inline-block; }
+  table { border-collapse: collapse; }
+  td { border: 1px solid #eee; padding: 1px 4px; }
+</style>
+</head>
 <body>
   <h1 id="title">bctl Test Page</h1>
   <a href="/second.html" id="link">go second</a>
@@ -8,6 +32,7 @@
   <button id="btn" onclick="window.__clicked=(window.__clicked||0)+1">Click Me</button>
   <span id="clickcount">0</span>
 
+  <section id="s-inputs">
   <input id="plain" type="text" placeholder="Plain input" />
 
   <!-- A "controlled" input that mimics React/Vue value-tracking: a direct
@@ -24,25 +49,13 @@
     <option value="b">Banana</option>
     <option value="c">Cherry</option>
   </select>
+  </section>
 
   <!-- A control that is still moving when it is clicked. The click reads the coordinates it
        dispatches with off this box, so a sliding target has to be reported. The animation is
        opt-in (window.__slide()) because a running animation would stop wait_settle settling
        for every other check in the suite. -->
-  <style>
-    #slider { position: relative; }
-    #slider.sliding { animation: e2eslide 2s linear; }
-    @keyframes e2eslide { from { left: 0; } to { left: 300px; } }
-  </style>
   <button id="slider">Sliding Button</button>
-  <script>
-    window.__slid = 0;
-    document.addEventListener("DOMContentLoaded", () => {
-      document.getElementById("slider").addEventListener("click", () => { window.__slid++; });
-    });
-    window.__slide = () => document.getElementById("slider").classList.add("sliding");
-    window.__unslide = () => document.getElementById("slider").classList.remove("sliding");
-  </script>
 
   <!-- The shape every real upload UI has: the input is hidden, the visible control is a
        styled label. Naming the label has to reach the input behind it. -->
@@ -53,16 +66,6 @@
        shape, `multiple`, and the case where "the page's only file input" no longer applies. -->
   <div id="dropzone"><input type="file" id="multiinput" name="docs" multiple /></div>
   <span id="multinames">none</span>
-  <script>
-    document.addEventListener("DOMContentLoaded", () => {
-      const show = (input, out) => input.addEventListener("change", () => {
-        document.getElementById(out).textContent =
-          [...input.files].map((f) => f.name + ":" + f.size).join(",") || "none";
-      });
-      show(document.getElementById("fileinput"), "filename");
-      show(document.getElementById("multiinput"), "multinames");
-    });
-  </script>
 
   <button id="hovertarget">hover me</button>
   <span id="hovered">no</span>
@@ -71,15 +74,9 @@
        exercise deepQueryAll/deepQuery shadow-DOM piercing. -->
   <shadow-widget></shadow-widget>
 
-  <!-- Cross-origin iframe (served from a different port) to exercise all_frames
-       per-frame injection + frame-qualified refs. src filled in by the runner. -->
-  <!-- A row-shaped list: the shape get_property({all, fields}) exists for. Each row holds a
-       title, a link and a number; the score-like value in `.n` is INSIDE the row, and
-       `#outside` deliberately is not, so the "field matched nothing in the row" path is
-       reachable too. -->
   <!-- check/uncheck/clear/dismiss targets. browser_dismiss_modal once shipped completely
-       dead while every snapshot advertised it (invariants.md), so the dialog here exists to
-       keep that from being possible again. -->
+       dead while every snapshot advertised it, so the dialog here exists to keep that from
+       being possible again. -->
   <input type="checkbox" id="cbox" />
   <button id="dlgopen" onclick="document.getElementById('dlg').showModal()">Open dialog</button>
   <dialog id="dlg" aria-label="E2E Dialog">
@@ -87,6 +84,9 @@
     <button id="dlgclose" onclick="document.getElementById('dlg').close()">Close</button>
   </dialog>
 
+  <!-- A row-shaped list: the shape browser_extract exists for. Each row holds a title, a link
+       and a number; the value in `.n` is INSIDE the row, and `#outside` deliberately is not,
+       so the "field matched nothing in the row" path is reachable too. -->
   <ul id="rows">
     <li class="row"><h3 class="t">Row One</h3><a class="u" href="/second.html">open</a><span class="n">11</span></li>
     <li class="row"><h3 class="t">Row Two</h3><a class="u" href="https://example.com/x">open</a><span class="n">22</span></li>
@@ -94,9 +94,101 @@
   </ul>
   <span id="outside">not in any row</span>
 
+  <!-- ================= NOISE: the same words, several times over ================= -->
+  <!-- Three controls share one visible label, so `target: "Save"` has no single right answer
+       and must be refused with candidates rather than resolved to whichever came first. A
+       fourth carries the label as a prefix, so exact-text still has a unique winner. -->
+  <section id="s-dup">
+    <button class="dup" id="save-header">Save</button>
+    <button class="dup" id="save-footer">Save</button>
+    <a href="#" class="dup" id="save-link">Save</a>
+    <button id="save-draft">Save Draft</button>
+    <button id="only-publish">Publish</button>
+  </section>
+
+  <!-- ============ LANDMARKS: words that are both a tag name and a label ============ -->
+  <!-- Every word here is a valid HTML type selector AND the visible text of a control, which
+       is the collision the resolution order has to get right: user-facing text outranks a
+       bare tag name. -->
+  <section id="s-landmark">
+    <search id="lm-search"><input id="searchbox" placeholder="Search the docs" /></search>
+    <button id="btn-search">search</button>
+
+    <menu id="lm-menu"><li>menu item</li></menu>
+    <button id="btn-menu">menu</button>
+
+    <details id="lm-details"><summary id="lm-summary">details</summary><p>expanded body</p></details>
+    <button id="btn-details">details</button>
+
+    <output id="lm-output">0</output>
+    <button id="btn-output">output</button>
+
+    <time id="lm-time" datetime="2026-09-14">14 Sep</time>
+    <button id="btn-time">time</button>
+  </section>
+
+  <!-- ================= OVERLAP: a click that lands on something else ================= -->
+  <section id="s-overlap">
+    <div id="sticky">sticky bar</div>
+    <div id="coverwrap">
+      <button id="covered" onclick="window.__coveredClicks=(window.__coveredClicks||0)+1">Covered Button</button>
+      <div id="cover" onclick="window.__coverClicks=(window.__coverClicks||0)+1"></div>
+    </div>
+    <span id="coverstate">untouched</span>
+  </section>
+
+  <!-- ============ STATE MATRIX: six ways of not quite being on screen ============ -->
+  <!-- Each is present in the DOM and each is unusable in a different way. A reader that
+       treats them as one bucket is wrong about five of them. -->
+  <section id="s-state">
+    <button id="st-visible">State Visible</button>
+    <button id="st-opacity0">State Transparent</button>
+    <button id="st-visibility">State Invisible</button>
+    <button id="st-display">State Displaced</button>
+    <button id="st-offscreen">State Offscreen</button>
+    <button id="st-zerosize">State Zerosize</button>
+    <button id="st-nopointer">State Nopointer</button>
+    <button id="st-disabled" disabled>State Disabled</button>
+    <button id="st-ariahidden" aria-hidden="true">State Ariahidden</button>
+  </section>
+
+  <!-- ================= DYNAMIC: the page moves under the reader ================= -->
+  <section id="s-dynamic">
+    <button id="rerender">Rerender Zone</button>
+    <div id="dynzone"><button id="dyn-btn">Dynamic Button v1</button></div>
+
+    <button id="loadmore">Show more results</button>
+    <ul id="lazylist"><li class="lazy">Lazy 1</li></ul>
+
+    <button id="toastbtn">Raise Toast</button>
+    <span id="toast">Saved successfully</span>
+
+    <input id="debounced" placeholder="Debounced field" />
+    <span id="debounced-out">-</span>
+  </section>
+
+  <!-- ============ NATIVE DIALOGS: the kind that suspend the page ============ -->
+  <!-- Not a <dialog> element: window.confirm/alert/prompt block the renderer, are invisible to
+       the content script, and can only be answered through the debugger. Every internal admin
+       screen guards deletion with one. -->
+  <section id="s-dialog">
+    <button id="confirmbtn">Delete Record</button>
+    <button id="alertbtn">Show Alert</button>
+    <button id="promptbtn">Ask Name</button>
+    <span id="dialogresult">untouched</span>
+  </section>
+
+  <!-- ============ REPETITION: a table dense enough to be folded ============ -->
+  <table id="grid"><tbody id="gridbody"></tbody></table>
+
   <iframe id="frm" src="__IFRAME_SRC__" width="320" height="140"></iframe>
 
   <script>
+    window.__slid = 0;
+    window.__slide = () => document.getElementById("slider").classList.add("sliding");
+    window.__unslide = () => document.getElementById("slider").classList.remove("sliding");
+    document.getElementById("slider").addEventListener("click", () => { window.__slid++; });
+
     // click counter mirror
     const btn = document.getElementById('btn');
     btn.addEventListener('click', () => {
@@ -106,6 +198,13 @@
     // hover mirror
     const ht = document.getElementById('hovertarget');
     ht.addEventListener('mouseover', () => { document.getElementById('hovered').textContent = 'yes'; });
+
+    const show = (input, out) => input.addEventListener("change", () => {
+      document.getElementById(out).textContent =
+        [...input.files].map((f) => f.name + ":" + f.size).join(",") || "none";
+    });
+    show(document.getElementById("fileinput"), "filename");
+    show(document.getElementById("multiinput"), "multinames");
 
     // React-like controlled input
     (function () {
@@ -142,6 +241,79 @@
       }
     }
     customElements.define('shadow-widget', ShadowWidget);
+
+    // --- overlap bookkeeping: which of the two stacked elements actually received it ---
+    window.__coveredClicks = 0;
+    window.__coverClicks = 0;
+    document.getElementById('cover').addEventListener('click', () => {
+      document.getElementById('coverstate').textContent = 'lid';
+    });
+    document.getElementById('covered').addEventListener('click', () => {
+      document.getElementById('coverstate').textContent = 'button';
+    });
+
+    // --- dynamic: rerender swaps the subtree, so refs into it go stale ---
+    let dynVersion = 1;
+    document.getElementById('rerender').addEventListener('click', () => {
+      dynVersion++;
+      document.getElementById('dynzone').innerHTML =
+        '<button id="dyn-btn">Dynamic Button v' + dynVersion + '</button>';
+    });
+
+    // --- dynamic: rows that do not exist until something is clicked ---
+    document.getElementById('loadmore').addEventListener('click', () => {
+      const ul = document.getElementById('lazylist');
+      for (let i = 2; i <= 21; i++) {
+        const li = document.createElement('li');
+        li.className = 'lazy';
+        li.textContent = 'Lazy ' + i;
+        ul.appendChild(li);
+      }
+      document.getElementById('loadmore').disabled = true;
+    });
+
+    // --- dynamic: something that exists only for a moment. Opt-in, so nothing animates
+    //     underneath the rest of the suite. ---
+    window.__toastMs = 900;
+    document.getElementById('toastbtn').addEventListener('click', () => {
+      const t = document.getElementById('toast');
+      t.classList.add('up');
+      setTimeout(() => t.classList.remove('up'), window.__toastMs);
+    });
+
+    // --- dynamic: a field whose visible result lags the keystroke ---
+    let debTimer = null;
+    document.getElementById('debounced').addEventListener('input', (e) => {
+      clearTimeout(debTimer);
+      const v = e.target.value;
+      debTimer = setTimeout(() => { document.getElementById('debounced-out').textContent = v || '-'; }, 300);
+    });
+
+    // --- repetition: 40 near-identical rows, dense enough to be folded by a census ---
+    (function () {
+      const body = document.getElementById('gridbody');
+      for (let i = 1; i <= 40; i++) {
+        const tr = document.createElement('tr');
+        tr.className = 'gridrow';
+        tr.innerHTML = '<td class="c1">Item</td><td class="c2">' + i + '</td><td class="c3">ready</td>';
+        body.appendChild(tr);
+      }
+    })();
+
+    // --- native dialogs. The result span records what the page itself concluded, which is the
+    //     only honest way to tell accept from dismiss from never-answered. ---
+    const dres = document.getElementById('dialogresult');
+    document.getElementById('confirmbtn').addEventListener('click', () => {
+      dres.textContent = window.confirm('Delete this record?') ? 'confirmed' : 'cancelled';
+    });
+    document.getElementById('alertbtn').addEventListener('click', () => {
+      window.alert('Saved.');
+      dres.textContent = 'alert-dismissed';
+    });
+    document.getElementById('promptbtn').addEventListener('click', () => {
+      const v = window.prompt('Your name?', 'default');
+      dres.textContent = v === null ? 'prompt-cancelled' : 'prompt:' + v;
+    });
 
     // console + network signals for CDP/net tests
     console.log('bctl-test-page-ready');

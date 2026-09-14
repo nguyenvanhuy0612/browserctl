@@ -7,6 +7,9 @@
 // text. A fix verified against one editor is not verified.
 import http from "node:http";
 import { readFileSync } from "node:fs";
+import { openMainTab, teardown, verifyClean, installReaper } from "./harness.mjs";
+
+installReaper();
 
 const BRIDGE = "http://127.0.0.1:8765";
 const post = (a, p = {}) => fetch(`${BRIDGE}/command`, {
@@ -33,8 +36,7 @@ const main = async () => {
   }).listen(0);
   const port = srv.address().port;
 
-  const opened = (await post("new_tab", { url: `http://127.0.0.1:${port}/` })).result;
-  const tabId = opened && opened.id;
+  const tabId = await openMainTab(`http://127.0.0.1:${port}/`);
   await new Promise((r) => setTimeout(r, 900));
 
   let fails = 0;
@@ -76,9 +78,16 @@ const main = async () => {
     console.log(`  ${ok ? "PASS" : "FAIL"}  submit ${name.padEnd(30)} submits=${n}`);
   }
 
-  if (tabId != null) await post("close_tab", { id: tabId });
+  await teardown();
+  try {
+    await verifyClean(`127.0.0.1:${port}`);
+    console.log("  PASS  cleanup leaves no tab behind");
+  } catch (e) {
+    fails++;
+    console.log(`  FAIL  cleanup: ${e.message}`);
+  }
   srv.close();
-  const total = CASES.length * 2 + submitChecks;
+  const total = CASES.length * 2 + submitChecks + 1;
   console.log(`\n==== ${total - fails}/${total} checks passed ====`);
   process.exit(fails === 0 ? 0 : 1);
 };

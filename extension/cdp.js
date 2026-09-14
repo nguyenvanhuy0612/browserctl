@@ -1,23 +1,11 @@
-// CDP module: console logs, network capture, HAR export, JS eval.
-//
-// These require attaching chrome.debugger to a tab (which shows the "is being
-// debugged" infobar). Opt in with cdp_attach, then read with get_console_logs /
-// get_network_requests / export_har. eval_js works with or without attach
-// (attach bypasses page CSP via Runtime.evaluate).
-
 import { truncate } from "./util.js";
 
 const MAX_CONSOLE = 1000;
 const MAX_NETWORK = 2000;
 
-// tabId -> { console: [], network: Map(requestId -> entry) }
 const sessions = new Map();
 
-// Per-tab metadata about the most recent CDP screenshot, so coordinate_click/drag can
-// map model coordinates (screenshot-pixel space) back to viewport CSS pixels. With
-// deviceScaleFactor forced to 1, the only scaling is captureViewport's clip.scale.
-const lastCapture = {}; // tabId -> { scale }
-
+const lastCapture = {};
 export function isAttached(tabId) {
   return sessions.has(tabId);
 }
@@ -25,20 +13,45 @@ export function isAttached(tabId) {
 const BUTTON_MASK = { left: 1, right: 2, middle: 4 };
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Key dispatch helpers (used by the CDP press_key path for modifier shortcuts).
 const IS_MAC = /Mac/i.test((globalThis.navigator && navigator.userAgent) || "");
 const MOD_BITS = { alt: 1, control: 2, ctrl: 2, meta: 4, command: 4, cmd: 4, shift: 8 };
 const NAMED_VK = {
-  Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46,
-  ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, Home: 36, End: 35, " ": 32,
+  Enter: 13,
+  Tab: 9,
+  Escape: 27,
+  Backspace: 8,
+  Delete: 46,
+  ArrowUp: 38,
+  ArrowDown: 40,
+  ArrowLeft: 37,
+  ArrowRight: 39,
+  Home: 36,
+  End: 35,
+  " ": 32,
 };
-function modMask(mods) { let m = 0; for (const x of mods || []) m |= MOD_BITS[String(x).toLowerCase()] || 0; return m; }
-function vkOf(key) { if (!key) return 0; return key.length === 1 ? key.toUpperCase().charCodeAt(0) : (NAMED_VK[key] || 0); }
-// DOM physical-key name ("KeyA", "Digit1", "Enter"). Chromium's key handling is more
-// faithful when `code` is present alongside the virtual key code.
-const NAMED_CODE = { " ": "Space", Escape: "Escape", Enter: "Enter", Tab: "Tab",
-  Backspace: "Backspace", Delete: "Delete", ArrowUp: "ArrowUp", ArrowDown: "ArrowDown",
-  ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight", Home: "Home", End: "End" };
+function modMask(mods) {
+  let m = 0;
+  for (const x of mods || []) m |= MOD_BITS[String(x).toLowerCase()] || 0;
+  return m;
+}
+function vkOf(key) {
+  if (!key) return 0;
+  return key.length === 1 ? key.toUpperCase().charCodeAt(0) : NAMED_VK[key] || 0;
+}
+const NAMED_CODE = {
+  " ": "Space",
+  Escape: "Escape",
+  Enter: "Enter",
+  Tab: "Tab",
+  Backspace: "Backspace",
+  Delete: "Delete",
+  ArrowUp: "ArrowUp",
+  ArrowDown: "ArrowDown",
+  ArrowLeft: "ArrowLeft",
+  ArrowRight: "ArrowRight",
+  Home: "Home",
+  End: "End",
+};
 function codeOf(key) {
   if (!key) return undefined;
   if (NAMED_CODE[key]) return NAMED_CODE[key];
@@ -48,10 +61,6 @@ function codeOf(key) {
   }
   return undefined;
 }
-// Mac NSResponder editor commands so Cmd+A / Cmd+Z etc. actually perform the edit — a bare
-// synthetic key event does not trigger native editing. No-op off Mac (there the modifier +
-// virtual-key code alone drives the native shortcut, e.g. Ctrl+A). Matches the official
-// extension's dispatchKeyEvent handling (see docs/prior-art.md #5).
 function macCommands(key, mods) {
   if (!IS_MAC) return [];
   const set = new Set((mods || []).map((x) => String(x).toLowerCase()));
@@ -65,46 +74,31 @@ function macCommands(key, mods) {
   if (k === "x") return ["cut"];
   return [];
 }
-// Scale of the most recent CDP screenshot for a tab (1 if none). coordinate_* divide the
-// model's screenshot-pixel coords by this to get viewport CSS pixels.
 const captureScale = (tabId) => (lastCapture[tabId] && lastCapture[tabId].scale) || 1;
 
-// Record the effective screenshot->CSS-pixel scale for a tab. Exported so
-// background.js's non-CDP screenshot paths (chrome.tabs.captureVisibleTab) can
-// register their scale too — coordinate_click must remap correctly regardless
-// of which screenshot path ran last.
 export function setLastCaptureScale(tabId, scale) {
   lastCapture[tabId] = { scale };
 }
 
-// Chrome delivers CDP *synthetic input* only to the foreground tab: on a background tab
-// (or any tab whose window isn't OS-focused) Input.dispatchMouseEvent and
-// Input.dispatchKeyEvent are accepted and return success while doing NOTHING. Verified
-// 2026-08-04 on Chrome/macOS: background -> zero keydown reaches the page and a
-// coordinate_click never fires the handler; foreground -> both work, including the Mac
-// editor commands. Input.insertText is NOT affected (it targets the focused editable
-// directly) and neither is Page.captureScreenshot, which is why screenshots of a
-// background tab do work.
-//
-// Returning success for a no-op is the worst outcome for an agent — it reasons on as if
-// the click landed. Fail loudly instead, and name both remedies.
 async function requireForegroundForInput(tabId, what) {
   let tab, win;
   try {
     tab = await chrome.tabs.get(tabId);
     win = await chrome.windows.get(tab.windowId);
   } catch {
-    return; // can't determine state — don't block the command on a lookup failure
+    return;
   }
   if (tab.active && win.focused) return;
-  const why = !tab.active ? "the tab is not the active tab in its window" : "its window is not focused";
+  const why = !tab.active
+    ? "the tab is not the active tab in its window"
+    : "its window is not focused";
   throw new Error(
     `${what} needs the target tab in the foreground (${why}). Chrome silently drops CDP ` +
-    `synthetic input for background tabs. Either foreground it first ` +
-    `(switch_tab {id, focus:true} — this steals focus), or use a DOM-level equivalent that ` +
-    `works in the background: click / click_selector / type / fill_selector / hover / ` +
-    `select_option by ref or selector, insert_text for text entry, or press_key with ` +
-    `allowSynthetic:true for a synthetic key event.`
+      `synthetic input for background tabs. Either foreground it first ` +
+      `(switch_tab {id, focus:true} — this steals focus), or use a DOM-level equivalent that ` +
+      `works in the background: click / click_selector / type / fill_selector / hover / ` +
+      `select_option by ref or selector, insert_text for text entry, or press_key with ` +
+      `allowSynthetic:true for a synthetic key event.`
   );
 }
 
@@ -112,7 +106,8 @@ function attachOnce(tabId) {
   return new Promise((resolve, reject) => {
     chrome.debugger.attach({ tabId }, "1.3", () => {
       const e = chrome.runtime.lastError;
-      if (e) reject(new Error(e.message)); else resolve();
+      if (e) reject(new Error(e.message));
+      else resolve();
     });
   });
 }
@@ -121,34 +116,25 @@ async function attach(tabId) {
   try {
     await attachOnce(tabId);
   } catch (err) {
-    // Chrome allows exactly one debugger per tab. Two very different situations land here
-    // and Chrome words them identically:
-    //   - OUR OWN session, left behind when the service worker was recycled or the extension
-    //     was reloaded. Detaching and retrying recovers it, and that detach is ours to make.
-    //   - Somebody else's: DevTools open on that tab, or another automation tool. The detach
-    //     fails, and the raw Chrome string ("Another debugger is already attached") tells a
-    //     caller nothing about what to do, so say what to do.
     if (!/another debugger is already attached/i.test(err.message || "")) throw err;
-    try { await detach(tabId); } catch {}
+    try {
+      await detach(tabId);
+    } catch {}
     try {
       await attachOnce(tabId);
     } catch {
       throw new Error(
         "another debugger is already attached to this tab \u2014 Chrome allows only one. " +
-        "Close DevTools on that tab (or stop the other automation tool holding it), or drive a different tab."
+          "Close DevTools on that tab (or stop the other automation tool holding it), or drive a different tab."
       );
     }
   }
-  // Force deviceScaleFactor to 1 so CDP screenshots are captured in CSS-pixel space,
-  // matching the coordinates coordinate_click / coordinate_drag dispatch. Without this,
-  // HiDPI/Retina displays (e.g. Apple Silicon) produce 2x screenshots, so every pixel
-  // coordinate the agent reads off them is off by the device pixel ratio. width/height
-  // stay at 0 (= "don't override this dimension"), so only the scale factor changes and
-  // the page does not reflow. Best-effort: a failure here must not fail the attach.
-  // Use sendRaw (not send) so a transient error here can't recurse into reattach.
   try {
     await sendRaw(tabId, "Emulation.setDeviceMetricsOverride", {
-      width: 0, height: 0, deviceScaleFactor: 1, mobile: false,
+      width: 0,
+      height: 0,
+      deviceScaleFactor: 1,
+      mobile: false,
     });
   } catch {}
 }
@@ -157,7 +143,8 @@ function detach(tabId) {
   return new Promise((resolve, reject) => {
     chrome.debugger.detach({ tabId }, () => {
       const e = chrome.runtime.lastError;
-      if (e) reject(new Error(e.message)); else resolve();
+      if (e) reject(new Error(e.message));
+      else resolve();
     });
   });
 }
@@ -166,13 +153,12 @@ function sendRaw(tabId, method, params = {}) {
   return new Promise((resolve, reject) => {
     chrome.debugger.sendCommand({ tabId }, method, params, (res) => {
       const e = chrome.runtime.lastError;
-      if (e) reject(new Error(e.message)); else resolve(res);
+      if (e) reject(new Error(e.message));
+      else resolve(res);
     });
   });
 }
 
-// Enable the event domains. Uses sendRaw (not send) so it can be called from the
-// reattach path without recursing. Idempotent — safe to call more than once.
 async function enableDomains(tabId) {
   await sendRaw(tabId, "Network.enable");
   await sendRaw(tabId, "Runtime.enable");
@@ -180,11 +166,6 @@ async function enableDomains(tabId) {
   await sendRaw(tabId, "Page.enable");
 }
 
-// send with one-shot auto-reattach: a dropped debugger (tab reload, service-worker
-// recycle) surfaces as "debugger is not attached"; re-attach once and retry so a single
-// action doesn't fail spuriously. If the session had domains enabled, re-enable them
-// after reattach — a bare re-attach loses Network/Runtime/Log/Page, so buffered
-// console/network events would otherwise silently stop arriving.
 async function send(tabId, method, params = {}) {
   try {
     return await sendRaw(tabId, method, params);
@@ -192,24 +173,22 @@ async function send(tabId, method, params = {}) {
     if (/debugger is not attached/i.test(e.message || "")) {
       await attach(tabId);
       const s = sessions.get(tabId);
-      if (s && s.domainsEnabled) { try { await enableDomains(tabId); } catch {} }
+      if (s && s.domainsEnabled) {
+        try {
+          await enableDomains(tabId);
+        } catch {}
+      }
       return await sendRaw(tabId, method, params);
     }
     throw e;
   }
 }
 
-// Key for persisting which tabs have an active CDP session, so a later read (after a
-// service-worker recycle wiped the in-memory `sessions` Map) can tell "capture was
-// running and got reset" apart from "never attached at all".
 const ATTACHED_KEY = "bctl_cdp_attached_tabs";
 function persistAttached() {
   chrome.storage.session.set({ [ATTACHED_KEY]: [...sessions.keys()] }).catch(() => {});
 }
 
-// Ensure the debugger is attached to a tab and a session record exists, WITHOUT enabling
-// the event domains (console/network). Used by the lazy screenshot path so a background
-// capture works without a prior cdp_attach. cdp_attach later enables domains on demand.
 export async function ensureAttached(tabId) {
   if (!sessions.has(tabId)) {
     await attach(tabId);
@@ -219,9 +198,6 @@ export async function ensureAttached(tabId) {
   return sessions.get(tabId);
 }
 
-// Capture the visible viewport of a tab via CDP. Works on a BACKGROUND tab (the renderer
-// stays alive) so we never have to activate it and steal the user's focus. Sizes the
-// image down to the vision-token budget via clip.scale (resize happens inside CDP).
 export async function captureViewport(tabId, { format = "jpeg", quality = 55 } = {}) {
   await ensureAttached(tabId);
   const fmt = format === "png" ? "png" : "jpeg";
@@ -232,35 +208,25 @@ export async function captureViewport(tabId, { format = "jpeg", quality = 55 } =
     const vp = m.cssVisualViewport || m.cssLayoutViewport || m.visualViewport || {};
     const w = Math.round(vp.clientWidth || 0);
     const h = Math.round(vp.clientHeight || 0);
-    // Derive the device-pixel ratio actually in force from the device-vs-CSS viewport
-    // ratio. We force deviceScaleFactor=1 on attach so this is normally ~1, but if that
-    // override failed the captured image is dpr× larger than CSS pixels. Folding dpr into
-    // the recorded scale self-corrects coordinate_click/drag mapping either way.
     const devVp = m.visualViewport || {};
     if (w && devVp.clientWidth) dpr = Math.max(1, devVp.clientWidth / w);
     if (w && h) {
-      const MAX_SIDE = 1568; // Anthropic vision tiling: longest side cap
+      const MAX_SIDE = 1568;
       const scale = Math.min(1, MAX_SIDE / Math.max(w, h));
-      // clip is in PAGE coordinates, so it has to follow the scroll offset. Hardcoding
-      // y:0 meant that on any scrolled page the requested region sat outside the
-      // viewport, and with captureBeyondViewport:false Chrome returns unpainted white
-      // for it — the "screenshot came back blank" both agent probes hit after scrolling,
-      // each falling back to snapshots and treating screenshots as unreliable.
       const x = Math.round(vp.pageX || 0);
       const y = Math.round(vp.pageY || 0);
       clip = { x, y, width: w, height: h, scale };
     }
   } catch {}
-  // Record the effective screenshot->CSS-pixel scale so coordinate_click/drag can map
-  // model coordinates (read off the returned image) back to viewport CSS pixels.
   lastCapture[tabId] = { scale: (clip ? clip.scale : 1) * dpr };
-  const shoot = (q) => send(tabId, "Page.captureScreenshot", {
-    format: fmt,
-    ...(fmt === "jpeg" ? { quality: q } : {}),
-    ...(clip ? { clip } : {}),
-    captureBeyondViewport: false,
-    fromSurface: true,
-  });
+  const shoot = (q) =>
+    send(tabId, "Page.captureScreenshot", {
+      format: fmt,
+      ...(fmt === "jpeg" ? { quality: q } : {}),
+      ...(clip ? { clip } : {}),
+      captureBeyondViewport: false,
+      fromSurface: true,
+    });
   let res = await shoot(quality);
   if (fmt === "jpeg" && res.data.length > 500000) res = await shoot(30);
   return { dataUrl: `data:image/${fmt};base64,${res.data}` };
@@ -272,16 +238,15 @@ function requireSession(tabId) {
   return s;
 }
 
-// Like requireSession, but distinguishes "never attached" from "was attached, but the
-// service worker recycled and lost the in-memory session" (the live CDP buffers can't be
-// restored, so this surfaces an honest error instead of a later silent empty read).
 async function requireSessionOrExplainReset(tabId) {
   const s = sessions.get(tabId);
   if (s) return s;
   try {
     const { [ATTACHED_KEY]: ids } = await chrome.storage.session.get(ATTACHED_KEY);
     if (Array.isArray(ids) && ids.includes(tabId)) {
-      throw new Error("capture state was reset by a service-worker restart — call cdp_attach again");
+      throw new Error(
+        "capture state was reset by a service-worker restart — call cdp_attach again"
+      );
     }
   } catch (e) {
     if (/service-worker restart/.test(e.message || "")) throw e;
@@ -289,9 +254,6 @@ async function requireSessionOrExplainReset(tabId) {
   throw new Error("not attached: call cdp_attach first");
 }
 
-// Require an attached session with the event domains enabled, auto-enabling them if the
-// session was only lazily attached (e.g. by a background screenshot) without a prior
-// cdp_attach. Used by the log/network read paths so they don't silently return count:0.
 async function requireDomains(tabId) {
   const s = await requireSessionOrExplainReset(tabId);
   if (!s.domainsEnabled) {
@@ -303,17 +265,99 @@ async function requireDomains(tabId) {
 
 function remoteToString(o) {
   if (!o) return "";
-  if (o.value !== undefined) return typeof o.value === "object" ? JSON.stringify(o.value) : String(o.value);
+  if (o.value !== undefined)
+    return typeof o.value === "object" ? JSON.stringify(o.value) : String(o.value);
   if (o.description) return o.description;
   return o.type || "";
 }
 
-// Buffer CDP events per attached tab.
+const dialogs = new Map();
+
+export function armDialog(tabId, { action = "dismiss", promptText } = {}) {
+  dialogs.set(tabId, {
+    armed: { accept: action === "accept", promptText },
+    answered: null,
+    open: null,
+  });
+}
+
+export function takeDialogRecord(tabId) {
+  const d = dialogs.get(tabId);
+  if (!d) return null;
+  dialogs.delete(tabId);
+  return d.answered || (d.open ? { ...d.open, answered: null } : null);
+}
+
+export function pendingDialog(tabId) {
+  const d = dialogs.get(tabId);
+  return d && d.open ? d.open : null;
+}
+
+export async function handleDialog(tabId, { action = "dismiss", promptText } = {}) {
+  const open = pendingDialog(tabId);
+  if (!open) {
+    const err = new Error("no JavaScript dialog is open on this tab");
+    err.code = "NO_DIALOG";
+    throw err;
+  }
+  await sendRaw(tabId, "Page.handleJavaScriptDialog", {
+    accept: action === "accept",
+    ...(promptText !== undefined ? { promptText } : {}),
+  });
+  const d = dialogs.get(tabId);
+  d.answered = { ...open, answered: action, promptText: promptText ?? null };
+  d.open = null;
+  return d.answered;
+}
+
+const dialogWaiters = new Map();
+export function onDialogOpened(tabId, fn) {
+  dialogWaiters.set(tabId, fn);
+  return () => dialogWaiters.delete(tabId);
+}
+
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const s = sessions.get(source.tabId);
   if (!s) return;
 
   switch (method) {
+    case "Page.javascriptDialogOpening": {
+      const open = {
+        type: params.type,
+        message: params.message,
+        defaultPrompt: params.defaultPrompt ?? null,
+        url: params.url,
+      };
+      const d = dialogs.get(source.tabId) || { armed: null, answered: null, open: null };
+      d.open = open;
+      dialogs.set(source.tabId, d);
+      if (d.armed) {
+        const { accept, promptText } = d.armed;
+        d.armed = null;
+        sendRaw(source.tabId, "Page.handleJavaScriptDialog", {
+          accept,
+          ...(promptText !== undefined ? { promptText } : {}),
+        })
+          .then(() => {
+            d.answered = {
+              ...open,
+              answered: accept ? "accept" : "dismiss",
+              promptText: promptText ?? null,
+            };
+            d.open = null;
+          })
+          .catch(() => {});
+      } else {
+        const waiter = dialogWaiters.get(source.tabId);
+        if (waiter) waiter(open);
+      }
+      break;
+    }
+    case "Page.javascriptDialogClosed": {
+      const d = dialogs.get(source.tabId);
+      if (d) d.open = null;
+      break;
+    }
     case "Runtime.consoleAPICalled":
       pushConsole(s, {
         type: params.type,
@@ -353,17 +397,26 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       break;
     case "Network.responseReceived": {
       const e = s.network.get(params.requestId);
-      if (e) { e.response = params.response; e.resourceType = params.type; }
+      if (e) {
+        e.response = params.response;
+        e.resourceType = params.type;
+      }
       break;
     }
     case "Network.loadingFinished": {
       const e = s.network.get(params.requestId);
-      if (e) { e.endTs = params.timestamp; e.encodedDataLength = params.encodedDataLength; }
+      if (e) {
+        e.endTs = params.timestamp;
+        e.encodedDataLength = params.encodedDataLength;
+      }
       break;
     }
     case "Network.loadingFailed": {
       const e = s.network.get(params.requestId);
-      if (e) { e.failed = params.errorText; e.endTs = params.timestamp; }
+      if (e) {
+        e.failed = params.errorText;
+        e.endTs = params.timestamp;
+      }
       break;
     }
   }
@@ -377,13 +430,11 @@ chrome.debugger.onDetach.addListener((source) => {
   }
 });
 
-// Drop all per-tab CDP state for a closed tab. Called from background.js's
-// tabs.onRemoved. The debugger auto-detaches when the tab closes, so we only
-// clear our own bookkeeping (sessions is also cleared by onDetach, but that can
-// race with removal; lastCapture is otherwise never pruned).
 export function dropTab(tabId) {
   sessions.delete(tabId);
   delete lastCapture[tabId];
+  dialogs.delete(tabId);
+  dialogWaiters.delete(tabId);
   persistAttached();
 }
 
@@ -392,11 +443,6 @@ function pushConsole(s, entry) {
   if (s.console.length > MAX_CONSOLE) s.console.shift();
 }
 
-// returnByValue:true is the obvious way to evaluate, and it throws away the one thing that
-// makes an empty answer readable: a DOM node, a Map, a Set and a Promise all come back as
-// `{}` with type "object" and nothing to say which. Evaluate to a HANDLE instead (one pass,
-// so a side-effecting expression still runs exactly once), read the class name off it, then
-// serialise through that handle.
 async function runtimeEval(tabId, expression) {
   const res = await send(tabId, "Runtime.evaluate", {
     expression,
@@ -405,21 +451,30 @@ async function runtimeEval(tabId, expression) {
   });
   if (res.exceptionDetails) throw new Error(res.exceptionDetails.text || "eval error");
   const r = res.result || {};
-  // Primitives (and null) are already in hand.
   if (!r.objectId) {
     if (r.type === "undefined") return { value: null, type: "undefined" };
-    return { value: r.value !== undefined ? r.value : r.description ?? null, type: r.type };
+    return { value: r.value !== undefined ? r.value : (r.description ?? null), type: r.type };
   }
   try {
     const ser = await send(tabId, "Runtime.callFunctionOn", {
       objectId: r.objectId,
-      functionDeclaration: "function(){ try { return { ok: true, v: JSON.parse(JSON.stringify(this)) } } catch (e) { return { ok: false, why: String(e) } } }",
+      functionDeclaration:
+        "function(){ try { return { ok: true, v: JSON.parse(JSON.stringify(this)) } } catch (e) { return { ok: false, why: String(e) } } }",
       returnByValue: true,
     });
     const out = (ser.result && ser.result.value) || { ok: false, why: "no result" };
     const kind = r.className || r.subtype || r.type;
-    if (!out.ok) return { value: null, type: kind, note: `${kind} could not be serialised (${out.why}) \u2014 return its fields instead` };
-    const empty = out.v && typeof out.v === "object" && !Array.isArray(out.v) && Object.keys(out.v).length === 0;
+    if (!out.ok)
+      return {
+        value: null,
+        type: kind,
+        note: `${kind} could not be serialised (${out.why}) \u2014 return its fields instead`,
+      };
+    const empty =
+      out.v &&
+      typeof out.v === "object" &&
+      !Array.isArray(out.v) &&
+      Object.keys(out.v).length === 0;
     if (empty && kind && kind !== "Object") {
       return {
         value: out.v,
@@ -429,7 +484,9 @@ async function runtimeEval(tabId, expression) {
     }
     return { value: out.v, type: kind };
   } finally {
-    try { await send(tabId, "Runtime.releaseObject", { objectId: r.objectId }); } catch {}
+    try {
+      await send(tabId, "Runtime.releaseObject", { objectId: r.objectId });
+    } catch {}
   }
 }
 
@@ -464,7 +521,7 @@ function buildHar(entries, bodies) {
         },
         response: {
           status: resp.status || (e.failed ? 0 : 0),
-          statusText: resp.statusText || (e.failed || ""),
+          statusText: resp.statusText || e.failed || "",
           httpVersion: resp.protocol || "HTTP/1.1",
           headers: toHeaders(resp.headers),
           cookies: [],
@@ -488,10 +545,16 @@ function buildHar(entries, bodies) {
   };
 }
 
-// Build a compact list of meaningful accessibility nodes from a full AX tree.
-// The AX properties worth carrying: they are the control's state, which is what an agent
-// needs to decide whether to act. Dropping them left the tree a read-only curiosity.
-const AX_STATE_PROPS = new Set(["checked", "selected", "expanded", "pressed", "disabled", "required", "invalid", "level"]);
+const AX_STATE_PROPS = new Set([
+  "checked",
+  "selected",
+  "expanded",
+  "pressed",
+  "disabled",
+  "required",
+  "invalid",
+  "level",
+]);
 
 function collectAxNodes(axNodes, max) {
   const skip = new Set(["none", "GenericContainer", "InlineTextBox", "ignored"]);
@@ -518,7 +581,7 @@ function collectAxNodes(axNodes, max) {
 
 function briefRequest(e) {
   return {
-    requestId: e.requestId, // needed to fetch the body via get_response_body
+    requestId: e.requestId,
     method: e.request.method,
     url: e.request.url,
     resourceType: e.resourceType,
@@ -526,22 +589,15 @@ function briefRequest(e) {
     mimeType: e.response ? e.response.mimeType : null,
     size: e.encodedDataLength || null,
     failed: e.failed || null,
-    // Verbatim, no redaction — this is a local debug aid (see cross-cutting decision).
     requestHeaders: e.request.headers || null,
     responseHeaders: e.response ? e.response.headers || null : null,
   };
 }
 
-// Dispatch a CDP-related action. `tabId` is the resolved active tab.
 export async function handleCdp(action, params, tabId) {
   switch (action) {
     case "cdp_attach": {
-      // The session may already exist (a lazy screenshot attached without enabling the
-      // event domains); enable them here if not already done.
       const s = await ensureAttached(tabId);
-      // Re-enable unconditionally (idempotent): a same-tab navigation resets all
-      // enabled domains WITHOUT firing onDetach, so gating on domainsEnabled would
-      // leave post-navigation capture silently dead. Re-calling enable is cheap.
       await enableDomains(tabId);
       s.domainsEnabled = true;
       return { ok: true, result: { attached: true, tabId } };
@@ -549,7 +605,9 @@ export async function handleCdp(action, params, tabId) {
 
     case "cdp_detach": {
       if (sessions.has(tabId)) {
-        try { await detach(tabId); } catch {}
+        try {
+          await detach(tabId);
+        } catch {}
         sessions.delete(tabId);
         persistAttached();
       }
@@ -558,7 +616,7 @@ export async function handleCdp(action, params, tabId) {
 
     case "get_console_logs": {
       const s = await requireDomains(tabId);
-      const limit = params.limit ?? 200;  // ?? so limit:0 returns none rather than 200
+      const limit = params.limit ?? 200;
       const logs = s.console.slice(-limit);
       if (params.clear) s.console.length = 0;
       return { ok: true, result: { count: logs.length, logs } };
@@ -582,8 +640,6 @@ export async function handleCdp(action, params, tabId) {
       if (!params.bodies) {
         return { ok: true, result: buildHar(entries) };
       }
-      // Best-effort: gather response bodies before building the HAR. One failed
-      // body (e.g. evicted) must not abort the export, so each is try/caught.
       const bodies = new Map();
       await Promise.all(
         entries
@@ -606,8 +662,9 @@ export async function handleCdp(action, params, tabId) {
         res = await send(tabId, "Network.getResponseBody", { requestId: params.requestId });
       } catch {
         throw new Error(
-          "response body unavailable for " + params.requestId +
-          " (it may have been evicted; capture is best-effort)"
+          "response body unavailable for " +
+            params.requestId +
+            " (it may have been evicted; capture is best-effort)"
         );
       }
       return {
@@ -621,16 +678,9 @@ export async function handleCdp(action, params, tabId) {
     }
 
     case "capture_screenshot": {
-      // Full-page screenshot via CDP (captures beyond the viewport). Requires attach.
-      // JPEG by default to keep the base64 payload (and the agent's token cost) small;
-      // pass format:"png" for a lossless image (e.g. pixel-diff QA). `quality` (jpeg only,
-      // default 55) is degraded once to 30 if the capture is still large.
       requireSession(tabId);
       const format = params.format === "png" ? "png" : "jpeg";
       const quality = params.quality ?? 55;
-      // Record the screenshot->CSS-pixel scale for coordinate_click/drag, same dpr
-      // correction as captureViewport (this path has no clip.scale — only the dpr
-      // correction matters, since deviceScaleFactor is normally forced to 1 on attach).
       let dpr = 1;
       try {
         const m = await send(tabId, "Page.getLayoutMetrics");
@@ -640,37 +690,23 @@ export async function handleCdp(action, params, tabId) {
         if (w && devVp.clientWidth) dpr = Math.max(1, devVp.clientWidth / w);
       } catch {}
       lastCapture[tabId] = { scale: dpr };
-      const shoot = (q) => send(tabId, "Page.captureScreenshot", {
-        format,
-        ...(format === "jpeg" ? { quality: q } : {}),
-        captureBeyondViewport: params.fullPage !== false,
-        fromSurface: true,
-      });
+      const shoot = (q) =>
+        send(tabId, "Page.captureScreenshot", {
+          format,
+          ...(format === "jpeg" ? { quality: q } : {}),
+          captureBeyondViewport: params.fullPage !== false,
+          fromSurface: true,
+        });
       let res = await shoot(quality);
       if (format === "jpeg" && res.data.length > 500000) res = await shoot(30);
       return { ok: true, result: { dataUrl: `data:image/${format};base64,${res.data}` } };
     }
 
-    // Make a backgrounded tab's page JS believe it's visible/focused, so lazy-load /
-    // infinite-scroll code gated on document.visibilityState (a common, deliberate
-    // resource-saving pattern) fires while the tab never actually becomes the foreground
-    // one — the human keeps their own tab. Explicit, opt-in action (not automatic on
-    // every scroll/read): visibility state is also used for OTHER things a site may not
-    // want spoofed unconditionally (video autoplay, polling/websocket resume, analytics
-    // time-on-page), so the caller must ask for this deliberately, once, when it knows
-    // the target relies on lazy-loading.
-    //
-    // KNOWN LIMITATION (confirmed, not just theoretical): this patches JS-visible state
-    // only. It does NOT lift Chrome's renderer-level throttling of a backgrounded tab —
-    // requestAnimationFrame doesn't fire, IntersectionObserver callbacks ride the (also
-    // throttled) rendering pipeline. If a site's loader is driven by rAF/IO rather than a
-    // visibilitychange/scroll listener, this may not help; there is no further fallback
-    // built here (see PROTOCOL.md for the documented alternative: briefly foreground the
-    // tab, restore after).
     case "spoof_visibility": {
       await ensureAttached(tabId);
-      try { await send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true }); }
-      catch {} // best-effort; experimental CDP method, absence shouldn't fail the whole action
+      try {
+        await send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
+      } catch {}
       const patch = `(() => {
         const patched = { visibilityState: false, hidden: false };
         try {
@@ -693,7 +729,6 @@ export async function handleCdp(action, params, tabId) {
       if (sessions.has(tabId)) {
         return { ok: true, result: await runtimeEval(tabId, params.expression) };
       }
-      // Fallback without attach: run in the page's MAIN world (subject to page CSP).
       try {
         const [out] = await chrome.scripting.executeScript({
           target: { tabId },
@@ -701,24 +736,34 @@ export async function handleCdp(action, params, tabId) {
           func: async (expr) => {
             try {
               const raw = eval(expr);
-              // An async expression returned `{}` here while the SAME expression answered
-              // correctly whenever a debugger happened to be attached (Runtime.evaluate sets
-              // awaitPromise). One expression, two answers, no error either way.
               const v = raw && typeof raw.then === "function" ? await raw : raw;
-              // JSON.stringify(undefined) returns undefined (not "undefined"), and
-              // JSON.parse(undefined) throws — surfacing a misleading error for a
-              // successful eval that simply returns nothing (assignments, void, DOM calls).
               if (v === undefined) return { ok: true, value: null, type: "undefined" };
               if (typeof v === "function") return { ok: true, value: String(v), type: "function" };
-              // Same field shape the attached path reports, so one expression does not get two
-              // different answers depending on whether a debugger happens to be attached.
-              const kind = v === null ? "null" : typeof v === "object" ? (v.constructor && v.constructor.name) || "Object" : typeof v;
+              const kind =
+                v === null
+                  ? "null"
+                  : typeof v === "object"
+                    ? (v.constructor && v.constructor.name) || "Object"
+                    : typeof v;
               let json;
-              try { json = JSON.parse(JSON.stringify(v)); }
-              catch (err) { return { ok: true, value: null, type: kind, note: `${kind} could not be serialised (${String(err)}) — return its fields instead` }; }
-              // A DOM node, a Map, a Set and a Promise all serialise to {}. Returning that
-              // bare reads as "the page has nothing", which is a different answer.
-              if (v && typeof v === "object" && !Array.isArray(v) && json && Object.keys(json).length === 0 && kind !== "Object") {
+              try {
+                json = JSON.parse(JSON.stringify(v));
+              } catch (err) {
+                return {
+                  ok: true,
+                  value: null,
+                  type: kind,
+                  note: `${kind} could not be serialised (${String(err)}) — return its fields instead`,
+                };
+              }
+              if (
+                v &&
+                typeof v === "object" &&
+                !Array.isArray(v) &&
+                json &&
+                Object.keys(json).length === 0 &&
+                kind !== "Object"
+              ) {
                 return {
                   ok: true,
                   value: json,
@@ -727,29 +772,38 @@ export async function handleCdp(action, params, tabId) {
                 };
               }
               return { ok: true, value: json, type: kind };
+            } catch (err) {
+              return { ok: false, error: String(err) };
             }
-            catch (err) { return { ok: false, error: String(err) }; }
           },
           args: [params.expression],
         });
         if (out?.result?.ok) {
           const { value, type, note } = out.result;
-          return { ok: true, result: { value, ...(type ? { type } : {}), ...(note ? { note } : {}) } };
+          return {
+            ok: true,
+            result: { value, ...(type ? { type } : {}), ...(note ? { note } : {}) },
+          };
         }
 
         const errStr = out?.result?.error || "";
-        const isCspOrTrustedTypes = /trusted type|content security policy|csp|eval.*disabled|violates.*directive/i.test(errStr);
+        const isCspOrTrustedTypes =
+          /trusted type|content security policy|csp|eval.*disabled|violates.*directive/i.test(
+            errStr
+          );
         if (!isCspOrTrustedTypes) {
           throw new Error(errStr + " (tip: cdp_attach first to bypass page CSP)");
         }
       } catch (scriptErr) {
-        if (!/trusted type|content security policy|csp|eval.*disabled|violates.*directive/i.test(scriptErr?.message || "")) {
+        if (
+          !/trusted type|content security policy|csp|eval.*disabled|violates.*directive/i.test(
+            scriptErr?.message || ""
+          )
+        ) {
           throw scriptErr;
         }
       }
 
-      // Seamless Auto-Fallback: page CSP / Trusted Types blocked MAIN world eval.
-      // Transparently attach debugger and evaluate via CDP Runtime.evaluate (bypasses CSP completely).
       await ensureAttached(tabId);
       const evalRes = await runtimeEval(tabId, params.expression);
       return { ok: true, result: evalRes };
@@ -759,17 +813,30 @@ export async function handleCdp(action, params, tabId) {
       requireSession(tabId);
       await requireForegroundForInput(tabId, "coordinate_click");
       const s = captureScale(tabId);
-      const x = params.x / s, y = params.y / s;
+      const x = params.x / s,
+        y = params.y / s;
       const button = params.button || "left";
       const clickCount = params.clickCount || 1;
       const buttons = BUTTON_MASK[button] || 1;
-      // Real click sequence: move, settle, press, brief hold, release — so sites that
-      // gate on hover/mousedown timing behave as with a human click.
       await send(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
       await pause(40);
-      await send(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, buttons, clickCount });
+      await send(tabId, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        x,
+        y,
+        button,
+        buttons,
+        clickCount,
+      });
       await pause(12);
-      await send(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, buttons: 0, clickCount });
+      await send(tabId, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x,
+        y,
+        button,
+        buttons: 0,
+        clickCount,
+      });
       return { ok: true, result: { clicked: { x, y } } };
     }
 
@@ -777,23 +844,47 @@ export async function handleCdp(action, params, tabId) {
       requireSession(tabId);
       await requireForegroundForInput(tabId, "coordinate_drag");
       const s = captureScale(tabId);
-      const fromX = params.fromX / s, fromY = params.fromY / s;
-      const toX = params.toX / s, toY = params.toY / s;
+      const fromX = params.fromX / s,
+        fromY = params.fromY / s;
+      const toX = params.toX / s,
+        toY = params.toY / s;
       await send(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: fromX, y: fromY });
-      await send(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x: fromX, y: fromY, button: "left", buttons: 1, clickCount: 1 });
+      await send(tabId, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        x: fromX,
+        y: fromY,
+        button: "left",
+        buttons: 1,
+        clickCount: 1,
+      });
       await pause(12);
-      // A couple of intermediate moves so drag-tracking handlers fire.
-      await send(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: (fromX + toX) / 2, y: (fromY + toY) / 2, button: "left", buttons: 1 });
-      await send(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: toX, y: toY, button: "left", buttons: 1 });
+      await send(tabId, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: (fromX + toX) / 2,
+        y: (fromY + toY) / 2,
+        button: "left",
+        buttons: 1,
+      });
+      await send(tabId, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: toX,
+        y: toY,
+        button: "left",
+        buttons: 1,
+      });
       await pause(12);
-      await send(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x: toX, y: toY, button: "left", buttons: 0, clickCount: 1 });
+      await send(tabId, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x: toX,
+        y: toY,
+        button: "left",
+        buttons: 0,
+        clickCount: 1,
+      });
       return { ok: true, result: { dragged: true } };
     }
 
     case "press_key_cdp": {
-      // Key press via CDP with modifier support + Mac editor commands. Acts on the page's
-      // currently focused element (click/type/focus the field first). Routed here by
-      // background.js only when modifiers are present and the debugger is attached.
       requireSession(tabId);
       const key = params.key;
       if (!key) throw new Error("press_key requires 'key'");
@@ -810,25 +901,13 @@ export async function handleCdp(action, params, tabId) {
       };
       await send(tabId, "Input.dispatchKeyEvent", { type: "keyDown", ...evt });
       await send(tabId, "Input.dispatchKeyEvent", { type: "keyUp", ...evt });
-      // via:"cdp" = a real OS-level key event (native editor commands apply). The DOM
-      // fallback in content.js reports via:"dom" instead, so a caller can always tell
-      // which semantics it got.
-      return { ok: true, result: { pressed: key, modifiers: params.modifiers || [], commands, via: "cdp" } };
+      return {
+        ok: true,
+        result: { pressed: key, modifiers: params.modifiers || [], commands, via: "cdp" },
+      };
     }
 
     case "cdp_send": {
-      // Raw CDP escape hatch: send ANY method in the chrome.debugger domain allowlist to
-      // the target tab and return its result verbatim. This exists so a capability that
-      // has no first-class tool yet (Fetch request interception, DOM.setFileInputFiles,
-      // Page.handleJavaScriptDialog, Emulation.*, Storage.*, Tracing.*) can be used or
-      // prototyped without shipping a tool per method — and so debugging a CDP question
-      // does not require editing this file and reloading the extension.
-      //
-      // Deliberately unguarded beyond requiring an attach: it is a power tool on a
-      // single-user, trusted-machine bridge (see README "Security"). It can wedge a tab
-      // (e.g. Fetch.enable with no handler pauses every request until you disable it) and
-      // it can undo this module's own invariants (Emulation.setDeviceMetricsOverride
-      // changes the screenshot scale that coordinate_click relies on).
       requireSession(tabId);
       const method = params.method;
       if (!method || typeof method !== "string") {
@@ -838,14 +917,10 @@ export async function handleCdp(action, params, tabId) {
         throw new Error(`'${method}' is not a CDP method name — expected Domain.method`);
       }
       const result = await send(tabId, method, params.params || {});
-      // CDP methods that return nothing resolve to undefined; report null so the caller
-      // can tell "succeeded with no payload" from a transport failure.
       return { ok: true, result: { method, result: result === undefined ? null : result } };
     }
 
     case "insert_text": {
-      // Type into the focused element via CDP, robust for emoji/IME/multibyte that
-      // char-by-char keycodes can't represent.
       requireSession(tabId);
       if (params.text === undefined) throw new Error("insert_text requires 'text'");
       await send(tabId, "Input.insertText", { text: String(params.text) });
@@ -853,28 +928,19 @@ export async function handleCdp(action, params, tabId) {
     }
 
     case "a11y_snapshot": {
-      // Attach on demand, the way screenshot already does. Requiring an explicit
-      // cdp_attach first made this read fail with "not attached: call cdp_attach first"
-      // on a first call — a two-step handshake for a plain read, and the kind of dead end
-      // that sends an agent to eval_js instead of retrying with the right prelude.
       await ensureAttached(tabId);
-      const max = params.max ?? 200;  // ?? so max:0 is honoured
-      try { await send(tabId, "Accessibility.enable"); } catch {}
+      const max = params.max ?? 200;
+      try {
+        await send(tabId, "Accessibility.enable");
+      } catch {}
       const { nodes: axNodes } = await send(tabId, "Accessibility.getFullAXTree");
       const nodes = collectAxNodes(axNodes, max);
       return { ok: true, result: { count: nodes.length, nodes } };
     }
 
     case "upload_set": {
-      // The one capability here that genuinely needs CDP: nothing in a page's JS can put a
-      // real file into an <input type=file>, because a File must come from the browser
-      // process. DOM.setFileInputFiles hands it the paths and fires input/change itself, the
-      // same way a human's file picker does. Paths are read by CHROME, on the bridge host.
       await ensureAttached(tabId);
       const files = params.files || [];
-      // Find the element the content script stamped. Runtime.evaluate (not DOM.querySelector)
-      // because the stamped input may live in a shadow root, which DOM.querySelector does not
-      // pierce, and because an objectId is what setFileInputFiles wants anyway.
       const found = await send(tabId, "Runtime.evaluate", {
         expression: `(() => {
           const seen = new Set();
@@ -895,19 +961,26 @@ export async function handleCdp(action, params, tabId) {
         })()`,
       });
       const objectId = found.result && found.result.objectId;
-      if (!objectId) throw new Error("the marked file input was gone by the time CDP looked for it (did the page re-render?)");
+      if (!objectId)
+        throw new Error(
+          "the marked file input was gone by the time CDP looked for it (did the page re-render?)"
+        );
       try {
-        try { await send(tabId, "DOM.enable"); } catch {}
+        try {
+          await send(tabId, "DOM.enable");
+        } catch {}
         await send(tabId, "DOM.setFileInputFiles", { objectId, files });
-        // Read back what the input is actually holding: the point of this tool is that the
-        // page now has the file, and "the call returned" is not that.
         const readBack = await send(tabId, "Runtime.callFunctionOn", {
           objectId,
-          functionDeclaration: "function(){return {count:this.files.length,names:[...this.files].map(f=>f.name),bytes:[...this.files].reduce((n,f)=>n+f.size,0)}}",
+          functionDeclaration:
+            "function(){return {count:this.files.length,names:[...this.files].map(f=>f.name),bytes:[...this.files].reduce((n,f)=>n+f.size,0)}}",
           returnByValue: true,
         });
         const attached = (readBack.result && readBack.result.value) || { count: 0, names: [] };
-        return { ok: true, result: { files: attached.names, count: attached.count, bytes: attached.bytes } };
+        return {
+          ok: true,
+          result: { files: attached.names, count: attached.count, bytes: attached.bytes },
+        };
       } finally {
         try {
           await send(tabId, "Runtime.callFunctionOn", {
@@ -915,16 +988,15 @@ export async function handleCdp(action, params, tabId) {
             functionDeclaration: "function(){this.removeAttribute('data-bctl-upload')}",
           });
         } catch {}
-        try { await send(tabId, "Runtime.releaseObject", { objectId }); } catch {}
+        try {
+          await send(tabId, "Runtime.releaseObject", { objectId });
+        } catch {}
       }
     }
 
     case "element_screenshot": {
       requireSession(tabId);
       const format = params.format || "png";
-      // Prefer a rect resolved by the content script (which owns ref/index resolution,
-      // including shadow-DOM elements). Fall back to the data-bctl-ref index stamp for
-      // callers that still pass a raw index without a resolved rect.
       let r = params.rect;
       if (!r) {
         const index = params.index;
@@ -935,11 +1007,8 @@ export async function handleCdp(action, params, tabId) {
         r = rect.result && rect.result.value;
       }
       if (!r) throw new Error(`element not found (snapshot first, or pass a valid ref/index)`);
-      // r is viewport-relative (getBoundingClientRect), but Page.captureScreenshot's
-      // clip is page-absolute when captureBeyondViewport is true — add the page scroll
-      // offset so a scrolled page clips the right region (Puppeteer does the same via
-      // layoutViewport.pageX/pageY).
-      let scrollX = 0, scrollY = 0;
+      let scrollX = 0,
+        scrollY = 0;
       try {
         const m = await send(tabId, "Page.getLayoutMetrics");
         const lvp = m.cssLayoutViewport || m.layoutViewport || {};
@@ -956,12 +1025,11 @@ export async function handleCdp(action, params, tabId) {
     }
 
     case "print_pdf": {
-      // printToPDF is normally headless-only, but Edge/Chrome support it via CDP
-      // for the active page. Auto-attach if not already attached.
       const needAttach = !sessions.has(tabId);
       if (needAttach) {
-        try { await attach(tabId); } catch (err) {
-          // If debugger is already attached externally, proceed with send
+        try {
+          await attach(tabId);
+        } catch (err) {
           if (!err.message.includes("already attached")) throw err;
         }
       }
@@ -970,35 +1038,54 @@ export async function handleCdp(action, params, tabId) {
         return { ok: true, result: { base64: res.data } };
       } finally {
         if (needAttach) {
-          try { await detach(tabId); } catch {}
+          try {
+            await detach(tabId);
+          } catch {}
         }
       }
     }
 
     case "audit": {
       requireSession(tabId);
-      try { await send(tabId, "Performance.enable"); } catch {}
+      try {
+        await send(tabId, "Performance.enable");
+      } catch {}
       const { metrics } = await send(tabId, "Performance.getMetrics");
       const metricMap = {};
       for (const m of metrics || []) metricMap[m.name] = m.value;
       const wanted = [
-        "Documents", "Nodes", "JSHeapUsedSize", "LayoutCount",
-        "RecalcStyleCount", "ScriptDuration", "TaskDuration",
+        "Documents",
+        "Nodes",
+        "JSHeapUsedSize",
+        "LayoutCount",
+        "RecalcStyleCount",
+        "ScriptDuration",
+        "TaskDuration",
       ];
       const performance = {};
       for (const name of wanted) {
         if (metricMap[name] !== undefined) performance[name] = metricMap[name];
       }
 
-      // Best-effort accessibility audit: count interactive nodes missing a name.
       let interactiveMissingName = 0;
       let totalAxNodes = 0;
       try {
-        try { await send(tabId, "Accessibility.enable"); } catch {}
+        try {
+          await send(tabId, "Accessibility.enable");
+        } catch {}
         const { nodes: axNodes } = await send(tabId, "Accessibility.getFullAXTree");
         const interactiveRoles = new Set([
-          "button", "link", "textbox", "checkbox", "radio", "combobox",
-          "listbox", "menuitem", "switch", "slider", "tab",
+          "button",
+          "link",
+          "textbox",
+          "checkbox",
+          "radio",
+          "combobox",
+          "listbox",
+          "menuitem",
+          "switch",
+          "slider",
+          "tab",
         ]);
         for (const node of axNodes || []) {
           const role = node.role && node.role.value;
@@ -1020,12 +1107,9 @@ export async function handleCdp(action, params, tabId) {
 
     case "get_cookies": {
       requireSession(tabId);
-      try { await send(tabId, "Network.enable"); } catch {}
-      // Default to THIS page's cookies. getAllCookies returns the whole jar — asked for
-      // "what cookies did this page set", it answered with 2,226 cookies across every
-      // domain, 704 KB: every session cookie the user holds, for banking, mail and work
-      // SSO, pulled into an agent's context and its transcript by a question about one
-      // page. The wide read stays available, but it has to be asked for.
+      try {
+        await send(tabId, "Network.enable");
+      } catch {}
       let raw;
       let scope;
       if (params.allDomains) {
@@ -1038,9 +1122,12 @@ export async function handleCdp(action, params, tabId) {
           url = tab && tab.url;
         }
         if (!url || /^(chrome|about|edge|devtools):/i.test(url)) {
-          const err = new Error(`cannot determine a page URL to scope cookies to (tab url: ${url || "unknown"})`);
+          const err = new Error(
+            `cannot determine a page URL to scope cookies to (tab url: ${url || "unknown"})`
+          );
           err.code = "INVALID_ARGUMENT";
-          err.recoveryHint = "Pass url:'https://example.com', or allDomains:true to read the entire cookie jar.";
+          err.recoveryHint =
+            "Pass url:'https://example.com', or allDomains:true to read the entire cookie jar.";
           throw err;
         }
         ({ cookies: raw } = await send(tabId, "Network.getCookies", { urls: [url] }));
@@ -1048,7 +1135,7 @@ export async function handleCdp(action, params, tabId) {
       }
       const filtered = params.urlContains
         ? (raw || []).filter((c) => String(c.domain || "").includes(params.urlContains))
-        : (raw || []);
+        : raw || [];
       const MAX = params.limit ?? 200;
       const page = filtered.slice(0, MAX);
       const cookies = page.map((c) => ({
@@ -1071,7 +1158,9 @@ export async function handleCdp(action, params, tabId) {
 
     case "set_cookie": {
       requireSession(tabId);
-      try { await send(tabId, "Network.enable"); } catch {}
+      try {
+        await send(tabId, "Network.enable");
+      } catch {}
       if (!params.url && !params.domain) {
         throw new Error("set_cookie requires 'url' or 'domain'");
       }
@@ -1088,7 +1177,9 @@ export async function handleCdp(action, params, tabId) {
 
     case "delete_cookies": {
       requireSession(tabId);
-      try { await send(tabId, "Network.enable"); } catch {}
+      try {
+        await send(tabId, "Network.enable");
+      } catch {}
       await send(tabId, "Network.deleteCookies", { name: params.name, url: params.url });
       return { ok: true, result: { deleted: params.name } };
     }

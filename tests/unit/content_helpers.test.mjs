@@ -25,7 +25,7 @@ const SRC = readFileSync(contentJsPath, "utf8");
 // Pull `function <name>(...) { ... }` out of SRC by counting braces from the first `{`
 // to its match, so nested blocks inside the function don't truncate the slice early.
 function extractFunction(src, name) {
-  const startMatch = src.match(new RegExp(`function\\s+${name}\\s*\\(`));
+  const startMatch = src.match(new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\(`));
   if (!startMatch) throw new Error(`function ${name} not found in content.js`);
   // Skip the parameter list before hunting for the body: a destructured parameter
   // (`function find({ query, selector })`) opens a brace that is not the body, and
@@ -810,7 +810,7 @@ const STABILITY_SRC = [
   extractConst(SRC, "GEOMETRY_PROPS"),
   extractFunction(SRC, "composedContains"),
   extractFunction(SRC, "runningMotion"),
-  "async " + extractFunction(SRC, "waitForStableRect"),
+  extractFunction(SRC, "waitForStableRect"),
 ];
 
 // A box that reports `boxes[i]` on the i-th read and then holds the last value.
@@ -950,4 +950,239 @@ test("an animation on an ancestor counts — a sliding modal carries its buttons
   const ctx = stabilityCtx({ visibilityState: "hidden", animations: [animation(modal, { left: Infinity })] });
   const { runningMotion } = loadStability(ctx);
   assert.ok(runningMotion(button), "an animation on the container must count for the control inside it");
+});
+
+// =====================================================================================
+// target resolution — 5-step deterministic resolution and ambiguity handling
+// =====================================================================================
+
+function loadResolveTarget(elements = [], { refMap = {}, refLabels = {}, customMatches = null } = {}) {
+  const slices = [
+    extractFunction(SRC, "createStructuredError"),
+    extractFunction(SRC, "makeCandidate"),
+    extractFunction(SRC, "ambiguityError"),
+    extractFunction(SRC, "resolveRef"),
+    extractFunction(SRC, "resolveTarget"),
+  ];
+  for (const el of elements) {
+    if (el?.__ref) refMap[el.__ref.replace(/^@/, "")] = { deref: () => el };
+  }
+  const stubs = {
+    refMap,
+    refLabels,
+    relocateByLabel: () => null,
+    INTERACTIVE_SELECTOR: "button, a, input, select, textarea, [role=button]",
+    ARIA_TEXT_SELECTOR: "[role=button]",
+    isValidCss: (sel) =>
+      typeof sel === "string" &&
+      !sel.includes("!") &&
+      (sel.startsWith("#") || sel.startsWith(".") || /^[a-z0-9_-]+$/i.test(sel) || sel.includes("[")),
+    deepQueryAll: (sel) => {
+      if (sel === "button, a, input, select, textarea, [role=button]" || sel === "[role=button]") {
+        return elements.filter((e) => !e.__nonInteractive);
+      }
+      if (sel.includes("input") || sel.includes("textarea") || sel.includes("aria-label")) {
+        return elements.filter((e) => e.placeholder || e["aria-label"] || e.tagName === "INPUT");
+      }
+      return elements.filter((e) => e.__sel === sel || e.tagName?.toLowerCase() === sel.toLowerCase());
+    },
+    isVisible: (el) => !el.__hidden,
+    accessibleName: (el) => el.getAttribute?.("aria-label") || el["aria-label"] || "",
+    elementText: (el) => el.innerText || el.textContent || "",
+    getOrAssignRef: (el) => el.__ref?.replace(/^@/, "") || "ref_1",
+    resolve: (idx) => elements[idx] || null,
+    matchesByText: (t) =>
+      customMatches
+        ? customMatches(t)
+        : elements
+            .filter((e) => (e.innerText || "").toLowerCase().includes(t.toLowerCase()))
+            .map((el) => ({ el, step: "interactive" })),
+    textOnlyMatches: new Set(),
+  };
+  const { resolveTarget } = loadFromContentJs(slices, ["resolveTarget"], stubs);
+  return resolveTarget;
+}
+
+test("resolveTarget: step 1 resolves by ref (@ref_1, ref_1)", () => {
+  const btn = { tagName: "BUTTON", innerText: "Save", isConnected: true, __ref: "ref_42" };
+  const resolveTarget = loadResolveTarget([btn]);
+  const res = resolveTarget({ target: "@ref_42" });
+  assert.equal(res, btn);
+  assert.equal(res._resolved.by, "ref");
+  assert.equal(res._resolved.ref, "@ref_42");
+  assert.equal(res._resolved.matchCount, 1);
+});
+
+test("resolveTarget: step 2 resolves single bare CSS selector, while explicit css= prefix grants first-match", () => {
+  const btnUnique = { tagName: "BUTTON", innerText: "Submit", isConnected: true, __ref: "ref_0", __sel: "#btn-unique" };
+  const resolveTargetSingle = loadResolveTarget([btnUnique]);
+  const resSingle = resolveTargetSingle({ target: "#btn-unique" });
+  assert.equal(resSingle, btnUnique);
+  assert.equal(resSingle._resolved.by, "css");
+  assert.equal(resSingle._resolved.matchCount, 1);
+
+  const btn1 = { tagName: "BUTTON", innerText: "Submit", isConnected: true, __ref: "ref_1", __sel: ".btn-submit" };
+  const btn2 = { tagName: "BUTTON", innerText: "Submit", isConnected: true, __ref: "ref_2", __sel: ".btn-submit" };
+  const resolveTargetMulti = loadResolveTarget([btn1, btn2]);
+
+  // Bare CSS matching multiple elements must throw AMBIGUOUS_TARGET
+  assert.throws(
+    () => resolveTargetMulti({ target: ".btn-submit" }),
+    (err) => {
+      assert.equal(err.code, "AMBIGUOUS_TARGET");
+      assert.equal(err.diagnostics.count, 2);
+      return true;
+    }
+  );
+
+  // Explicit css= prefix takes the first match and reports matchCount
+  const resPrefixed = resolveTargetMulti({ target: "css=.btn-submit" });
+  assert.equal(resPrefixed, btn1);
+  assert.equal(resPrefixed._resolved.by, "css");
+  assert.equal(resPrefixed._resolved.matchCount, 2);
+});
+
+test("resolveTarget: bare digit string resolves to visible text, not swallowed as ref", () => {
+  const pageBtn = { tagName: "BUTTON", innerText: "3", isConnected: true, __ref: "ref_99" };
+  const resolveTarget = loadResolveTarget([pageBtn]);
+  const res = resolveTarget({ target: "3" });
+  assert.equal(res, pageBtn);
+  assert.equal(res._resolved.by, "text-exact");
+  assert.equal(res._resolved.label, "3");
+});
+
+test("resolveTarget: numeric target resolves by snapshot index", () => {
+  const pageBtn = { tagName: "BUTTON", innerText: "Third", isConnected: true, __ref: "ref_5" };
+  const resolveTarget = loadResolveTarget([null, null, pageBtn]);
+  const res = resolveTarget({ target: 2 });
+  assert.equal(res, pageBtn);
+  assert.equal(res._resolved.by, "index");
+});
+
+test("resolveTarget: index= prefix string resolves by snapshot index", () => {
+  const pageBtn = { tagName: "BUTTON", innerText: "Third", isConnected: true, __ref: "ref_5" };
+  const resolveTarget = loadResolveTarget([null, null, pageBtn]);
+  const res = resolveTarget({ target: "index=2" });
+  assert.equal(res, pageBtn);
+  assert.equal(res._resolved.by, "index");
+});
+
+test("resolveTarget: bare tag name 'search' prefers visible button text (step 3) over container landmark", () => {
+  const landmark = { tagName: "SEARCH", innerText: "Landmark", isConnected: true, __ref: "ref_1", __sel: "search", __nonInteractive: true };
+  const btn = { tagName: "BUTTON", innerText: "search", isConnected: true, __ref: "ref_2", __sel: "button" };
+  const resolveTarget = loadResolveTarget([landmark, btn]);
+  const res = resolveTarget({ target: "search" });
+  assert.equal(res, btn);
+  assert.equal(res._resolved.by, "text-exact");
+});
+
+test("resolveTarget: bare tag name resolves as type selector in step 6 when no text matches", () => {
+  const nav = { tagName: "NAV", innerText: "Quick jump", isConnected: true, __ref: "ref_3", __sel: "nav", __nonInteractive: true };
+  const resolveTarget = loadResolveTarget([nav]);
+  const res = resolveTarget({ target: "nav" });
+  assert.equal(res, nav);
+  assert.equal(res._resolved.by, "css");
+});
+
+test("resolveTarget: step 3 resolves by exact visible text on interactive elements", () => {
+  const btn = { tagName: "BUTTON", innerText: "Log In", isConnected: true, __ref: "ref_10" };
+  const resolveTarget = loadResolveTarget([btn]);
+  const res = resolveTarget({ target: "Log In" });
+  assert.equal(res, btn);
+  assert.equal(res._resolved.by, "text-exact");
+  assert.equal(res._resolved.label, "Log In");
+  assert.equal(res._resolved.matchCount, 1);
+});
+
+test("resolveTarget: step 4 resolves by exact placeholder or aria-label", () => {
+  const input = {
+    tagName: "INPUT",
+    placeholder: "Search docs...",
+    getAttribute: (n) => (n === "placeholder" ? "Search docs..." : null),
+    isConnected: true,
+    __ref: "ref_20",
+  };
+  const resolveTarget = loadResolveTarget([input]);
+  const res = resolveTarget({ target: "Search docs..." });
+  assert.equal(res, input);
+  assert.equal(res._resolved.by, "placeholder");
+  assert.equal(res._resolved.matchCount, 1);
+});
+
+test("resolveTarget: step 5 resolves by visible text substring", () => {
+  const btn = { tagName: "BUTTON", innerText: "Checkout now with Paypal", isConnected: true, __ref: "ref_30" };
+  const resolveTarget = loadResolveTarget([btn]);
+  const res = resolveTarget({ target: "Checkout now" });
+  assert.equal(res, btn);
+  assert.equal(res._resolved.by, "text-substring");
+  assert.equal(res._resolved.matchCount, 1);
+});
+
+test("resolveTarget: ambiguity in step 3 throws AMBIGUOUS_TARGET with candidates", () => {
+  const btn1 = { tagName: "BUTTON", innerText: "Cancel", isConnected: true, __ref: "ref_1" };
+  const btn2 = { tagName: "BUTTON", innerText: "Cancel", isConnected: true, __ref: "ref_2" };
+  const resolveTarget = loadResolveTarget([btn1, btn2]);
+  assert.throws(
+    () => resolveTarget({ target: "Cancel" }),
+    (err) => {
+      assert.equal(err.code, "AMBIGUOUS_TARGET");
+      assert.equal(err.diagnostics.count, 2);
+      assert.equal(err.diagnostics.candidates.length, 2);
+      assert.equal(err.diagnostics.candidates[0].ref, "@ref_1");
+      assert.equal(err.diagnostics.candidates[1].ref, "@ref_2");
+      return true;
+    }
+  );
+});
+
+test("resolveTarget: explicit prefix css=, text=, placeholder= forces that resolution step", () => {
+  const input = {
+    tagName: "INPUT",
+    placeholder: "Search",
+    innerText: "Search",
+    getAttribute: (n) => (n === "placeholder" ? "Search" : null),
+    isConnected: true,
+    __ref: "ref_11",
+  };
+  const resolveTarget = loadResolveTarget([input]);
+  const res = resolveTarget({ target: "placeholder=Search" });
+  assert.equal(res._resolved.by, "placeholder");
+});
+
+test("fill_form: sequential stop-on-failure contract returns completed fields and failedIndex", async () => {
+  const slices = [
+    extractFunction(SRC, "createStructuredError"),
+    extractFunction(SRC, "fill_form"),
+  ];
+  const filledFields = [];
+  const stubs = {
+    location: { href: "https://site.test" },
+    startMutationCounter: () => ({ stop: () => 0 }),
+    buildEffect: () => ({ mutations: 0 }),
+    resolveTarget: ({ target }) => {
+      if (target === "fail_field") throw new Error("element not found");
+      return { _resolved: { by: "css", ref: "@ref_1", matchCount: 1 } };
+    },
+    insertIntoEditable: (el, val) => filledFields.push(val),
+  };
+  const { fill_form } = loadFromContentJs(slices, ["fill_form"], stubs);
+
+  await assert.rejects(
+    () =>
+      fill_form({
+        fields: [
+          { target: "input1", value: "hello" },
+          { target: "fail_field", value: "world" },
+          { target: "input3", value: "not_reached" },
+        ],
+      }),
+    (err) => {
+      assert.equal(err.code, "FILL_FORM_PARTIAL_FAILURE");
+      assert.equal(err.diagnostics.failedIndex, 1);
+      assert.equal(err.diagnostics.filled.length, 1);
+      assert.equal(err.diagnostics.filled[0].value, "hello");
+      return true;
+    }
+  );
+  assert.deepEqual(filledFields, ["hello"]);
 });

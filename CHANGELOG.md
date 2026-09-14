@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.8.0
+
+**BREAKING — 0.8.0 is a clean break and does not support 0.7.x.** Every tool was renamed or
+consolidated, element addressing collapsed into one `target` parameter, and the compatibility
+shims that existed during development have been removed. A 0.7 call fails; it does not quietly
+keep working. Failures are actionable: a removed parameter is refused with the form that replaces
+it, and `browser_action` called bare lists every action the bridge will dispatch. Pin 0.7.1 if you
+are not ready to move.
+
+### Consolidated & Renamed Tools
+- **browser_navigate**: Collapses browser_open_url and browser_reload into a single tool (url or reload: true).
+- **browser_tabs**: Consolidates browser_list_tabs, browser_switch_tab, browser_close_tab, and new-tab creation into a single management interface (action: "list" | "new" | "select" | "close").
+- **browser_type**: Renamed from browser_fill, supporting text input with set, type, and paste methods.
+- **browser_evaluate**: Renamed from browser_eval_js.
+- **browser_take_screenshot**: Renamed from browser_screenshot.
+- **browser_file_upload**: Renamed from browser_upload.
+- **browser_get_content**: Renamed from browser_get_page_content.
+
+### New Capabilities
+- **Unified target Resolution Engine**: Single parameter for element addressing across all interaction tools (browser_click, browser_type, browser_get_property, browser_select_option, browser_press_key, browser_scroll, browser_file_upload). Supports refs (@ref_1), explicit prefixes (css=, text=, placeholder=, index=), CSS selector syntax matching, exact visible text on interactive controls, placeholders/aria-labels, and type selector fallbacks. Reports unambiguous resolution metadata and raises AMBIGUOUS_TARGET on multiple candidate matches.
+- **browser_fill_form**: Batch form filling tool executing sequential field writes in one round-trip with stop-on-first-failure diagnostics.
+- **browser_extract**: Structured multi-row extraction tool from repeating DOM containers without writing JavaScript expressions.
+
+### Fixed
+- **`browser_take_screenshot({format: "png"})` works.** The shared `format` parameter added to every tab-scoped tool was overwriting the screenshot tool's own image-format enum, so the only accepted values were `json`/`pretty`/`smart`/`raw` — a PNG could not be requested at all, while the tool description advertised it. A tool that declares its own `format` now keeps it.
+- **`browser_hover` accepts `ref` and `index` again.** Its `target` was required, so the documented aliases were rejected by schema validation before the alias mapping ever ran.
+- **`browserctl browser_eval_js` is understood by the CLI again**, like every other renamed name.
+- **`browser_fill_form` refuses an empty field list at the schema** instead of a round trip later.
+- **`browser_extract` no longer requires `fields`.** Omitting it returns each row's text with its ref, which the protocol always supported — the tool schema was stricter than the capability.
+- **`target` is required on `browser_click`, `browser_type`, `browser_select_option` and `browser_hover`**, so a call missing it fails at the schema rather than a round trip later.
+- **`browser_go_back` / `browser_go_forward` work again.** They went through `chrome.tabs.goBack`, which refused every tab with "Cannot find a next page in history" even where the page's own `history.back()` moved fine. They now drive the page's history directly, which also works on a tab that is not in the foreground — the state this tool exists to drive.
+
+### Changed
+- **A page with several regions of one kind can now be told apart.** `structure` lists each region separately with its own ref and the name it declares (`nav "Shortcuts" 15 (@ref_80)`), and the census starts a new header when the region changes, not just when the landmark type does (`[Navigation — Facebook]`, `[Navigation — Shortcuts]`). Asked for "the left-hand navigation" on facebook.com, an agent previously saw 24 items under one `[Navigation]` heading spanning three different regions. A page with one region of each kind is unchanged, to the byte.
+- **A compact snapshot no longer carries the same rendered census twice.** `compactView` was an alias of `census` on every single-frame page, and the multi-frame merge rebuilt it even when there was nothing to merge. It is now emitted only when sub-frames were actually folded in, and readers fall back to `census`. On facebook.com a snapshot dropped from 38.2 kB to 31.8 kB — about 1,600 tokens per call.
+- **browser_tabs / list_tabs report `groupId`.** A tab in a Chrome tab group now says which group it is in. Cleanup could not verify what it could not see, and Chrome syncs saved tab groups between machines — a group left behind by a failed run reappears on the other machine.
+
+### Native Dialog Support — EXPERIMENTAL, and kept out of the core surface
+- A call that raises `alert()`/`confirm()`/`prompt()` while a debugger is attached now returns `DIALOG_BLOCKED` naming the type and message, instead of hanging on a page that will never reply. Nothing is ever answered on your behalf, and this guard adds no parameter to any tool.
+- Answering lives in the `cdp` profile: `browser_handle_dialog` for one already open, and `onDialog` on the triggering call through `browser_action`. **Unfinished** — no end-to-end coverage, and `beforeunload` and a `blockedBy` field on readers are not built. Do not build on it yet.
+- **`browser_hover` takes `target`** like every other interaction tool, instead of `ref`/`index`.
+
+### Changed
+- **A session is handed 47% less text before it starts.** The group note (`[READ] …`, `[ACT] …`) was pasted onto every tool description, so 24 tools carried 24 identical copies; it is now stated once in the server instructions and each tool carries only its `[GROUP]` tag. The `tabId`/`tab_id`/`format` parameter descriptions, repeated on 20 tools, moved the same way. What a default session loads dropped from 34,286 to 18,217 characters — roughly 8,600 tokens to 4,600, every session, before any work is done.
+
+### Fixed
+- **`browserctl extension-path` prints the folder to load in chrome://extensions.** Installing via npx or `npm -g` puts the extension inside the package, and the install guide told everyone to pick "the `extension/` directory inside this repository" — a directory those users do not have.
+
+### Deprecated & Migration Guidance
+- Legacy tool names (browser_open_url, browser_fill, browser_eval_js, etc.) mapped to helpful deprecation error hints directing callers to v2 equivalents.
+
 ## 0.7.1 — a result is data, not a rendered page
 
 Breaking in one way that matters to anyone parsing output, despite the patch number: **a tool

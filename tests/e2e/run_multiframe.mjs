@@ -29,44 +29,16 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-function envStr(name, fallback) {
-  const raw = process.env[name];
-  return raw !== undefined && raw !== "" ? raw : fallback;
-}
+import {
+  BRIDGE, cmd, assert, test, pollFind,
+  openMainTab, teardown, verifyClean, installReaper, report,
+} from "./harness.mjs";
 
-const BRIDGE = envStr("BROWSERCTL_BRIDGE_URL", envStr("BRIDGE_URL", "http://127.0.0.1:8765"));
+installReaper();
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TOP_PAGE = readFileSync(join(HERE, "multiframe.html"), "utf8");
 const CHILD_PAGE = readFileSync(join(HERE, "multiframe-child.html"), "utf8");
-
-async function cmd(action, params = {}) {
-  const res = await fetch(`${BRIDGE}/command`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action, params }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!data.ok) throw new Error(`${action}: ${data.error || "HTTP " + res.status}`);
-  return data.result;
-}
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function pollFind(query, timeoutMs = 5000, intervalMs = 100) {
-  const deadline = Date.now() + timeoutMs;
-  let r = await cmd("find", { query });
-  while (!(r.matches && r.matches.length) && Date.now() < deadline) {
-    await sleep(intervalMs);
-    r = await cmd("find", { query });
-  }
-  return r;
-}
-
-const results = [];
-async function test(name, fn) {
-  try { await fn(); results.push({ name, ok: true }); console.log(`  PASS  ${name}`); }
-  catch (e) { results.push({ name, ok: false, err: e.message }); console.log(`  FAIL  ${name}: ${e.message}`); }
-}
-function assert(cond, msg) { if (!cond) throw new Error(msg || "assertion failed"); }
 
 async function main() {
   // --- readiness gate: SKIP cleanly rather than fail if there's no real Chrome to drive ---
@@ -96,7 +68,7 @@ async function main() {
   let tabId;
   try {
     await test("new_tab (multiframe fixture)", async () => {
-      const r = await cmd("new_tab", { url: base + "/" });
+      const r = { id: await openMainTab(base + "/") };
       tabId = r.id;
       assert(tabId != null, "no tab id");
     });
@@ -227,15 +199,14 @@ async function main() {
       assert(/Iframe Clicked/.test(r.value || r.text || JSON.stringify(r)), `expected "Iframe Clicked", got ${JSON.stringify(r)}`);
     });
   } finally {
-    if (tabId != null) { try { await cmd("close_tab", { id: tabId }); } catch {} }
+    await teardown();
+    await test("cleanup leaves no tab and no synced group behind", async () => {
+      await verifyClean(`127.0.0.1:${PORT}`);
+    });
     server.close();
   }
 
-  const passed = results.filter((r) => r.ok).length;
-  const failed = results.filter((r) => !r.ok);
-  console.log(`\n==== ${passed}/${results.length} checks passed ====`);
-  if (failed.length) { console.log("FAILURES:"); for (const f of failed) console.log(`  - ${f.name}: ${f.err}`); }
-  process.exit(failed.length ? 1 : 0);
+  process.exit(report() ? 1 : 0);
 }
 
 main().catch((e) => { console.error("runner crashed:", e); process.exit(2); });

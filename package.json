@@ -1,6 +1,6 @@
 {
   "name": "browserctl-mcp",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Universal Browser Control Protocol & MCP Server for AI Agents and Developers",
   "type": "module",
   "main": "cli.js",
@@ -13,11 +13,12 @@
     "cli.js",
     "bridge/server.js",
     "bridge/state.js",
-    "bridge/package.json",
-    "mcp/",
+    "mcp/index.js",
     "extension/",
+    "docs/INSTALL.md",
+    "docs/REFERENCE.md",
+    "docs/TOOLS.md",
     "README.md",
-    "PROTOCOL.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
@@ -25,11 +26,14 @@
     "node": ">=18"
   },
   "scripts": {
-      "test": "node --test tests/unit/",
-      "start": "node bridge/server.js",
-      "mcp": "node mcp/index.js",
-      "preflight": "node scripts/preflight.mjs",
-      "preflight:e2e": "node scripts/preflight.mjs --e2e"
+    "test": "node --test tests/unit/",
+    "lint": "eslint cli.js bridge/**/*.js mcp/**/*.js extension/**/*.js",
+    "format": "prettier --write cli.js bridge/**/*.js mcp/**/*.js extension/**/*.js",
+    "format:check": "prettier --check cli.js bridge/**/*.js mcp/**/*.js extension/**/*.js",
+    "start": "node bridge/server.js",
+    "mcp": "node mcp/index.js",
+    "preflight": "node scripts/preflight.mjs",
+    "preflight:e2e": "node scripts/preflight.mjs --e2e"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -60,5 +64,9 @@
   "license": "MIT",
   "publishConfig": {
     "access": "public"
+  },
+  "devDependencies": {
+    "eslint": "^10.10.0",
+    "prettier": "^3.9.6"
   }
 }

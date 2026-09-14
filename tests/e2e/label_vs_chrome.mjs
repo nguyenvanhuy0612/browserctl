@@ -23,22 +23,6 @@ const call = (action, params = {}, timeoutMs = 45000) => new Promise((resolve) =
 // harness reported real names as misses and flattered nothing — it just lied downward.
 const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9\u00c0-\u024f\u1e00-\u1eff]+/g, " ").replace(/\s+/g, " ").trim();
 
-// Pair each element browserctl lists with the name Chrome computed for the very same
-// node, matched on backendDOMNodeId so nothing depends on text similarity.
-const PAIR_JS = `(function(){
-  var els = [];
-  var sel = ${JSON.stringify("a[href],button,input:not([type=hidden]),textarea,select,summary,[role=button],[role=link],[role=menuitem],[role=menuitemradio],[role=menuitemcheckbox],[role=tab],[role=treeitem],[role=option],[role=checkbox],[role=radio],[role=switch],[role=combobox],[role=searchbox],[role=textbox],[role=slider],[role=spinbutton]")};
-  var all = document.querySelectorAll(sel);
-  for (var i = 0; i < all.length && els.length < 400; i++) {
-    var e = all[i];
-    var r = e.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) continue;
-    var st = getComputedStyle(e);
-    if (st.display === 'none' || st.visibility === 'hidden') continue;
-    els.push({ tag: e.tagName.toLowerCase(), type: (e.getAttribute('type')||''), role: e.getAttribute('role')||'' });
-  }
-  return JSON.stringify({ count: els.length, els: els });
-})()`;
 
 async function auditSite(url) {
   const opened = (await call("new_tab", { url })).result;

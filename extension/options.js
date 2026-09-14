@@ -1,5 +1,3 @@
-// Options page: edit the bridge host/port and show live connection status.
-
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 8765;
 
@@ -11,8 +9,10 @@ const connEl = document.getElementById("conn");
 const connUrlEl = document.getElementById("connurl");
 
 async function loadConfig() {
-  const { bridgeHost = DEFAULT_HOST, bridgePort = DEFAULT_PORT } =
-    await chrome.storage.local.get(["bridgeHost", "bridgePort"]);
+  const { bridgeHost = DEFAULT_HOST, bridgePort = DEFAULT_PORT } = await chrome.storage.local.get([
+    "bridgeHost",
+    "bridgePort",
+  ]);
   hostEl.value = bridgeHost;
   portEl.value = bridgePort;
 }
@@ -30,10 +30,11 @@ async function save() {
   statusEl.className = "status ok";
 }
 
-// Reflect pipeline health by asking the bridge whether the extension is connected.
 async function refreshStatus() {
-  const { bridgeHost = DEFAULT_HOST, bridgePort = DEFAULT_PORT } =
-    await chrome.storage.local.get(["bridgeHost", "bridgePort"]);
+  const { bridgeHost = DEFAULT_HOST, bridgePort = DEFAULT_PORT } = await chrome.storage.local.get([
+    "bridgeHost",
+    "bridgePort",
+  ]);
   const base = `http://${bridgeHost}:${bridgePort}`;
   connUrlEl.textContent = `ws://${bridgeHost}:${bridgePort}/extension`;
   try {

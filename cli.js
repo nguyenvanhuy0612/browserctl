@@ -1,19 +1,4 @@
 #!/usr/bin/env node
-// CLI Helper for browserctl bridge & MCP client
-//
-// Usage:
-//   browserctl status
-//   browserctl start | stop | restart
-//   browserctl open https://example.com
-//   browserctl snapshot [--compact]
-//   browserctl click @e1 | ref_1 | 0 | --text "Sign In" | --selector "#btn"
-//   browserctl fill @e1 "text" | type @e2 "text" [--submit]
-//   browserctl get text @e1 | value @e1 | attr @e1 href | title | url | html
-//   browserctl clear @e1 | check @e1 | uncheck @e1 | select @e1 <value>
-//   browserctl wait 2000 | @e1 | --text "Success" | --network-idle | --settle
-//   browserctl screenshot [output.png] [--full] | pdf [output.pdf]
-//   browserctl eval "document.title" [-r|--raw]
-//   browserctl tab [list | new | switch | close]
 
 import { spawn, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -48,6 +33,7 @@ Usage:
                                         task: it is shared with the user and other agents,
                                         and it records a stopped state that blocks restart.
   browserctl restart                    Restart bridge daemon
+  browserctl extension-path             Print the folder to load in chrome://extensions
 
 You do not need to start anything before your first command, and you do not need to leave a
 terminal open. Every MCP tool has a CLI equivalent: browser_snapshot -> snapshot,
@@ -153,7 +139,6 @@ async function startBridgeDaemon() {
       });
       child.unref();
 
-      // Poll up to 2.5s (bounded 25 x 100ms)
       const start = Date.now();
       while (Date.now() - start < 2500) {
         await new Promise((r) => setTimeout(r, 100));
@@ -184,7 +169,9 @@ function stopBridgeDaemon() {
         const parts = line.trim().split(/\s+/);
         const pid = parts[parts.length - 1];
         if (/^\d+$/.test(pid) && pid !== "0") {
-          try { execSync(`taskkill /F /PID ${pid}`); } catch {}
+          try {
+            execSync(`taskkill /F /PID ${pid}`);
+          } catch {}
         }
       }
       markDaemonStopped({ stoppedBy: "cli_stop" });
@@ -210,15 +197,16 @@ async function ensureBridge(autoDaemon = true, forceAuto = false) {
   if (await isBridgeRunning()) return true;
 
   if (!autoDaemon && !forceAuto) {
-    process.stderr.write("[browserctl] Error: Bridge daemon is not running. Start it with 'browserctl start'.\n");
+    process.stderr.write(
+      "[browserctl] Error: Bridge daemon is not running. Start it with 'browserctl start'.\n"
+    );
     process.exit(1);
   }
 
-  // If user/agent explicitly ran 'browserctl stop', do not auto-start unless forced
   if (isDaemonExplicitlyStopped() && !forceAuto) {
     process.stderr.write(
       "[browserctl] Error: Bridge daemon is currently stopped (stopped by user/agent).\n" +
-      "             Run 'browserctl start' to restart the daemon, or pass --auto-daemon.\n"
+        "             Run 'browserctl start' to restart the daemon, or pass --auto-daemon.\n"
     );
     process.exit(1);
   }
@@ -227,28 +215,62 @@ async function ensureBridge(autoDaemon = true, forceAuto = false) {
   if ((autoStartPolicy === "manual" || autoStartPolicy === "false") && !forceAuto) {
     process.stderr.write(
       "[browserctl] Error: Bridge daemon is not running and BROWSERCTL_AUTO_START=manual.\n" +
-      "             Run 'browserctl start' to start the daemon.\n"
+        "             Run 'browserctl start' to start the daemon.\n"
     );
     process.exit(1);
   }
 
-  process.stderr.write("[browserctl] Bridge daemon not detected. Starting bridge on http://127.0.0.1:8765...\n");
+  process.stderr.write(
+    "[browserctl] Bridge daemon not detected. Starting bridge on http://127.0.0.1:8765...\n"
+  );
   const started = await startBridgeDaemon();
   if (started) {
     process.stderr.write("[browserctl] Bridge daemon started successfully.\n");
     return true;
   }
-  process.stderr.write("[browserctl] Warning: Bridge daemon failed to respond. Attempting command anyway...\n");
+  process.stderr.write(
+    "[browserctl] Warning: Bridge daemon failed to respond. Attempting command anyway...\n"
+  );
   return false;
 }
 
 const HTML_TAGS = new Set([
-  "h1", "h2", "h3", "h4", "h5", "h6", "p", "a", "button", "input", "textarea", "select",
-  "div", "span", "img", "form", "header", "footer", "article", "section", "nav", "main",
-  "ul", "ol", "li", "table", "tr", "td", "th", "label", "meta", "link", "body", "svg"
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "p",
+  "a",
+  "button",
+  "input",
+  "textarea",
+  "select",
+  "div",
+  "span",
+  "img",
+  "form",
+  "header",
+  "footer",
+  "article",
+  "section",
+  "nav",
+  "main",
+  "ul",
+  "ol",
+  "li",
+  "table",
+  "tr",
+  "td",
+  "th",
+  "label",
+  "meta",
+  "link",
+  "body",
+  "svg",
 ]);
 
-// Parse target element identifier (@e1, @1, ref_1, 1, 0, selector, text, placeholder)
 function parseTarget(arg, params) {
   if (!arg) return;
   const trimmed = arg.trim();
@@ -266,19 +288,16 @@ function parseTarget(arg, params) {
     return;
   }
 
-  // Matches any @-prefixed target identifier: @ref_1, @1, @e1, @f898:ref_54, @f12:e5
   if (trimmed.startsWith("@")) {
     params.ref = trimmed;
     return;
   }
 
-  // Matches frame-qualified or local refs without @: f898:ref_54, f1:e2, ref_1, ref1, e1
   if (/^(?:f\w+:)?(?:ref_?|e)\w+$/i.test(trimmed)) {
     params.ref = `@${trimmed}`;
     return;
   }
 
-  // Matches single digit index if pure number
   if (/^\d+$/.test(trimmed)) {
     params.index = parseInt(trimmed, 10);
     return;
@@ -300,7 +319,6 @@ function parseTarget(arg, params) {
   }
 }
 
-// Format a clean ASCII table for list_tabs
 function formatTabsTable(tabs = []) {
   if (!Array.isArray(tabs) || tabs.length === 0) return "No open tabs.";
   const header = `ID         ACTIVE   TITLE                                          URL`;
@@ -335,7 +353,6 @@ async function main() {
   let explicitTabId = null;
   let settleMs = null;
 
-  // Filter global flags from ANY position in rawArgs
   const positionalArgs = [];
   for (let i = 0; i < rawArgs.length; i++) {
     const a = rawArgs[i];
@@ -374,7 +391,6 @@ async function main() {
   let action = positionalArgs[0];
   let args = positionalArgs.slice(1);
 
-  // Friendly action aliases for agent ergonomics
   if (action === "tabs" || action === "tab_list") {
     action = "tab";
     args = ["list", ...args];
@@ -391,7 +407,6 @@ async function main() {
     action = "dismiss";
   }
 
-  // Daemon control actions
   if (action === "start" || action === "daemon") {
     if (await isBridgeRunning()) {
       markDaemonRunning({ port: 8765, url: BRIDGE_URL });
@@ -425,6 +440,24 @@ async function main() {
     process.exit(0);
   }
 
+  if (action === "extension-path" || action === "extension") {
+    const dir = join(__dirname, "extension");
+    const ok = fs.existsSync(join(dir, "manifest.json"));
+    if (prettyOutput || jsonOutput) {
+      const out = { ok, path: dir };
+      console.log(prettyOutput ? JSON.stringify(out, null, 2) : JSON.stringify(out));
+    } else if (ok) {
+      console.log(dir);
+      console.log("");
+      console.log(
+        "Load it: chrome://extensions -> Developer mode -> Load unpacked -> the path above."
+      );
+    } else {
+      console.log(`no extension found at ${dir}`);
+    }
+    process.exit(ok ? 0 : 1);
+  }
+
   if (action === "restart") {
     stopBridgeDaemon();
     await new Promise((r) => setTimeout(r, 200));
@@ -449,24 +482,30 @@ async function main() {
       } else {
         console.log(`Bridge: RUNNING (${BRIDGE_URL})`);
         console.log(`Extension: ${data.extensionConnected ? "CONNECTED" : "DISCONNECTED"}`);
-        // The bridge announces the call log at startup, but the daemon is spawned with
-        // stdio "ignore" — that line reaches nobody in the mode everyone actually runs.
-        // This is the surface a person looks at, so the notice belongs here too.
         if (data.callLog) {
           const mb = (n) => (n / 1024 / 1024).toFixed(1);
           const size = data.callLogBytes != null ? `${mb(data.callLogBytes)}MB` : "?";
-          const cap = data.callLogMaxBytes != null ? `, rotates at ${mb(data.callLogMaxBytes)}MB` : "";
-          console.log(`Call log: ON  ${data.callLog} (${size}${cap}; parameter values never written)`);
+          const cap =
+            data.callLogMaxBytes != null ? `, rotates at ${mb(data.callLogMaxBytes)}MB` : "";
+          console.log(
+            `Call log: ON  ${data.callLog} (${size}${cap}; parameter values never written)`
+          );
         }
       }
     } catch (err) {
-      const statusObj = { ok: false, daemonState: stateInfo.state || "stopped", error: err.message };
+      const statusObj = {
+        ok: false,
+        daemonState: stateInfo.state || "stopped",
+        error: err.message,
+      };
       if (prettyOutput) {
         console.log(JSON.stringify(statusObj, null, 2));
       } else if (jsonOutput) {
         console.log(JSON.stringify(statusObj));
       } else {
-        console.log(`Bridge: ${stateInfo.state === "stopped" ? "STOPPED (explicitly)" : "OFFLINE"}`);
+        console.log(
+          `Bridge: ${stateInfo.state === "stopped" ? "STOPPED (explicitly)" : "OFFLINE"}`
+        );
         console.log(`Error: ${err.message}`);
       }
       process.exit(1);
@@ -474,10 +513,8 @@ async function main() {
     return;
   }
 
-  // Ensure bridge is up for other actions
   await ensureBridge(autoDaemon, forceAutoDaemon);
 
-  // Tab subcommand router
   if (action === "tab") {
     const sub = args[0] || "list";
     if (sub === "list" || sub === "ls") {
@@ -499,17 +536,21 @@ async function main() {
     }
   }
 
-  // Alias mappings
   if (action === "open") action = "navigate";
   if (action === "tabs") action = "list_tabs";
   if (action === "back") action = "go_back";
   if (action === "forward") action = "go_forward";
   if (action === "press") action = "press_key";
-  if (action === "eval" || action === "browser_eval_js") action = "eval_js";
+  if (action === "eval" || action === "browser_evaluate" || action === "evaluate")
+    action = "eval_js";
   if (action === "fill") action = "type";
   if (action === "scrollintoview") action = "scrollintoview";
+  if (action === "file_upload" || action === "file-upload") action = "upload";
+  if (action === "take_screenshot" || action === "take-screenshot") action = "screenshot";
+  if (action === "get_content" || action === "get-content") action = "get_page_content";
+  if (action === "select_option" || action === "select-option") action = "select_option";
+  if (action === "fill_form" || action === "fill-form") action = "fill_form";
 
-  // Handle local sleep wait if wait <number>
   if (action === "wait" && args.length > 0 && /^\d+$/.test(args[0])) {
     const ms = parseInt(args[0], 10);
     await new Promise((r) => setTimeout(r, ms));
@@ -530,11 +571,10 @@ async function main() {
   if (explicitTabId != null) params.tabId = explicitTabId;
   if (settleMs != null) params.settleMs = settleMs;
 
-  // JSON argument payload
   if (args.length === 1 && args[0].trim().startsWith("{")) {
     try {
       params = { ...params, ...JSON.parse(args[0]) };
-    } catch (e) {
+    } catch (_e) {
       console.error("Invalid JSON params:", args[0]);
       process.exit(1);
     }
@@ -553,9 +593,6 @@ async function main() {
 
       case "read_page":
         if (args[0] && !args[0].startsWith("-")) params.mode = args[0];
-        // --depth and --max-chars were parsed by nobody: the flags were accepted on the
-        // command line and silently dropped, so `read_page --depth 8` quietly ran at the
-        // default. A parameter that vanishes without a word is worse than one rejected.
         for (let i = 0; i < args.length; i++) {
           const a = args[i];
           const val = (inline) => (inline !== undefined ? inline : args[++i]);
@@ -574,9 +611,7 @@ async function main() {
         let prop = args[0] || "text";
         if (prop === "attribute") prop = "attr";
         params.property = prop;
-        if (prop === "title" || prop === "url") {
-          // No target needed
-        } else if (prop === "attr") {
+        if (prop === "attr") {
           let i = 1;
           while (i < args.length) {
             if (args[i] === "--selector" && args[i + 1]) {
@@ -592,7 +627,7 @@ async function main() {
           }
         } else if (prop === "count") {
           if (args[1]) params.selector = args[1];
-        } else {
+        } else if (prop !== "title" && prop !== "url") {
           let i = 1;
           while (i < args.length) {
             if (args[i] === "--selector" && args[i + 1]) {
@@ -638,8 +673,6 @@ async function main() {
       }
 
       case "upload": {
-        // `browserctl upload ./report.pdf` — paths are resolved against the SHELL's cwd here,
-        // because that is what the person typing them means; Chrome gets absolutes.
         let i = 0;
         while (i < args.length) {
           if (args[i] === "--selector" && args[i + 1]) {
@@ -749,6 +782,41 @@ async function main() {
         break;
       }
 
+      case "extract": {
+        let i = 0;
+        while (i < args.length) {
+          if (args[i] === "--selector" && args[i + 1]) {
+            params.selector = args[++i];
+          } else if (args[i] === "--max" && args[i + 1]) {
+            params.max = parseInt(args[++i], 10);
+          } else if (!params.selector && !args[i].startsWith("{") && !args[i].startsWith("-")) {
+            params.selector = args[i];
+          } else if (args[i].startsWith("{")) {
+            try {
+              params.fields = JSON.parse(args[i]);
+            } catch {}
+          }
+          i++;
+        }
+        break;
+      }
+
+      case "fill_form": {
+        if (args[0] && args[0].startsWith("{")) {
+          try {
+            params = { ...params, ...JSON.parse(args[0]) };
+          } catch {}
+        }
+        break;
+      }
+
+      case "get_content":
+      case "get_page_content": {
+        action = "get_page_content";
+        if (args[0] && /^\d+$/.test(args[0])) params.maxChars = parseInt(args[0], 10);
+        break;
+      }
+
       case "dismiss": {
         let i = 0;
         while (i < args.length) {
@@ -782,7 +850,7 @@ async function main() {
         break;
 
       case "eval_js":
-      case "browser_eval_js":
+      case "browser_evaluate":
         if (args[0]) params.expression = args.join(" ");
         break;
 
@@ -795,10 +863,6 @@ async function main() {
         if (args[0]) params.command = args.join(" ");
         break;
 
-      // Documented in the README's command catalog, but they had no case here, so the
-      // positional argument fell into the key=value parser below, matched nothing, and the
-      // action was dispatched with empty params: `browserctl find login` returned
-      // "find requires 'query'".
       case "find":
       case "find_text":
         if (args.length) {
@@ -813,7 +877,6 @@ async function main() {
         break;
 
       default: {
-        // Parse key=value pairs
         let mapped = 0;
         for (const arg of args) {
           const eq = arg.indexOf("=");
@@ -827,16 +890,13 @@ async function main() {
             mapped++;
           }
         }
-        // A command with no case here and positional arguments that are not key=value
-        // cannot be formed, and dispatching it anyway produced a confusing error from the
-        // page ("X requires 'query'") for what is really a CLI gap. Say so instead.
         const positional = args.filter((a) => !a.startsWith("-") && a.indexOf("=") < 0);
         if (positional.length && mapped === 0) {
           console.error(
             `${action}: this command takes no positional arguments in the CLI, so ` +
-            `${JSON.stringify(positional[0])} was ignored.\n` +
-            `Pass them explicitly as key=value (e.g. ${action} query="${positional[0]}"), ` +
-            `or run 'browserctl --help' for the commands that do take arguments.`
+              `${JSON.stringify(positional[0])} was ignored.\n` +
+              `Pass them explicitly as key=value (e.g. ${action} query="${positional[0]}"), ` +
+              `or run 'browserctl --help' for the commands that do take arguments.`
           );
           process.exit(2);
         }
@@ -865,7 +925,6 @@ async function main() {
 
     const result = data.result !== undefined ? data.result : data;
 
-    // Binary file saving for screenshot and pdf
     if (saveFilePath) {
       let b64 = null;
       if (typeof result?.dataUrl === "string") {
@@ -882,20 +941,25 @@ async function main() {
         if (rawOutput) {
           process.stdout.write(saveFilePath);
         } else if (prettyOutput) {
-          console.log(JSON.stringify({ ok: true, saved: saveFilePath, bytes: buf.length }, null, 2));
+          console.log(
+            JSON.stringify({ ok: true, saved: saveFilePath, bytes: buf.length }, null, 2)
+          );
         } else if (jsonOutput) {
           console.log(JSON.stringify({ ok: true, saved: saveFilePath, bytes: buf.length }));
         } else {
-          console.log(`Saved ${action === "print_pdf" ? "PDF" : "screenshot"} to ${saveFilePath} (${buf.length} bytes)`);
+          console.log(
+            `Saved ${action === "print_pdf" ? "PDF" : "screenshot"} to ${saveFilePath} (${buf.length} bytes)`
+          );
         }
         return;
       }
     }
 
-    // 1. Raw Output Mode (-r / --raw): pure string without wrappers or trailing newlines
     if (rawOutput) {
       if (result?.value !== undefined) {
-        process.stdout.write(typeof result.value === "object" ? JSON.stringify(result.value) : String(result.value));
+        process.stdout.write(
+          typeof result.value === "object" ? JSON.stringify(result.value) : String(result.value)
+        );
         return;
       }
       if (typeof result?.text === "string") {
@@ -914,39 +978,36 @@ async function main() {
       return;
     }
 
-    // 2. Pretty JSON Mode (--pretty): 2-space indented full object
     if (prettyOutput) {
       console.log(JSON.stringify(result, null, 2));
       return;
     }
 
-    // 3. Compact JSON Mode (--json): minified 1-line valid JSON object
     if (jsonOutput) {
       console.log(JSON.stringify(result));
       return;
     }
 
-    // 4. Smart Default Mode (Token-Efficient, No Info Loss):
     if (action === "list_tabs" && Array.isArray(result?.tabs)) {
       console.log(formatTabsTable(result.tabs));
       return;
     }
 
     if (action === "snapshot") {
-      if (result?.compactView) {
+      if (result?.compactView || result?.census) {
         console.log(`Page: ${result.title || "Untitled"} (${result.url})`);
         if (result.viewport) {
           const vh = result.viewport.height || 0;
           const sy = result.viewport.scrollY || 0;
           const sh = result.viewport.scrollHeight || vh;
-          console.log(`Viewport: Y: ${sy}px-${sy + vh}px of ${sh}px total height (${result.viewport.width}x${vh}, scroll: ${result.viewport.scrollPercent}%, scope: ${result.scope || "viewport"})`);
+          console.log(
+            `Viewport: Y: ${sy}px-${sy + vh}px of ${sh}px total height (${result.viewport.width}x${vh}, scroll: ${result.viewport.scrollPercent}%, scope: ${result.scope || "viewport"})`
+          );
         }
         if (result.pageState?.hasActiveModal) {
           console.log(`[Active Modal: <${result.pageState.activeModalTag || "dialog"}>]`);
         }
         const total = result.totalElementsCount ?? result.elements?.length ?? 0;
-        // What is in SCOPE, not the size of the page of the census just printed — the two
-        // diverged when the census learned to page.
         const visible = result.window?.inScope ?? (result.elements?.length || 0);
         const folded = result.foldedCount ? `, ${result.foldedCount} folded` : "";
         if (result.scope === "viewport" && result.offscreenCount > 0) {
@@ -957,31 +1018,40 @@ async function main() {
         if (result.structure) console.log(`Structure: ${result.structure}`);
         console.log(`\n${result.census || result.compactView}`);
 
-        // The census carries rows; everything it withheld is reported as data, and a human
-        // reading the CLI needs it in words. These lines used to live inside the census
-        // itself, which is why they disappeared from here when it became a data field.
         const notes = [];
         if (result.window && result.next !== undefined) {
-          notes.push(`elements ${result.window.offset + 1}-${result.window.offset + result.window.shown} of ${result.window.inScope} listed — continue with --cursor ${result.next}`);
+          notes.push(
+            `elements ${result.window.offset + 1}-${result.window.offset + result.window.shown} of ${result.window.inScope} listed — continue with --cursor ${result.next}`
+          );
         }
-        if (result.offscreenCount) notes.push(`${result.offscreenCount} offscreen — 'snapshot --all' lists them, or scroll`);
-        if (result.duplicateCount) notes.push(`${result.duplicateCount} duplicate link(s) suppressed (same destination and label)`);
-        // One line, and the reason said once. Per-item repetition of the same sentence is
-        // how a helpful note becomes wallpaper.
+        if (result.offscreenCount)
+          notes.push(`${result.offscreenCount} offscreen — 'snapshot --all' lists them, or scroll`);
+        if (result.duplicateCount)
+          notes.push(
+            `${result.duplicateCount} duplicate link(s) suppressed (same destination and label)`
+          );
         const hidden = result.hiddenContent || [];
         if (hidden.length) {
-          const label = (h) => `"${String(h.text || "").replace(/\s+/g, " ").slice(0, 40)}" (@${h.ref})`;
+          const label = (h) =>
+            `"${String(h.text || "")
+              .replace(/\s+/g, " ")
+              .slice(0, 40)}" (@${h.ref})`;
           const bits = [];
           const more = hidden.filter((h) => h.kind === "load-more");
           const tabs = hidden.filter((h) => h.kind === "tab");
           const regions = hidden.filter((h) => h.kind === "scrollable-region");
           if (more.length) bits.push(`loads more on click: ${more.map(label).join(", ")}`);
           if (tabs.length) bits.push(`filter tabs: ${tabs.map(label).join(", ")}`);
-          for (const r of regions) bits.push(`a scrollable region with ~${r.hiddenPx}px below the fold (@${r.ref})`);
-          notes.push(`${bits.join("; ")} — rows behind these are not in the DOM, so no scope setting reveals them`);
+          for (const r of regions)
+            bits.push(`a scrollable region with ~${r.hiddenPx}px below the fold (@${r.ref})`);
+          notes.push(
+            `${bits.join("; ")} — rows behind these are not in the DOM, so no scope setting reveals them`
+          );
         }
         for (const d of result.pageState?.openDialogs || []) {
-          notes.push(`dialog open: "${d.label}" (@${d.ref}) — read it with 'get text @${d.ref}', close it with 'dismiss'`);
+          notes.push(
+            `dialog open: "${d.label}" (@${d.ref}) — read it with 'get text @${d.ref}', close it with 'dismiss'`
+          );
         }
         if (notes.length) console.log("\n" + notes.map((n) => `  · ${n}`).join("\n"));
         return;
@@ -1006,7 +1076,6 @@ async function main() {
       return;
     }
 
-    // Friendly 1-line action summaries for mutations
     if (result?.clicked) {
       console.log(`Clicked ${result.clicked}`);
       return;
@@ -1044,7 +1113,6 @@ async function main() {
       return;
     }
 
-    // Fallback: output clean JSON
     console.log(JSON.stringify(result, null, 2));
   } catch (err) {
     const errPayload = { ok: false, error: err.message };

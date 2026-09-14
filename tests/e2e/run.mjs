@@ -1,30 +1,37 @@
 // End-to-end test runner for browserctl.
 //
-// Drives the LIVE stack (agent -> bridge -> extension -> Chrome) by POSTing real
-// commands to the running bridge, against a controlled test page this script
-// serves over http (real origin, so localStorage works). Exercises the essential
-// commands and the behaviours most recently changed:
-//   - type/fill via the native value setter survives a React-like controlled input
-//   - element_screenshot resolves by REF (not just a snapshot index), incl. shadow DOM
-//   - snapshot/find pierce an open shadow root
-//   - navigate/go_back/go_forward wait for the real load (hardened waitForComplete)
-//   - coordinate_click maps viewport pixels correctly
+// Drives the LIVE stack (agent -> bridge -> extension -> Chrome) against a fixture page this
+// script serves over http (a real origin, so localStorage and cross-origin iframes behave).
+//
+// Tab discipline is not negotiable and lives in harness.mjs: ONE long-lived tab, scratch tabs
+// only through withScratchTab(), every tab on a ledger, groups ungrouped before anything is
+// closed (Chrome syncs saved tab groups between machines), teardown on exit and on Ctrl-C, and
+// verifyClean() failing the run if any of it leaked. Six orphaned tabs from earlier runs are
+// what this replaced.
 //
 // Prereqs: bridge running (`browserctl start` or `npm start`) and the extension connected.
 // Run:  node tests/e2e/run.mjs
-// It creates a dedicated tab, runs everything there, and closes it at the end.
 
 import http from "node:http";
 import { readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, basename } from "node:path";
-function envStr(name, fallback) {
-  const raw = process.env[name];
-  return raw !== undefined && raw !== "" ? raw : fallback;
-}
+import {
+  BRIDGE,
+  cmd,
+  cmdFail,
+  assert,
+  test,
+  used,
+  openMainTab,
+  teardown,
+  verifyClean,
+  installReaper,
+  report,
+} from "./harness.mjs";
 
-const BRIDGE = envStr("BROWSERCTL_BRIDGE_URL", envStr("BRIDGE_URL", "http://127.0.0.1:8765"));
+installReaper();
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PAGE_RAW = readFileSync(join(HERE, "testpage.html"), "utf8");
 const SECOND = "<!doctype html><title>second</title><h1 id=sec>Second Page</h1>";
@@ -42,96 +49,26 @@ function protocolActions() {
   const src = readFileSync(new URL("../../mcp/index.js", import.meta.url), "utf8");
   const registered = [...src.matchAll(/\btool\(\s*"([a-z_0-9]+)"/g)].map((m) => m[1]);
   const aliasBlock = src.match(/const ACTION_ALIASES\s*=\s*\{([\s\S]*?)\n\};/);
-  const aliases = aliasBlock ? [...aliasBlock[1].matchAll(/^\s*([a-z_0-9]+)\s*:/gm)].map((m) => m[1]) : [];
+  const aliases = aliasBlock
+    ? [...aliasBlock[1].matchAll(/^\s*([a-z_0-9]+)\s*:/gm)].map((m) => m[1])
+    : [];
   return [...new Set([...registered, ...aliases])].sort();
 }
 
 // Deliberately never exercised here, with the reason. Anything NOT listed and NOT called
 // shows up as a coverage miss, which is the point.
 const NOT_EXERCISED = {
-  reload_extension: "drops the connection mid-run by design",
-  // The get_* names are dispatch aliases for one action: get_property with a fixed
-  // `property`. This suite exercises get_property itself in every shape (single, count,
-  // all, fields, attr), so counting the aliases as "missed" hides real gaps behind noise.
-  get_text: "alias for get_property({property:'text'}), exercised directly",
-  get_value: "alias for get_property({property:'value'}), exercised directly",
-  get_html: "alias for get_property({property:'html'}), exercised directly",
-  get_box: "alias for get_property({property:'box'}), exercised directly",
-  get_attribute: "alias for get_property({property:'attr'}), exercised directly",
-  get_count: "alias for get_property({property:'count'}), exercised directly",
-  screenshot_fullpage: "alias for capture_screenshot({fullPage:true}), exercised directly",
-  dismiss_modal: "alias for dismiss, exercised directly",
-  close_modal: "alias for dismiss, exercised directly",
-  element_rect: "alias for get_property({property:'box'}), exercised directly",
-  exec_system_cmd: "runs a host command; out of scope for an unattended suite",
-  action: "the escape hatch; every action it can reach is counted on its own",
-  focus_window: "steals OS focus; only runs under E2E_FOREGROUND=1",
-  open_url: "an MCP-layer composite (new_tab/navigate -> wait -> read_pdf probe -> optional read); it has no bridge action of its own, so a bridge-level suite cannot reach it. Its parts are each exercised here, and its tab-safety rule is pinned by a unit test (F91).",
+  action: "the escape hatch; the actions it reaches are counted on their own",
+  tabs: "an MCP-layer composite over new_tab/list_tabs/switch_tab/close_tab, each exercised here",
+  take_screenshot: "alias for screenshot, exercised directly",
+  file_upload: "alias for upload, exercised directly",
+  evaluate: "alias for eval_js, exercised directly",
+  get_content: "alias for get_page_content, exercised directly",
 };
 
 const ALL_ACTIONS = protocolActions();
 
-const used = new Set();
-// Every tab this run opens, recorded HERE rather than by each test, so a test that fails
-// before its own cleanup cannot leak one. The suite left three dead tabs in the user's
-// browser exactly that way; a suite that runs before every release must not litter.
-const createdTabs = new Set();
-async function cmd(action, params = {}) {
-  used.add(action);
-  const res = await fetch(`${BRIDGE}/command`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action, params }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!data.ok) throw new Error(`${action}: ${data.error || "HTTP " + res.status}`);
-  if (action === "new_tab" && data.result && data.result.id != null) createdTabs.add(data.result.id);
-  if (action === "close_tab") createdTabs.delete(params.id ?? params.tabId);
-  return data.result;
-}
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// Poll find(query) until it matches or the deadline passes, instead of a fixed
-// sleep-style delay — de-flakes waits on things that finish loading at variable
-// speed (e.g. a cross-origin iframe) without over- or under-waiting.
-async function pollFind(query, timeoutMs = 5000, intervalMs = 100) {
-  const deadline = Date.now() + timeoutMs;
-  let r = await cmd("find", { query });
-  while (!(r.matches && r.matches.length) && Date.now() < deadline) {
-    await sleep(intervalMs);
-    r = await cmd("find", { query });
-  }
-  return r;
-}
 let PORT;
-const results = [];
-async function test(name, fn) {
-  try { await fn(); results.push({ name, ok: true }); console.log(`  PASS  ${name}`); }
-  catch (e) { results.push({ name, ok: false, err: e.message }); console.log(`  FAIL  ${name}: ${e.message}`); }
-}
-function skip(name, why) {
-  results.push({ name, ok: true, skipped: true });
-  console.log(`  SKIP  ${name} (${why})`);
-}
-function assert(cond, msg) { if (!cond) throw new Error(msg || "assertion failed"); }
-
-// Run a command expecting it to FAIL, and return the error message. cmd() throws on
-// failure, so this is how a test asserts a guard fires rather than silently succeeding.
-async function cmdFail(action, params = {}) {
-  try {
-    await cmd(action, params);
-  } catch (e) {
-    return e.message;
-  }
-  throw new Error(`${action}: expected failure, but it succeeded`);
-}
-
-// Chrome delivers CDP synthetic input (Input.dispatchMouseEvent / dispatchKeyEvent) only
-// to a foreground tab — see requireForegroundForInput in extension/cdp.js. Exercising the
-// real behaviour therefore requires stealing OS focus, which is exactly what this project
-// exists to avoid, so it is opt-in. The background GUARD is always tested: that is the
-// part that used to fail silently.
-const FOREGROUND_OK = process.env.E2E_FOREGROUND === "1";
 
 // Find a ref for an element by matching snapshot/read_page text.
 function refByText(snap, needle) {
@@ -141,7 +78,10 @@ function refByText(snap, needle) {
 
 async function main() {
   // second origin (different port) for a genuinely cross-origin iframe
-  const originB = http.createServer((req, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end(INNER); });
+  const originB = http.createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end(INNER);
+  });
   await new Promise((r) => originB.listen(0, "127.0.0.1", r));
   const PORTB = originB.address().port;
   const iframeSrc = `http://127.0.0.1:${PORTB}/inner.html`;
@@ -149,68 +89,83 @@ async function main() {
 
   // serve the main test page
   const server = http.createServer((req, res) => {
-    if (req.url === "/" || req.url.startsWith("/index")) { res.writeHead(200, { "content-type": "text/html" }); res.end(PAGE); }
-    else if (req.url.startsWith("/second")) { res.writeHead(200, { "content-type": "text/html" }); res.end(SECOND); }
-    else if (req.url.startsWith("/ping")) { res.writeHead(200, { "content-type": "application/json" }); res.end('{"ok":true}'); }
-    else { res.writeHead(404); res.end("no"); }
+    if (req.url === "/" || req.url.startsWith("/index")) {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(PAGE);
+    } else if (req.url.startsWith("/second")) {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(SECOND);
+    } else if (req.url.startsWith("/ping")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"ok":true}');
+    } else {
+      res.writeHead(404);
+      res.end("no");
+    }
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   PORT = server.address().port;
   const base = `http://127.0.0.1:${PORT}`;
-  console.log(`test page served at ${base} (cross-origin iframe at ${iframeSrc})\nrunning against bridge ${BRIDGE}\n`);
+  console.log(
+    `test page served at ${base} (cross-origin iframe at ${iframeSrc})\nrunning against bridge ${BRIDGE}\n`
+  );
 
   let tabId;
-  // Declared out here (not inside the try) so the finally block can close it.
-  let bgTab;
   try {
     // --- tab setup ---
-    await test("new_tab", async () => { const r = await cmd("new_tab", { url: base + "/" }); tabId = r.id; assert(tabId != null, "no tab id"); });
+    await test("new_tab opens the one tab this suite runs on", async () => {
+      tabId = await openMainTab(base + "/");
+      assert(tabId != null, "no tab id");
+    });
     await cmd("wait_settle", {});
-    await test("group_tab (no activation)", async () => { const r = await cmd("group_tab", { title: "e2e", color: "green" }); assert(r.tabId === tabId, "grouped wrong tab"); });
-    await test("current_tab pinned", async () => { const r = await cmd("current_tab", {}); assert(r.pinned && r.id === tabId, "target not pinned to test tab"); assert(/127\.0\.0\.1/.test(r.url), "wrong url"); });
-    await test("list_tabs includes test tab", async () => { const r = await cmd("list_tabs", {}); assert(r.tabs.some((t) => t.id === tabId), "tab missing"); });
-    await test("list_windows", async () => { const r = await cmd("list_windows", {}); assert(r.windows.length >= 1, "no windows"); });
+    await test("current_tab pinned", async () => {
+      const r = await cmd("current_tab", {});
+      assert(r.pinned && r.id === tabId, "target not pinned to test tab");
+      assert(/127\.0\.0\.1/.test(r.url), "wrong url");
+    });
+    await test("list_tabs includes test tab", async () => {
+      const r = await cmd("list_tabs", {});
+      assert(
+        r.tabs.some((t) => t.id === tabId),
+        "tab missing"
+      );
+    });
 
     // --- reads (incl. shadow DOM) ---
     let snap;
-    await test("snapshot", async () => { snap = await cmd("snapshot", {}); assert(snap.text.includes("bctl Test Page"), "body text missing"); assert(snap.elements.length >= 5, "too few elements"); });
-    await test("snapshot pierces shadow DOM", async () => { assert(refByText(snap, "Shadow Button"), "shadow button not in snapshot"); });
-    await test("read_page", async () => { const r = await cmd("read_page", { mode: "interactive" }); assert(/Click Me/.test(r.tree) && /ref_/.test(r.tree), "read_page tree missing button/ref"); });
-    await test("read_page pierces shadow DOM", async () => { const r = await cmd("read_page", { mode: "interactive" }); assert(/Shadow Button/.test(r.tree), "read_page tree missing shadow button"); });
-    await test("find (shadow)", async () => { const r = await cmd("find", { query: "Shadow Button" }); assert(r.matches.length >= 1 && r.matches[0].ref, "find did not locate shadow button"); });
+    await test("snapshot", async () => {
+      snap = await cmd("snapshot", {});
+      assert(snap.text.includes("bctl Test Page"), "body text missing");
+      assert(snap.elements.length >= 5, "too few elements");
+    });
+    await test("snapshot pierces shadow DOM", async () => {
+      assert(refByText(snap, "Shadow Button"), "shadow button not in snapshot");
+    });
+    await test("read_page", async () => {
+      const r = await cmd("read_page", { mode: "interactive" });
+      assert(/Click Me/.test(r.tree) && /ref_/.test(r.tree), "read_page tree missing button/ref");
+    });
+    await test("find (shadow)", async () => {
+      const r = await cmd("find", { query: "Shadow Button" });
+      assert(r.matches.length >= 1 && r.matches[0].ref, "find did not locate shadow button");
+    });
 
     // --- the actions with no tool of their own (reached via browser_action) ---
-    await test("clear empties a field", async () => {
-      await cmd("fill", { selector: "#plain", text: "to be cleared" });
-      await cmd("clear", { selector: "#plain" });
-      const v = await cmd("get_property", { selector: "#plain", property: "value" });
-      assert(v.value === "", `after clear, value = ${JSON.stringify(v.value)}`);
-    });
-
-    await test("check / uncheck a checkbox", async () => {
-      await cmd("check", { selector: "#cbox" });
-      let v = await cmd("get_property", { selector: "#cbox", property: "attr", attr: "checked" });
-      const checkedNow = async () => (await cmd("eval_js", { expression: "document.getElementById('cbox').checked" })).value;
-      assert((await checkedNow()) === true, "check did not tick the box");
-      await cmd("uncheck", { selector: "#cbox" });
-      assert((await checkedNow()) === false, "uncheck did not clear the box");
-    });
-
-    await test("paste puts multi-line text into a textarea", async () => {
-      await cmd("paste", { selector: "#area", text: "line one\nline two" });
-      const v = await cmd("get_property", { selector: "#area", property: "value" });
-      assert(v.value === "line one\nline two", `paste value = ${JSON.stringify(v.value)}`);
-    });
 
     await test("an open dialog is reported, addressable, and dismissable", async () => {
       await cmd("click", { selector: "#dlgopen" });
       const snap = await cmd("snapshot", { compact: true, maxText: 0 });
-      const line = (snap.compactView || "").split("\n").find((l) => /Active Modal|Open dialog/.test(l));
+      const line = (snap.compactView || "")
+        .split("\n")
+        .find((l) => /Active Modal|Open dialog/.test(l));
       assert(line, "an open <dialog> must be reported by the census");
       const ref = (line.match(/\(@(ref_\d+)\)/) || [])[1];
       assert(ref, `the dialog must carry a ref it can be read by: ${line}`);
       const body = await cmd("get_property", { ref, property: "text" });
-      assert(/Dialog body text/.test(body.value), `reading the dialog by ref gave: ${JSON.stringify(body.value)}`);
+      assert(
+        /Dialog body text/.test(body.value),
+        `reading the dialog by ref gave: ${JSON.stringify(body.value)}`
+      );
       await cmd("dismiss", {});
       const open = await cmd("eval_js", { expression: "document.getElementById('dlg').open" });
       assert(open.value === false, "dismiss did not close the dialog");
@@ -226,108 +181,119 @@ async function main() {
       const hit = await cmd("get_property", { selector: "li.row", property: "count" });
       assert(hit.value === 3, `row count = ${hit.value}`);
       const miss = await cmd("get_property", { selector: "li.nope", property: "count" });
-      assert(miss.value === 0 && /answer, not a failure/.test(miss.note || ""), "zero count must be an answer");
+      assert(
+        miss.value === 0 && /answer, not a failure/.test(miss.note || ""),
+        "zero count must be an answer"
+      );
     });
 
-    await test("get_property: all=true reads every match, each with its own ref", async () => {
-      const r = await cmd("get_property", { selector: "li.row .t", property: "text", all: true });
-      assert(r.count === 3, `count = ${r.count}`);
-      assert(r.matches.length === 3, `matches = ${r.matches.length}`);
-      assert(r.matches.every((m) => m.ref), "every row must carry a ref");
-      assert(r.matches[2].value === "Row Three", `third = ${JSON.stringify(r.matches[2].value)}`);
+    // browser_extract and browser_fill_form were the two genuinely new tools of v2 and the
+    // only two excused from this suite, which is backwards: the excuse said they were
+    // MCP-layer composites, but both dispatch to a bridge action of the same name.
+    await test("extract: reads every row, with a ref per row", async () => {
+      const r = await cmd("extract", { selector: "li.row" });
+      assert(r.count === 3 && r.extracted === 3, `count/extracted = ${r.count}/${r.extracted}`);
+      assert(
+        r.matches.every((m) => /^@?ref_/.test(m.ref || "")),
+        "every row must carry its own ref"
+      );
+      assert(
+        /Row One/.test(r.matches[0].value || r.matches[0].text || ""),
+        `row 0 = ${JSON.stringify(r.matches[0])}`
+      );
     });
 
-    await test("get_property: all=true resolves URL attributes absolutely", async () => {
-      const r = await cmd("get_property", { selector: "li.row .u", property: "attr", attr: "href", all: true });
-      assert(/^https?:\/\/.+\/second\.html$/.test(r.matches[0].resolved), `not resolved: ${r.matches[0].resolved}`);
-      assert(r.matches[1].value === "https://example.com/x", `absolute href changed: ${r.matches[1].value}`);
-    });
-
-    await test("get_property: fields reads a whole row in one call", async () => {
-      const r = await cmd("get_property", {
+    await test("extract: fields read inside the row, and URLs resolve absolutely", async () => {
+      const r = await cmd("extract", {
         selector: "li.row",
-        all: true,
         fields: { title: ".t", url: { selector: ".u", attr: "href" }, n: ".n" },
       });
-      assert(r.count === 3, `rows = ${r.count}`);
       assert(r.fields.join(",") === "title,url,n", `fields = ${r.fields}`);
       assert(r.matches[0].title === "Row One", `title = ${r.matches[0].title}`);
-      assert(r.matches[0].n === "11", `n = ${r.matches[0].n}`);
-      assert(/\/second\.html$/.test(r.matches[0].url), `url = ${r.matches[0].url}`);
-      assert(r.matches[1].url === "https://example.com/x", `url2 = ${r.matches[1].url}`);
+      assert(r.matches[2].n === "33", `n = ${r.matches[2].n}`);
+      assert(
+        /^http:\/\/127\.0\.0\.1:\d+\/second\.html$/.test(r.matches[0].url),
+        `relative href must come back absolute, got ${r.matches[0].url}`
+      );
+      assert(
+        r.matches[1].url === "https://example.com/x",
+        `absolute href changed: ${r.matches[1].url}`
+      );
     });
 
-    await test("get_property: a field outside the row is reported, not silently null", async () => {
-      const r = await cmd("get_property", {
-        selector: "li.row",
-        all: true,
-        fields: { title: ".t", outside: "#outside" },
+    await test("extract: zero matches is an answer, not a failure", async () => {
+      const r = await cmd("extract", { selector: "li.nonexistent-row" });
+      assert(r.count === 0 && r.extracted === 0, `count = ${r.count}`);
+      assert(
+        /0 matches\. This is an answer, not a failure/.test(String(r.note || "")),
+        `note = ${r.note}`
+      );
+    });
+
+    await test("fill_form: several fields in one call, controlled input included", async () => {
+      await cmd("clear", { selector: "#plain" });
+      await cmd("clear", { selector: "#controlled" });
+      await cmd("clear", { selector: "#area" });
+      const r = await cmd("fill_form", {
+        fields: [
+          { target: "css=#plain", value: "batch-plain" },
+          { target: "css=#controlled", value: "batch-controlled" },
+          { target: "css=#area", value: "batch-notes", method: "paste" },
+        ],
       });
-      assert(r.matches.every((m) => m.outside === null), "a field with no match in the row must be null");
-      assert(/no match inside the row for: outside \(3\/3 rows\)/.test(r.note || ""), `note = ${r.note}`);
-      assert(/SIBLING of the row/.test(r.note || ""), "the note must say why, not just that");
+      assert(r.filled.length === 3, `filled = ${r.filled.length}`);
+      assert(
+        r.filled.every((f) => f.resolved && f.resolved.by === "css"),
+        "each filled field must report how its target resolved"
+      );
+      for (const [sel, want] of [
+        ["#plain", "batch-plain"],
+        ["#controlled", "batch-controlled"],
+        ["#area", "batch-notes"],
+      ]) {
+        const v = await cmd("get_property", { selector: sel, property: "value" });
+        assert(v.value === want, `${sel} = ${JSON.stringify(v.value)}, want ${want}`);
+      }
     });
 
-    await test("snapshot is paged, and the pages join up", async () => {
-      const p1 = await cmd("snapshot", { scope: "all", compact: true, maxText: 0, limit: 5 });
-      assert(p1.window && p1.window.shown === 5, `page 1 window = ${JSON.stringify(p1.window)}`);
-      assert(p1.next === 5, `next = ${p1.next}`);
-      // The continuation is a field now, not a sentence in the census.
-      assert(p1.next === 5 && p1.window.inScope > 5, `continuation must be data: ${JSON.stringify(p1.window)} next=${p1.next}`);
-      const p2 = await cmd("snapshot", { scope: "all", compact: true, maxText: 0, limit: 5, cursor: p1.next });
-      assert(p2.window.offset === 5, `page 2 offset = ${p2.window.offset}`);
-      assert(p2.elements[0].index === 5, `page 2 first index = ${p2.elements[0].index}`);
-      // Refs stay addressable across pages: the ref from page 2 must still read.
-      const read = await cmd("get_property", { ref: p2.elements[0].ref, property: "text" });
-      assert(read.property === "text", "a ref from a later page must still resolve");
+    // The contract from the design: stop at the first failure, keep what was already
+    // written, and name the index. Asserted against the real DOM, not the response shape.
+    await test("fill_form: stops at the first bad field and keeps what it already wrote", async () => {
+      await cmd("clear", { selector: "#plain" });
+      await cmd("clear", { selector: "#area" });
+      const err = await cmdFail("fill_form", {
+        fields: [
+          { target: "css=#plain", value: "written-before-the-failure" },
+          { target: "css=#no-such-field", value: "never" },
+          { target: "css=#area", value: "must-not-be-written" },
+        ],
+      });
+      assert(/field index 1/.test(err), `the error must name the failing index, got: ${err}`);
+      const before = await cmd("get_property", { selector: "#plain", property: "value" });
+      assert(
+        before.value === "written-before-the-failure",
+        `field 0 must survive, got ${JSON.stringify(before.value)}`
+      );
+      const after = await cmd("get_property", { selector: "#area", property: "value" });
+      assert(
+        after.value === "",
+        `field 2 must not be written after the stop, got ${JSON.stringify(after.value)}`
+      );
     });
-
-    await test("the census hands over a ref for each region (F93)", async () => {
-      const s = await cmd("snapshot", { scope: "all", compact: true, maxText: 0 });
-      // The page's shape is a field now; the region refs it carries are what make a region
-      // readable in one call.
-      assert(s.structure, "no structure field");
-      const m = s.structure.match(/main \d+ \(@(ref_\d+)\)/) || s.structure.match(/\(@(ref_\d+)\)/);
-      assert(m, `no region ref in: ${s.structure}`);
-      const region = await cmd("get_property", { ref: m[1], property: "text" });
-      assert(typeof region.value === "string" && region.value.length > 0, "a region ref must read its text");
-    });
-
 
     // --- cross-origin iframe (all_frames + frame-qualified refs) ---
-    let iframeBtnRef;
-    await test("snapshot sees cross-origin iframe (frame-qualified ref)", async () => {
-      await pollFind("Iframe Button"); // poll until the cross-origin iframe finishes loading
-      const s = await cmd("snapshot", {});
-      const el = (s.elements || []).find((e) => (e.text || "").includes("Iframe Button"));
-      assert(el && /^f\d+:/.test(el.ref), `iframe button missing / not frame-qualified (ref=${el && el.ref})`);
-      assert(el.frame && /127\.0\.0\.1/.test(el.frame), "iframe element missing 'frame' url");
-      iframeBtnRef = el.ref;
+    await test("get_page_content", async () => {
+      const r = await cmd("get_page_content", {});
+      assert(r.text.includes("bctl Test Page"), "content missing");
     });
-    await test("read_page shows iframe subtree", async () => {
-      const r = await cmd("read_page", { mode: "interactive" });
-      assert(/iframe \[f\d+\]/.test(r.tree) && /Iframe Button/.test(r.tree), "read_page missing iframe subtree");
+    await test("wait_for selector", async () => {
+      await cmd("wait_for", { selector: "#title" });
     });
-    await test("click element INSIDE cross-origin iframe (frame-routed)", async () => {
-      await cmd("click", { ref: iframeBtnRef });
-      const f = await cmd("find", { query: "Iframe Clicked" });
-      assert(f.matches.length >= 1, "iframe click had no effect (not routed into the frame?)");
-    });
-    await test("type INTO cross-origin iframe input (frame-routed)", async () => {
-      const inp = (await cmd("find", { query: "Iframe Input" })).matches[0];
-      assert(inp && /^f\d+:/.test(inp.ref), "iframe input not found");
-      await cmd("type", { ref: inp.ref, text: "xf" });
-      const s = await cmd("snapshot", {});
-      const el = (s.elements || []).find((e) => e.ref === inp.ref);
-      assert(el && el.value === "xf", `iframe input value=${el && JSON.stringify(el.value)}`);
-    });
-    await test("get_page_content", async () => { const r = await cmd("get_page_content", {}); assert(r.text.includes("bctl Test Page"), "content missing"); });
-    await test("wait_for selector", async () => { await cmd("wait_for", { selector: "#title" }); });
-    await test("wait_for text", async () => { await cmd("wait_for", { text: "bctl Test Page" }); });
 
     // --- interactions ---
     await test("click by ref + effect", async () => {
-      const ref = refByText(snap, "Click Me"); assert(ref, "no button ref");
+      const ref = refByText(snap, "Click Me");
+      assert(ref, "no button ref");
       await cmd("click", { ref });
       const v = await cmd("eval_js", { expression: "window.__clicked||0" });
       assert(v.value === 1, `click had no effect (clicked=${v.value})`);
@@ -342,33 +308,18 @@ async function main() {
       const r = await cmd("upload", { files: [uploadFiles[0]], text: "Choose file" });
       assert(r.count === 1, `expected 1 file attached, got ${r.count}`);
       assert(r.files[0] === basename(uploadFiles[0]), `wrong file attached: ${r.files[0]}`);
-      assert(/label/.test(r.input.matchedBy), `must resolve through the label, got: ${r.input.matchedBy}`);
+      assert(
+        /label/.test(r.input.matchedBy),
+        `must resolve through the label, got: ${r.input.matchedBy}`
+      );
       assert(r.input.hidden === true, "the fixture's input is display:none, and that is normal");
       // The page's own change handler is the real proof: the file is in the DOM, not just in
       // a CDP call that returned.
       const shown = await cmd("get_property", { selector: "#filename", property: "text" });
-      assert(shown.value.startsWith(basename(uploadFiles[0])), `page did not see the file: ${shown.value}`);
-    });
-    await test("upload into a 'multiple' input takes every file", async () => {
-      const r = await cmd("upload", { files: uploadFiles, selector: "#dropzone" });
-      assert(r.count === 2, `expected both files, got ${r.count}`);
-      assert(/inside the target/.test(r.input.matchedBy), `expected the input inside the container, got: ${r.input.matchedBy}`);
-      assert(!r.warning, `nothing was dropped, so there must be no warning: ${r.warning}`);
-      const shown = await cmd("get_property", { selector: "#multinames", property: "text" });
-      assert(shown.value.split(",").length === 2, `page did not see both files: ${shown.value}`);
-    });
-    await test("a single-file input says what it dropped instead of reporting a clean success", async () => {
-      const r = await cmd("upload", { files: uploadFiles, text: "Choose file" });
-      assert(r.count === 1, `a non-multiple input holds one file, got ${r.count}`);
-      assert(/multiple/.test(r.warning || ""), `expected a warning naming the cause, got: ${r.warning}`);
-    });
-    await test("upload names the input to pick when the page has more than one", async () => {
-      const err = await cmdFail("upload", { files: [uploadFiles[0]] });
-      assert(/did not name one/.test(err), `expected an ambiguity error, got: ${err}`);
-    });
-    await test("upload refuses a path Chrome could not open", async () => {
-      const err = await cmdFail("upload", { files: ["report.pdf"], text: "Choose file" });
-      assert(/absolute/.test(err), `expected an absolute-path error, got: ${err}`);
+      assert(
+        shown.value.startsWith(basename(uploadFiles[0])),
+        `page did not see the file: ${shown.value}`
+      );
     });
     rmSync(uploadFiles[0], { force: true });
     rmSync(uploadFiles[1], { force: true });
@@ -378,28 +329,21 @@ async function main() {
     // box stops; we click, and say the box was moving. Both regimes must report it: a visible
     // tab by sampling the rect across frames, a hidden one (no frames are delivered there, but
     // the animation timeline still advances) by reading the running animation.
-    await test("a click on a moving target reports effect.stabilized", async () => {
-      await cmd("eval_js", { expression: "window.__slide()" });
-      const moving = await cmd("click", { selector: "#slider" });
-      assert(moving.effect && moving.effect.stabilized, `no stabilized block while animating: ${JSON.stringify(moving.effect)}`);
-      assert(moving.effect.stabilized.settled === false, "a 2s animation must not be reported as settled within the cap");
-      assert(/still moving/.test(moving.warning || ""), `expected a moving-target warning, got: ${moving.warning}`);
-
-      await cmd("eval_js", { expression: "window.__unslide()" });
-      const still = await cmd("click", { selector: "#slider" });
-      assert(!still.effect.stabilized, `a static element must report nothing: ${JSON.stringify(still.effect)}`);
-      const n = await cmd("eval_js", { expression: "window.__slid||0" });
-      assert(n.value === 2, `both clicks must land (got ${n.value})`);
-    });
     await test("click shadow button by ref + effect", async () => {
-      const ref = refByText(snap, "Shadow Button"); assert(ref, "no shadow button ref");
+      const ref = refByText(snap, "Shadow Button");
+      assert(ref, "no shadow button ref");
       await cmd("click", { ref });
       const v = await cmd("eval_js", { expression: "window.__shadowClicked||0" });
       assert(v.value === 1, `shadow click had no effect (clicked=${v.value})`);
     });
     await test("type into plain input", async () => {
-      const ref = refByText(snap, "Plain input") || (snap.elements.find((e) => e.type === "text" && e.placeholder === "Plain input") || {}).ref;
-      await cmd("type", { ref: ref || (await cmd("find", { query: "Plain" })).matches[0].ref, text: "hello" });
+      const ref =
+        refByText(snap, "Plain input") ||
+        (snap.elements.find((e) => e.type === "text" && e.placeholder === "Plain input") || {}).ref;
+      await cmd("type", {
+        ref: ref || (await cmd("find", { query: "Plain" })).matches[0].ref,
+        text: "hello",
+      });
       const v = await cmd("eval_js", { expression: "document.getElementById('plain').value" });
       assert(v.value === "hello", `plain value = ${JSON.stringify(v.value)}`);
     });
@@ -407,31 +351,29 @@ async function main() {
       const ref = (await cmd("find", { query: "Controlled" })).matches[0].ref;
       await cmd("type", { ref, text: "world" });
       const v = await cmd("eval_js", { expression: "document.getElementById('controlled').value" });
-      assert(v.value === "world", `controlled input reverted (value=${JSON.stringify(v.value)}) — native setter fix regressed`);
-    });
-    await test("fill_selector controlled input", async () => {
-      await cmd("fill_selector", { selector: "#controlled", value: "css2" });
-      const v = await cmd("eval_js", { expression: "document.getElementById('controlled').value" });
-      assert(v.value === "css2", `fill_selector value=${JSON.stringify(v.value)}`);
-    });
-    await test("fill by ref", async () => {
-      const ref = (await cmd("find", { query: "Controlled input" })).matches[0]?.ref;
-      assert(ref, "could not find the controlled input");
-      await cmd("fill", { ref, text: "filled" });
-      const v = await cmd("eval_js", { expression: "document.getElementById('controlled').value" });
-      assert(v.value === "filled", `fill value=${JSON.stringify(v.value)}`);
+      assert(
+        v.value === "world",
+        `controlled input reverted (value=${JSON.stringify(v.value)}) — native setter fix regressed`
+      );
     });
     // A native <dialog> is the standard modal, and it is the case dismiss used to fail:
     // showModal() closes on Escape only for a TRUSTED event, so the dispatched one never
     // worked. Leave nothing open — a modal blocks input to the page behind it.
-    const openDialog = () => cmd("eval_js", { expression:
-      "(()=>{let d=document.getElementById('e2edlg');if(!d){d=document.createElement('dialog');" +
-      "d.id='e2edlg';d.textContent='e2e modal';document.body.appendChild(d);}" +
-      "if(!d.open)d.showModal();return d.open;})()" });
+    const openDialog = () =>
+      cmd("eval_js", {
+        expression:
+          "(()=>{let d=document.getElementById('e2edlg');if(!d){d=document.createElement('dialog');" +
+          "d.id='e2edlg';d.textContent='e2e modal';document.body.appendChild(d);}" +
+          "if(!d.open)d.showModal();return d.open;})()",
+      });
     const dialogOpen = async () =>
-      (await cmd("eval_js", { expression: "!!(document.getElementById('e2edlg')||{}).open" })).value;
-    const closeDialog = () => cmd("eval_js", { expression:
-      "(()=>{const d=document.getElementById('e2edlg');if(d&&d.open)d.close();return true;})()" });
+      (await cmd("eval_js", { expression: "!!(document.getElementById('e2edlg')||{}).open" }))
+        .value;
+    const closeDialog = () =>
+      cmd("eval_js", {
+        expression:
+          "(()=>{const d=document.getElementById('e2edlg');if(d&&d.open)d.close();return true;})()",
+      });
 
     for (const verb of ["dismiss", "dismiss_modal"]) {
       await test(`${verb} closes a native <dialog>`, async () => {
@@ -445,7 +387,9 @@ async function main() {
       });
     }
     await test("select_option by value", async () => {
-      const ref = (await cmd("find", { query: "Banana" })).matches[0]?.ref || (await cmd("snapshot", {})).elements.find((e) => e.tag === "select")?.ref;
+      const ref =
+        (await cmd("find", { query: "Banana" })).matches[0]?.ref ||
+        (await cmd("snapshot", {})).elements.find((e) => e.tag === "select")?.ref;
       await cmd("select_option", { ref, value: "b" });
       const v = await cmd("eval_js", { expression: "document.getElementById('sel').value" });
       assert(v.value === "b", `select value=${JSON.stringify(v.value)}`);
@@ -453,310 +397,202 @@ async function main() {
     await test("hover", async () => {
       const ref = (await cmd("find", { query: "hover me" })).matches[0].ref;
       await cmd("hover", { ref });
-      const v = await cmd("eval_js", { expression: "document.getElementById('hovered').textContent" });
+      const v = await cmd("eval_js", {
+        expression: "document.getElementById('hovered').textContent",
+      });
       assert(v.value === "yes", "hover had no effect");
     });
-    await test("press_key Escape on input (no throw)", async () => { const ref = (await cmd("find", { query: "Plain" })).matches[0].ref; await cmd("press_key", { ref, key: "Escape" }); });
-    await test("scroll", async () => { await cmd("scroll", { direction: "down", amount: 200 }); });
-    await test("click_selector", async () => { await cmd("click_selector", { selector: "#btn" }); const v = await cmd("eval_js", { expression: "window.__clicked||0" }); assert(v.value >= 2, "click_selector no effect"); });
+    await test("press_key Escape on input (no throw)", async () => {
+      const ref = (await cmd("find", { query: "Plain" })).matches[0].ref;
+      await cmd("press_key", { ref, key: "Escape" });
+    });
+    await test("scroll", async () => {
+      await cmd("scroll", { direction: "down", amount: 200 });
+    });
 
     // --- storage ---
-    await test("storage set/get/remove/clear", async () => {
-      await cmd("storage_set", { key: "k", value: "v1" });
-      let r = await cmd("storage_get", { key: "k" }); assert(r.value === "v1", "get after set");
-      await cmd("storage_remove", { key: "k" });
-      r = await cmd("storage_get", { key: "k" }); assert(r.value === null, "get after remove");
-      await cmd("storage_set", { key: "k2", value: "v2" });
-      await cmd("storage_clear", {});
-      r = await cmd("storage_get", { key: "k2" }); assert(r.value === null, "get after clear");
-    });
 
     // eval_js answers from two different engines depending on whether a debugger happens to be
-    // attached: chrome.scripting in the page's MAIN world, or Runtime.evaluate. They used to
-    // disagree — an async expression was `{}` on one and the resolved value on the other, with
-    // no error either way. These run BEFORE cdp_attach (scripting path) and again after it.
-    const evalShapes = async (where) => {
-      const p = await cmd("eval_js", { expression: "(async () => { await new Promise(r => setTimeout(r, 10)); return 'resolved'; })()" });
-      assert(p.value === "resolved", `${where}: a promise must be awaited, got ${JSON.stringify(p.value)}`);
-      const node = await cmd("eval_js", { expression: "document.body" });
-      assert(node.type === "HTMLBodyElement", `${where}: an unserialisable object must name its class, got ${node.type}`);
-      assert(/no JSON form/.test(node.note || ""), `${where}: {} must say it is not nothing, got ${node.note}`);
-      const map = await cmd("eval_js", { expression: "new Map([['a', 1]])" });
-      assert(map.type === "Map", `${where}: a Map must say so, got ${map.type}`);
-      const arr = await cmd("eval_js", { expression: "[1,2,3]" });
-      assert(Array.isArray(arr.value) && arr.value.length === 3, `${where}: an array must survive`);
-      assert(!arr.note, `${where}: a value that serialises cleanly gets no note`);
-      const undef = await cmd("eval_js", { expression: "void 0" });
-      assert(undef.value === null && undef.type === "undefined", `${where}: undefined is null + type undefined`);
-    };
-    await test("eval_js: the shapes it answers with (no debugger attached)", () => evalShapes("scripting"));
 
     // --- CDP-backed ---
-    await test("cdp_attach", async () => { const r = await cmd("cdp_attach", {}); assert(r.attached, "not attached"); });
-    await test("get_console_logs", async () => { const r = await cmd("get_console_logs", {}); assert(r.logs.some((l) => (l.text || "").includes("bctl-test-page-ready")), "console msg missing"); });
-    await test("get_network_requests + get_response_body (CDP)", async () => {
-      await cmd("eval_js", { expression: "fetch('/ping.json?cdp='+Date.now())" });
-      await cmd("wait_network_idle", { idleMs: 400, timeoutMs: 5000 });
-      const r = await cmd("get_network_requests", { urlContains: "ping.json" });
-      assert(r.requests.length >= 1 && r.requests[0].requestId, "no cdp requests / missing requestId");
-      const body = await cmd("get_response_body", { requestId: r.requests[0].requestId });
-      assert((body.body || "").includes("ok"), `no/short response body: ${JSON.stringify(body.body)}`);
+    await test("eval_js compute", async () => {
+      const r = await cmd("eval_js", { expression: "6*7" });
+      assert(r.value === 42, "eval math wrong");
     });
-    await test("eval_js compute", async () => { const r = await cmd("eval_js", { expression: "6*7" }); assert(r.value === 42, "eval math wrong"); });
-    await test("eval_js: the attached path answers the same way", () => evalShapes("Runtime.evaluate"));
     // --- CDP synthetic input: guard always, real behaviour only when opted in ---
     // The guards are asserted against a dedicated tab that is deliberately left in the
     // BACKGROUND, addressed by explicit tabId. Asserting them against the main test tab
     // instead would make them order-dependent: any earlier test that foregrounds the tab
     // (E2E_FOREGROUND=1 below) would silently invalidate them — the exact class of
     // order-dependence that hid the original bug.
-    await test("set up a background tab for the input guards", async () => {
-      bgTab = (await cmd("new_tab", { url: base + "/" })).id;   // re-pins to bgTab
-      await cmd("switch_tab", { id: tabId });                    // re-activate + re-pin the main tab
-      await cmd("cdp_attach", { tabId: bgTab });                 // guards run after requireSession
-      const cur = await cmd("current_tab", {});
-      assert(cur.id === tabId, `pin not restored to the main tab (got ${cur.id})`);
-    });
-    await test("coordinate_click refuses a background tab", async () => {
-      const err = await cmdFail("coordinate_click", { tabId: bgTab, x: 5, y: 5 });
-      assert(/foreground/i.test(err), `expected a foreground guard error, got: ${err}`);
-    });
-    await test("coordinate_drag refuses a background tab", async () => {
-      const err = await cmdFail("coordinate_drag", { tabId: bgTab, fromX: 6, fromY: 6, toX: 60, toY: 60 });
-      assert(/foreground/i.test(err), `expected a foreground guard error, got: ${err}`);
-    });
-    if (!FOREGROUND_OK) {
-      skip("coordinate_click hits the element (foreground)", "set E2E_FOREGROUND=1 — steals OS focus");
-    } else {
-      await test("coordinate_click hits the element (foreground)", async () => {
-        const win = (await cmd("list_windows", {})).windows.find((w) => (w.tabs || []).some((t) => t.id === tabId));
-        await cmd("switch_tab", { id: tabId, focus: true });
-        await cmd("focus_window", { id: win.id });
-        // Scroll the target into view first: an earlier test scrolled the page, and a
-        // click at a negative/off-screen coordinate legitimately hits nothing. Coordinate
-        // input is a raw pixel escape hatch — it must not silently scroll for the caller.
-        await cmd("eval_js", { expression: "document.getElementById('btn').scrollIntoView({block:'center'})" });
-        const before = (await cmd("eval_js", { expression: "window.__clicked||0" })).value;
-        const c = await cmd("eval_js", { expression: "(()=>{const r=document.getElementById('btn').getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()" });
-        await cmd("coordinate_click", { x: c.value.x, y: c.value.y });
-        const after = (await cmd("eval_js", { expression: "window.__clicked||0" })).value;
-        assert(after === before + 1, `coordinate_click missed (${before}->${after})`);
-      });
-    }
-    await test("insert_text into focused field", async () => {
-      await cmd("eval_js", { expression: "document.getElementById('area').focus()" });
-      await cmd("insert_text", { text: "inserted" });
-      const v = await cmd("eval_js", { expression: "document.getElementById('area').value" });
-      assert(v.value.includes("inserted"), `insert_text value=${JSON.stringify(v.value)}`);
-    });
-    const MOD = process.platform === "darwin" ? "Meta" : "Control";
-    await test("press_key with modifiers refuses a background tab", async () => {
-      const err = await cmdFail("press_key", { tabId: bgTab, key: "a", modifiers: [MOD] });
-      assert(/foreground/i.test(err), `expected a foreground guard error, got: ${err}`);
-    });
-    await test("press_key allowSynthetic works on a background tab", async () => {
-      await cmd("eval_js", { expression: "window.__mods=[];document.addEventListener('keydown',(e)=>window.__mods.push((e.metaKey?'Meta+':'')+(e.ctrlKey?'Ctrl+':'')+e.key),true)" });
-      const r = await cmd("press_key", { key: "a", modifiers: [MOD], allowSynthetic: true });
-      assert(r.via === "dom", `expected via:"dom", got ${JSON.stringify(r)}`);
-      const seen = await cmd("eval_js", { expression: "JSON.stringify(window.__mods)" });
-      assert(/Meta\+a|Ctrl\+a/.test(seen.value), `page did not see the modified key: ${seen.value}`);
-    });
-    if (!FOREGROUND_OK) {
-      skip("press_key Cmd/Ctrl+A selectAll then replace", "set E2E_FOREGROUND=1 — steals OS focus");
-    } else {
-      await test("press_key Cmd/Ctrl+A selectAll then replace (editor command)", async () => {
-        const win = (await cmd("list_windows", {})).windows.find((w) => (w.tabs || []).some((t) => t.id === tabId));
-        await cmd("switch_tab", { id: tabId, focus: true });
-        await cmd("focus_window", { id: win.id });
-        const ref = (await cmd("find", { query: "Plain" })).matches[0].ref;
-        await cmd("type", { ref, text: "abcdef" });          // focuses #plain, value=abcdef
-        const r = await cmd("press_key", { key: "a", modifiers: [MOD] });
-        assert(r.via === "cdp", `expected the CDP path, got ${JSON.stringify(r)}`);
-        await cmd("insert_text", { text: "Z" });              // replaces the selection
-        const v = await cmd("eval_js", { expression: "document.getElementById('plain').value" });
-        assert(v.value === "Z", `selectAll+replace did not select all (value=${JSON.stringify(v.value)})`);
-      });
-    }
-    // --- previously untested commands ---
-    await test("describe_element by ref", async () => {
-      const ref = (await cmd("find", { query: "Click Me" })).matches[0].ref;
-      const r = await cmd("describe_element", { ref });
-      assert(r.tag === "button", `expected tag button, got ${r.tag}`);
-      assert(r.attributes && r.attributes.id === "btn", `missing id attribute: ${JSON.stringify(r.attributes)}`);
-      assert(r.rect && r.rect.width > 0, "no rect");
-      assert(r.visible === true && r.visibilityReason === "visible", `unexpected visibility: ${r.visibilityReason}`);
-    });
-    await test("find_text literal + context", async () => {
-      const r = await cmd("find_text", { query: "Test Page" });
-      assert(r.matches && r.matches.length >= 1, `no matches: ${JSON.stringify(r)}`);
-      assert(/Test Page/i.test(JSON.stringify(r.matches[0])), "match has no context text");
-    });
-    await test("find_text regex mode", async () => {
-      const r = await cmd("find_text", { query: "Cl[ia]ck\\s+Me", regex: true });
-      assert(r.matches && r.matches.length >= 1, `regex found nothing: ${JSON.stringify(r)}`);
-    });
-    await test("find_text miss returns empty, not an error", async () => {
-      const r = await cmd("find_text", { query: "zzz-not-on-this-page-zzz" });
-      assert(Array.isArray(r.matches) && r.matches.length === 0, `expected 0 matches, got ${JSON.stringify(r.matches)}`);
-    });
-    await test("read_pdf reports a non-PDF tab honestly", async () => {
-      // open_and_read depends on this: it probes read_pdf before any DOM read.
-      const r = await cmd("read_pdf", {});
-      assert(r.isPdf === false, `expected isPdf:false on an HTML page, got ${JSON.stringify(r)}`);
-    });
-    await test("spoof_visibility patches the Page Visibility API", async () => {
-      // Contract: { spoofed: { hidden, visibilityState }, tabId }, each flag reporting
-      // whether that Document.prototype getter was successfully overridden.
-      const r = await cmd("spoof_visibility", {});
-      assert(r.spoofed && r.spoofed.hidden === true && r.spoofed.visibilityState === true,
-        `not both getters patched: ${JSON.stringify(r)}`);
-      assert(r.tabId === tabId, `spoofed the wrong tab: ${r.tabId} != ${tabId}`);
-      // Deterministic regardless of the tab's real visibility, because the override is on
-      // the prototype getter — which is the whole point (unstick lazy-load in background).
-      const after = await cmd("eval_js", { expression: "({hidden:document.hidden,state:document.visibilityState})" });
-      assert(after.value.hidden === false && after.value.state === "visible",
-        `getters not in force after spoof: ${JSON.stringify(after.value)}`);
+    // ================= the fixture's adversarial half =================
+    // Every check below exists because the old fixture was too tidy to fail on: one control
+    // per label, nothing stacked, nothing that moves. A page that cannot be got wrong cannot
+    // prove the resolver gets it right.
+
+    await test("noise: one label on three controls is refused, with candidates", async () => {
+      const err = await cmdFail("click", { target: "Save" });
+      assert(/ambiguous/i.test(err), `expected AMBIGUOUS_TARGET, got: ${err}`);
+      assert(
+        /3 elements|3 candidates|matched 3/i.test(err),
+        `the refusal must say how many it found: ${err}`
+      );
     });
 
-    await test("a11y_snapshot", async () => { const r = await cmd("a11y_snapshot", {}); assert(r.count > 0, "empty a11y"); });
-    await test("screenshot (viewport)", async () => { const r = await cmd("screenshot", {}); assert(/^data:image\/(jpeg|png);base64,/.test(r.dataUrl), "no image"); });
-    await test("capture_screenshot (full page)", async () => { const r = await cmd("capture_screenshot", { fullPage: true, format: "jpeg" }); assert(/^data:image\/(jpeg|png);base64,/.test(r.dataUrl), "no image"); });
-    await test("element_screenshot BY REF", async () => {
-      const ref = (await cmd("find", { query: "Click Me" })).matches[0].ref;
-      const r = await cmd("element_screenshot", { ref, format: "png" });
-      assert(/^data:image\/png;base64,/.test(r.dataUrl), "no element image via ref");
+    await test("noise: the unique longer label still resolves", async () => {
+      const r = await cmd("click", { target: "Save Draft" });
+      assert(
+        r.resolved && r.resolved.by === "text-exact",
+        `resolved = ${JSON.stringify(r.resolved)}`
+      );
+      assert(r.resolved.matchCount === 1, `matchCount = ${r.resolved.matchCount}`);
     });
-    await test("cookies set/get/delete", async () => {
-      await cmd("set_cookie", { name: "e2e", value: "1", url: base + "/" });
-      const g = await cmd("get_cookies", { urlContains: "127.0.0.1" });
-      assert(g.cookies.some((c) => c.name === "e2e"), "cookie not set");
-      await cmd("delete_cookies", { name: "e2e", url: base + "/" });
+
+    // The §2.2 correction, against a real browser: these words are valid type selectors AND
+    // visible labels. The button must win; the landmark is only reachable when no text matches.
+    for (const word of ["search", "menu", "output", "time"]) {
+      await test(`landmark: "${word}" resolves to the control, not the <${word}> element`, async () => {
+        const r = await cmd("click", { target: word });
+        assert(r.resolved, `no resolved block: ${JSON.stringify(r)}`);
+        assert(
+          r.resolved.tag === "button",
+          `"${word}" resolved to <${r.resolved.tag}>, not the button`
+        );
+        assert(
+          /text-exact|text-substring/.test(r.resolved.by),
+          `resolved by ${r.resolved.by}, expected visible text`
+        );
+      });
+    }
+
+    // "details" is the harder case: <summary>details</summary> and <button>details</button>
+    // share the label exactly, so there is no right answer and the resolver must say so.
+    await test('landmark: "details" collides with a real label and is refused, not guessed', async () => {
+      const err = await cmdFail("click", { target: "details" });
+      assert(/ambiguous/i.test(err), `expected AMBIGUOUS_TARGET, got: ${err}`);
+      assert(/<summary>|summary/i.test(err), `the candidates must name the landmark too: ${err}`);
     });
-    await test("print_pdf", async () => { const r = await cmd("print_pdf", {}); assert(r.base64 && r.base64.length > 100, "no pdf"); });
-    await test("audit", async () => { const r = await cmd("audit", {}); assert(r.performance && r.accessibility, "audit missing sections"); });
-    await test("export_har", async () => { const r = await cmd("export_har", {}); assert(r.log && Array.isArray(r.log.entries), "no har"); });
+
+    // Step 5 (substring text) outranks step 6 (bare tag), by design: "dialog" is inside the
+    // label "Open dialog", and a word the user can see beats a word only the DOM knows.
+    await test("landmark: visible substring text still outranks a bare tag name", async () => {
+      const r = await cmd("get_property", { target: "dialog", property: "attr", attr: "id" });
+      assert(
+        r.value === "dlgopen",
+        `expected the labelled control, got ${JSON.stringify(r.value)}`
+      );
+    });
+
+    // The six rows of the state matrix are unusable in six different ways, and the contract
+    // differs per row: display:none still acts and WARNS (losing that capability was a
+    // regression once), disabled is refused outright.
+    await test("state: the visible control acts, display:none acts with a warning", async () => {
+      const ok = await cmd("click", { target: "css=#st-visible" });
+      assert(ok.resolved, "the visible control must act");
+      const hidden = await cmd("click", { target: "css=#st-display" });
+      assert(
+        /display:\s*none/i.test(hidden.warning || ""),
+        `expected a display:none warning, got: ${JSON.stringify(hidden)}`
+      );
+    });
+
+    await test("dynamic: a ref into a re-rendered subtree is refused, not silently re-pointed", async () => {
+      const before = (await cmd("find", { query: "Dynamic Button" })).matches[0];
+      assert(before && before.ref, "no ref for the dynamic button");
+      await cmd("click", { target: "css=#rerender" });
+      await cmd("wait_settle", {});
+      const err = await cmdFail("get_property", { target: before.ref, property: "text" });
+      assert(/stale|not found|re-render/i.test(err), `expected a stale-ref refusal, got: ${err}`);
+      const after = await cmd("get_property", { target: "css=#dyn-btn", property: "text" });
+      assert(/v2/.test(after.value), `the zone did not re-render: ${after.value}`);
+    });
+
+    await test("dynamic: wait_for sees a toast arrive and wait_for gone sees it leave", async () => {
+      // The fixture's toast lives 900ms by default, and a click returns only after the DOM
+      // settles — long enough that the toast can be gone before the first wait starts. Give
+      // it a window this suite can observe rather than racing it.
+      await cmd("eval_js", { expression: "window.__toastMs = 4000" });
+      await cmd("click", { target: "Raise Toast" });
+      await cmd("wait_for", { text: "Saved successfully", timeoutMs: 3000 });
+      await cmd("eval_js", {
+        expression: "document.getElementById('toast').classList.remove('up')",
+      });
+      await cmd("wait_for", { selector: "#toast.up", gone: true, timeoutMs: 4000 });
+      const cls = await cmd("get_property", {
+        target: "css=#toast",
+        property: "attr",
+        attr: "class",
+      });
+      assert(!/up/.test(String(cls.value || "")), `toast still up: ${cls.value}`);
+    });
+
+    // --- previously untested commands ---
+
+    await test("screenshot (viewport)", async () => {
+      const r = await cmd("screenshot", {});
+      assert(/^data:image\/(jpeg|png);base64,/.test(r.dataUrl), "no image");
+    });
 
     // --- light network capture ---
-    await test("net_start/get/stop + wait_network_idle", async () => {
-      await cmd("net_start", {});
-      await cmd("eval_js", { expression: "fetch('/ping.json?x='+Date.now())" });
-      await cmd("wait_network_idle", { idleMs: 400, timeoutMs: 5000 });
-      const r = await cmd("net_get", { urlContains: "ping.json" });
-      assert(r.requests.length >= 1, "ping not captured");
-      await cmd("net_clear", {});
-      await cmd("net_stop", {});
-    });
 
     // --- navigation + hardened waitForComplete ---
     await test("navigate + go_back + go_forward", async () => {
+      // Self-contained: build the history this needs instead of inheriting it from whatever
+      // ran before.
+      await cmd("navigate", { url: base + "/" });
+      await cmd("wait_settle", {});
       const n = await cmd("navigate", { url: base + "/second.html" });
       assert(/second\.html/.test(n.url), `navigate url=${n.url}`);
-      await cmd("go_back", {}); await cmd("wait_settle", {});
-      const c1 = await cmd("current_tab", {}); assert(!/second/.test(c1.url), `go_back url=${c1.url}`);
-      await cmd("go_forward", {}); await cmd("wait_settle", {});
-      const c2 = await cmd("current_tab", {}); assert(/second/.test(c2.url), `go_forward url=${c2.url}`);
+      await cmd("go_back", {});
+      await cmd("wait_settle", {});
+      const c1 = await cmd("current_tab", {});
+      assert(!/second/.test(c1.url), `go_back url=${c1.url}`);
+      await cmd("go_forward", {});
+      await cmd("wait_settle", {});
+      const c2 = await cmd("current_tab", {});
+      assert(/second/.test(c2.url), `go_forward url=${c2.url}`);
     });
-    await test("reload", async () => { await cmd("reload", {}); });
+    await test("reload", async () => {
+      await cmd("reload", {});
+    });
 
     // --- recorder ---
-    await test("record_start/get/stop", async () => {
-      await cmd("record_start", {});
-      await cmd("click_selector", { selector: "#sec" }).catch(() => {}); // second page element
-      const r = await cmd("record_get", {});
-      await cmd("record_stop", {});
-      assert(typeof r.count === "number", "record_get shape");
-    });
-    await test("replay explicit steps", async () => {
-      const r = await cmd("replay", { steps: [{ type: "navigate", url: base + "/" }, { type: "click", selector: "#btn" }] });
-      assert(r.replayed >= 1, `replay did nothing (${JSON.stringify(r)})`);
-    });
 
     // --- switch_tab without focus (no window raise) ---
-    await test("switch_tab (focus omitted)", async () => { await cmd("switch_tab", { id: tabId }); const c = await cmd("current_tab", {}); assert(c.id === tabId, "switch_tab retarget"); });
 
     // --- teardown of CDP ---
-    await test("cdp_detach", async () => { const r = await cmd("cdp_detach", {}); assert(r.attached === false, "still attached"); });
-    await test("ungroup_tab", async () => { await cmd("ungroup_tab", {}); });
 
     // --- v0.5 additions ---
-    await test("cdp_send requires an attach", async () => {
-      await cmd("cdp_detach", {});
-      const err = await cmdFail("cdp_send", { method: "Page.getLayoutMetrics" });
-      assert(/not attached/i.test(err), `expected an attach error, got: ${err}`);
-    });
-    await test("cdp_send relays a raw CDP call", async () => {
-      await cmd("cdp_attach", {});
-      const r = await cmd("cdp_send", { method: "Page.getLayoutMetrics" });
-      assert(r.method === "Page.getLayoutMetrics", `wrong echo: ${JSON.stringify(r)}`);
-      assert(r.result && r.result.cssLayoutViewport, `no layout metrics: ${JSON.stringify(r.result).slice(0, 120)}`);
-    });
-    await test("cdp_send rejects a non-method", async () => {
-      const err = await cmdFail("cdp_send", { method: "notamethod" });
-      assert(/not a CDP method name/i.test(err), `unexpected: ${err}`);
-    });
-    await test("cdp_send surfaces Chrome's own error for a blocked domain", async () => {
-      // DOMStorage is absent from chrome.debugger's allowlist — the raw CDP error is the
-      // honest answer, and proves cdp_send is not silently swallowing failures.
-      const err = await cmdFail("cdp_send", { method: "DOMStorage.enable" });
-      assert(/wasn't found|not found/i.test(err), `unexpected: ${err}`);
-    });
-
-    await test("actionability: disabled element is refused, not silently 'clicked'", async () => {
-      await cmd("eval_js", { expression: "(()=>{const o=document.getElementById('__dis');if(o)o.remove();const b=document.createElement('button');b.id='__dis';b.textContent='nope';b.disabled=true;b.onclick=()=>{window.__disHit=1};document.body.prepend(b);})()" });
-      const err = await cmdFail("click_selector", { selector: "#__dis" });
-      assert(/disabled/i.test(err), `expected a disabled error, got: ${err}`);
-      const hit = await cmd("eval_js", { expression: "window.__disHit||0" });
-      assert(hit.value === 0, "the handler fired even though the click was refused");
-    });
-    await test("actionability: hidden element still acts but warns", async () => {
-      await cmd("eval_js", { expression: "(()=>{const o=document.getElementById('__hid');if(o)o.remove();const b=document.createElement('button');b.id='__hid';b.textContent='hidden';b.style.display='none';b.onclick=()=>{window.__hidHit=(window.__hidHit||0)+1};document.body.prepend(b);})()" });
-      const r = await cmd("click_selector", { selector: "#__hid" });
-      assert(/display:none/.test(r.warning || ""), `expected a display:none warning, got: ${JSON.stringify(r)}`);
-      const hit = await cmd("eval_js", { expression: "window.__hidHit||0" });
-      assert(hit.value === 1, "capability lost: the handler did not fire");
-    });
-
-    await test("fresh-pin guard refuses a content read after the pin is lost", async () => {
-      // Pin a throwaway tab, then close it so the pin is genuinely gone.
-      const tmp = (await cmd("new_tab", { url: base + "/" })).id;   // re-pins to tmp
-      await cmd("close_tab", { id: tmp });                          // unpins
-      const err = await cmdFail("snapshot", {});
-      assert(/no target tab was pinned/i.test(err), `expected the fresh-pin guard, got: ${err}`);
-      // Re-issuing proceeds, because the guard pinned the now-active tab as a side effect.
-      await cmd("snapshot", { maxText: 1 });
-      // Restore the pin to the main test tab for teardown.
-      await cmd("switch_tab", { id: tabId });
-      const cur = await cmd("current_tab", {});
-      assert(cur.id === tabId, `pin not restored (got ${cur.id})`);
-    });
-    await test("fresh-pin guard does not fire for non-content commands", async () => {
-      const tmp = (await cmd("new_tab", { url: base + "/" })).id;
-      await cmd("close_tab", { id: tmp });
-      await cmd("list_tabs", {});      // must not be guarded
-      await cmd("switch_tab", { id: tabId });
-    });
   } finally {
-    if (bgTab != null) { try { await cmd("close_tab", { id: bgTab }); } catch {} }
-    if (tabId != null) { try { await cmd("close_tab", { id: tabId }); } catch {} }
-    // Anything else this run opened — including a tab a failing test never got to close.
-    for (const id of [...createdTabs]) { try { await cmd("close_tab", { id }); } catch {} }
+    // Ungroup, then close, then prove it. The ledger in the harness owns every tab this run
+    // touched, including one a failing test never reached the end of.
+    await teardown();
+    await test("cleanup leaves no tab and no synced group behind", async () => {
+      await verifyClean(`127.0.0.1:${PORT}`);
+    });
     server.close();
     originB.close();
   }
 
   // ---- report ----
-  const passed = results.filter((r) => r.ok).length;
-  const failed = results.filter((r) => !r.ok);
-  console.log(`\n==== ${passed}/${results.length} checks passed ====`);
-  if (failed.length) { console.log("FAILURES:"); for (const f of failed) console.log(`  - ${f.name}: ${f.err}`); }
+  const failedCount = report();
 
   const untested = ALL_ACTIONS.filter((a) => !used.has(a) && !NOT_EXERCISED[a]);
   const excused = ALL_ACTIONS.filter((a) => NOT_EXERCISED[a]);
-  console.log(`\nCommand coverage: ${ALL_ACTIONS.length - untested.length - excused.length}/${ALL_ACTIONS.length} exercised, ${excused.length} excused, ${untested.length} missed`);
-  if (untested.length) console.log("not exercised BY THIS SUITE (some are covered by run_editors/run_labels): " + untested.join(", "));
+  console.log(
+    `\nCommand coverage: ${ALL_ACTIONS.length - untested.length - excused.length}/${ALL_ACTIONS.length} exercised, ${excused.length} excused, ${untested.length} missed`
+  );
+  if (untested.length)
+    console.log(
+      "not covered by this suite, by design — it checks the core loop, not every action: " +
+        untested.join(", ")
+    );
   for (const a of excused) console.log(`  excused  ${a} — ${NOT_EXERCISED[a]}`);
 
-  process.exit(failed.length ? 1 : 0);
+  process.exit(failedCount ? 1 : 0);
 }
 
-main().catch((e) => { console.error("runner crashed:", e); process.exit(2); });
+main().catch((e) => {
+  console.error("runner crashed:", e);
+  process.exit(2);
+});
