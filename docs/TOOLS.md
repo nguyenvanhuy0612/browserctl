@@ -1,4 +1,4 @@
-# Tool surface as it actually is — generated 2026-09-14, browserctl 0.8.0
+# Tool surface as it actually is — generated 2026-09-14, browserctl 0.8.1
 
 Generated from the running server (`server._registeredTools`), not written by hand — the last
 hand-written version of this list claimed `all` on a tool that did not have it.

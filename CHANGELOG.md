@@ -1,8 +1,13 @@
 # Changelog
 
-## 0.8.0
+## 0.8.1
 
-**BREAKING — 0.8.0 is a clean break and does not support 0.7.x.** Every tool was renamed or
+**0.8.0 was published on 13 Sep and withdrawn the same day; npm never allows a withdrawn version
+number to be reused, so this release carries the next one.** If you installed 0.8.0 in that
+window, everything below applies to you as well — it is the same break from 0.7.x, not a second
+one.
+
+**BREAKING — this release is a clean break and does not support 0.7.x.** Every tool was renamed or
 consolidated, element addressing collapsed into one `target` parameter, and the compatibility
 shims that existed during development have been removed. A 0.7 call fails; it does not quietly
 keep working. Failures are actionable: a removed parameter is refused with the form that replaces
