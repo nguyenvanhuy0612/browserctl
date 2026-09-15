@@ -1,50 +1,66 @@
 # Claude Code Instructions — browserctl
 
-Fast, ergonomic browser automation for AI agents and developers, driving the user's real Chrome profile in the background.
+Fast, ergonomic browser automation for AI agents and developers, driving the user's real
+Chrome profile in the background.
 
-## 1. Architecture Overview
+## 1. Where things live
 
-Three-tier decoupled stack:
-- **`extension/`** (Chrome MV3 extension): Content scripts (`content.js`), background service worker (`background.js`), netlog, and CDP bridge (`cdp.js`). Handles DOM operations, target resolution, and CDP events.
-- **`bridge/`** (Local HTTP daemon, default port 8765): `server.js` and `state.js`. Routes `/command` HTTP POST requests between MCP/CLI clients and the Chrome extension via WebSocket.
-- **`mcp/` & `cli.js`** (Surface layers):
-  - `mcp/index.js`: Model Context Protocol server exposing 25 core tools (default) + dynamic profiles (network, cdp, cookies, storage, console, record, tabs, advanced).
-  - `cli.js`: Terminal interface for humans and script runners (`bctl`).
+A three-tier stack. Start reading at the tier that owns the change.
 
-## 2. Essential Commands
+- `extension/` — Chrome MV3 extension. DOM work, target resolution, CDP. Change here for
+  anything about what the page does or how an element is found.
+- `bridge/` — local HTTP daemon on port 8765, routing `/command` between clients and the
+  extension over WebSocket. Change here for transport, state, and logging.
+- `mcp/index.js` and `cli.js` — the two surfaces (MCP server, `bctl` terminal command).
+  Change here for tool schemas, descriptions, and anything an agent or human reads.
 
-Run these from the repo root (`claude/browserctl`):
+## 2. Commands
 
-- **Release Gate / Full Verification**:
-  `npm run preflight -- --e2e` (every gate, the unit suite, and the live browser suites — it prints the counts, so they are not restated here).
-- **Unit Gates Only (Fast, no browser needed)**:
-  `npm run preflight` (Checks reading budget, schema/doc agreement, lint, and unit tests).
-- **Unit Tests**:
-  `npm test` (Runs `node --test tests/unit/`).
-- **Lint & Format**:
-  `npm run lint` (ESLint: catches syntax errors and enforces no-comments in shipped source).
-- **Auto-sync generated surface docs**:
-  `npm run preflight -- --fix` (Regenerates `docs/TOOLS.md` from the tool registry).
+From this directory.
 
-## 3. Strict Inviolable Rules
+- `npm run preflight -- --e2e` — release gate: every gate plus the live browser suites.
+- `npm run preflight` — gates and unit tests only, no browser needed.
+- `npm run preflight -- --fix` — regenerate `docs/TOOLS.md` from the tool registry.
+- `npm test` — unit tests.
+- `npm run lint` — ESLint, including the repo's own rules.
 
-1. **NO COMMENTS IN SHIPPED SOURCE**:
-   - `cli.js`, `bridge/`, `mcp/`, and `extension/` must contain NO commentary. Only pragmas (`prettier-ignore`, `eslint-*`, `@ts-*`, shebang) are allowed.
-   - Enforced by `local/shipped-source-has-no-comments` in `eslint.config.js`.
-   - `scripts/` and `tests/` are exempt and should be commented normally.
-2. **AGENT READING BUDGET CEILING**:
-   - Total characters handed to an agent at connect (core tool descriptions + parameter describes + instructions) is strictly capped at `AGENT_TEXT_BUDGET = 18,800` characters.
-   - Any addition must be funded by deletion or deliberate owner approval. Enforced by Gate 4 in `preflight.mjs`.
-3. **CLEAN BREAK V2 (NO LEGACY ALIASES)**:
-   - Addressing is ONE parameter: `target`. Never accept or introduce silent rewriting from `ref`, `selector`, `text`, `index`, `placeholder`.
-   - Removed tools from v0.7 are unknown tools (no shims).
-4. **GIT & REPO HYGIENE**:
-   - DO NOT commit changes to git unless explicitly instructed by the user.
-   - DO NOT push or sync changes to the public mirror (`~/Documents/browserctl`) without explicit owner directive.
+Each command prints its own counts. Do not restate those counts anywhere in the docs; a
+number copied into prose is stale by the next commit.
 
-## 4. Documentation & Ground Truth
+## 3. Invariants
 
-- **Design Spec & Architectural History**: `docs/tool-surface-design-v2.md` (Contains the authoritative target resolution rules, tool design, and revision log).
-- **Human Parameter Reference**: `docs/REFERENCE.md` (Exhaustive dictionary of all core tool parameters).
-- **Surface Inventory**: `docs/TOOLS.md` (Generated catalog of all 69 tools across profiles).
-- **Contributing Conventions**: `CONTRIBUTING.md` (Detailed rationale for all repo gates).
+1. **No comments in shipped source.** `cli.js`, `bridge/`, `mcp/`, `extension/` carry no
+   commentary — only pragmas (`prettier-ignore`, `eslint-*`, `@ts-*`, shebang). `scripts/`
+   and `tests/` are exempt and should be commented normally.
+   Enforced by `local/shipped-source-has-no-comments` in `eslint.config.js`.
+2. **The agent reading budget is capped.** Everything handed to an agent at connect — core
+   tool descriptions, parameter descriptions, instructions — is capped at
+   `AGENT_TEXT_BUDGET` in `scripts/preflight.mjs`. Any addition must be funded by a
+   deletion. Enforced by the reading-budget gate.
+3. **Clean break v2: no legacy aliases.** Addressing is one parameter, `target`. Never
+   accept or silently rewrite `ref`, `selector`, `text`, `index`, `placeholder`. Tools
+   removed in v0.7 are unknown tools, not shims.
+
+## 4. Autonomy boundaries
+
+**Proceed without asking:** read anything, explore, run the commands in section 2, and edit
+code within the scope of the task you were given.
+
+**Propose and wait:** changes to the design spec (`docs/internal/tool-surface.md`), adding
+or removing an npm dependency, raising `AGENT_TEXT_BUDGET`, renaming or removing anything
+already public (a tool, a parameter, a result field).
+
+**Owner only, never on your own judgement:** `git commit`, `git push`, publishing, syncing
+to the public mirror, and choosing a release number. Approving a plan is not approving the
+version number inside it.
+
+## 5. Ground truth
+
+- `docs/internal/` — working documents, not part of the published package. `tool-surface.md` is
+  the spec: authoritative target-resolution rules and tool design, stated as what is true now.
+  `history.md` holds decisions, reviews, superseded designs and the revision log — read it for
+  how something came to be, never quote it as current behaviour.
+- `docs/REFERENCE.md` — human-facing dictionary of core tool parameters.
+- `docs/TOOLS.md` — generated catalogue of the tool surface. Never hand-edit; regenerate.
+- `CONTRIBUTING.md` — the rationale for each gate.
+- `CHANGELOG.md` — what changed and when.

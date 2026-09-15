@@ -44,6 +44,46 @@ const CORE = mcp.TOOL_CATEGORIES?.core || [];
 const paramsOf = (name) =>
   Object.keys(TOOLS[name]?.inputSchema?.shape || {}).filter((k) => k !== "tabId" && k !== "tab_id");
 
+// Three gates below scan "everywhere the tool surface is spoken about", and each used to carry
+// its own copy of the list. The copies drifted: two of them still named skills/browserctl/SKILL.md
+// and one named PROTOCOL.md, neither of which has existed for some time, and because every gate
+// skipped a missing path in silence, each reported a file count larger than what it actually read.
+// A guarded path that disappears shrinks the guard, so GUARDED_PATHS gets a gate of its own
+// instead of a quiet `continue`.
+// The spec states what is true now, so it is scanned like any shipping document. Its sibling
+// docs/internal/history.md is deliberately NOT here: it quotes dead syntax and superseded counts
+// on purpose, which is what a history is for.
+// The spec states what is true now, so it is scanned like any shipping document in the source
+// repo. In the public clone, docs/internal/ is excluded by sync-public.sh, so SPEC only applies
+// where it exists (or in the source repo where its presence is mandatory).
+const IS_SOURCE_REPO = existsSync(join(ROOT, "scripts/sync-public.sh"));
+const SPEC = "docs/internal/tool-surface.md";
+const SURFACE_SOURCE = [
+  "mcp/index.js",
+  "cli.js",
+  "extension/background.js",
+  "extension/content.js",
+  "extension/netlog.js",
+];
+const SURFACE_DOCS = [
+  "README.md",
+  "CONTRIBUTING.md",
+  "docs/REFERENCE.md",
+  "docs/INSTALL.md",
+  "docs/TOOLS.md",
+  ...(IS_SOURCE_REPO || existsSync(join(ROOT, SPEC)) ? [SPEC] : []),
+];
+const GUARDED_PATHS = [...SURFACE_SOURCE, ...SURFACE_DOCS];
+
+gate("every guarded path still exists", () => {
+  const gone = GUARDED_PATHS.filter((f) => !existsSync(join(ROOT, f)));
+  if (gone.length)
+    throw new Error(
+      `these gates scan a file that is no longer there, so their coverage silently shrank: ${gone.join(", ")} — delete the entry deliberately, or restore the file`
+    );
+  return `${GUARDED_PATHS.length} paths`;
+});
+
 // ---------------------------------------------------------------- 1. versions
 gate("versions agree", () => {
   const pkg = JSON.parse(read("package.json"));
@@ -60,15 +100,7 @@ gate("versions agree", () => {
   // while the package was at 0.7.1, and docs/REFERENCE.md claimed "80 tools" when there
   // were 67. A number in prose is a number that rots.
   const stale = [];
-  for (const f of [
-    "PROTOCOL.md",
-    "README.md",
-    "docs/REFERENCE.md",
-    "docs/INSTALL.md",
-    "docs/TOOLS.md",
-    "skills/browserctl/SKILL.md",
-  ]) {
-    if (!existsSync(join(ROOT, f))) continue;
+  for (const f of SURFACE_DOCS) {
     const doc = read(f);
     for (const m of doc.matchAll(/(?:Version|version:?|v)\s*\**(\d+\.\d+\.\d+)\**/g)) {
       if (m[1] !== pkg.version) stale.push(`${f}: says ${m[1]}`);
@@ -76,7 +108,10 @@ gate("versions agree", () => {
     // "24 core tools" puts a word between the number and "tools", which the earlier pattern
     // skipped — so README and REFERENCE both shipped a stale core count while this gate was
     // green. One optional qualifier is allowed in between now.
-    for (const m of doc.matchAll(/(\d+)\s+(?:\w+\s+)?tools\b/g)) {
+    // The lookbehind keeps "v0.7 tools" from reading as a claim of 7 tools — it did, for as long
+    // as this gate has existed, and the false positive is why the check was never pointed at the
+    // documents that actually had a stale count.
+    for (const m of doc.matchAll(/(?<![.\d])(\d+)\s+(?:\w+\s+)?tools\b/g)) {
       const n = Number(m[1]);
       if (n !== TOOL_NAMES.length && n !== CORE.length)
         stale.push(
@@ -229,7 +264,7 @@ gate("the agent's reading budget is respected", () => {
 // --------------------------- 1d. the one fact that legitimately lives in three places
 // Target resolution has to be in hand for three audiences that cannot follow a cross-reference:
 // the agent (server instructions), the reader (docs/REFERENCE.md) and the spec
-// (docs/tool-surface-design-v2.md). CONTRIBUTING.md allows exactly this exception. What it does
+// (docs/internal/tool-surface.md). CONTRIBUTING.md allows exactly this exception. What it does
 // not allow is the three drifting, so the enumeration every copy depends on is pinned here.
 // A result field named in the instructions has to exist where they say it does. openDialogs was
 // documented at the top level of a snapshot for two releases while the code returned it under
@@ -284,8 +319,8 @@ gate("every copy of the target-resolution rules agrees", () => {
       return src.slice(i, src.indexOf("`;", i));
     })(),
     "docs/REFERENCE.md": read("docs/REFERENCE.md"),
-    ...(existsSync(join(ROOT, "docs/tool-surface-design-v2.md"))
-      ? { "docs/tool-surface-design-v2.md": read("docs/tool-surface-design-v2.md") }
+    ...(existsSync(join(ROOT, "docs/internal/tool-surface.md"))
+      ? { "docs/internal/tool-surface.md": read("docs/internal/tool-surface.md") }
       : {}),
   };
   for (const [where, text] of Object.entries(sources)) {
@@ -505,22 +540,11 @@ gate("every core tool parameter is documented", () => {
 // Derived, so it keeps working after the next rename: any `browser_x` mentioned in a STRING
 // an agent can read (not a comment, not a changelog) must be a tool that is registered.
 gate("no live pointer to a removed tool", () => {
-  const files = [
-    "mcp/index.js",
-    "cli.js",
-    "extension/background.js",
-    "extension/content.js",
-    "extension/netlog.js",
-    "README.md",
-    "docs/REFERENCE.md",
-    "docs/INSTALL.md",
-    "skills/browserctl/SKILL.md",
-  ];
+  const files = GUARDED_PATHS;
   const known = new Set(TOOL_NAMES);
 
   const bad = [];
   for (const f of files) {
-    if (!existsSync(join(ROOT, f))) continue;
     read(f)
       .split("\n")
       .forEach((line, i) => {
@@ -529,6 +553,15 @@ gate("no live pointer to a removed tool", () => {
         if (/→|->/.test(line)) return; // migration notes name both sides
         if (/\bno\s+`?browser_/i.test(line)) return; // "There is no browser_check tool" is the opposite of a pointer
         if (/was renamed|deprecated/i.test(line)) return; // deprecation and rename guidance
+        // A spec for a clean break has to be able to name what the break removed. Naming a tool
+        // alongside the word that retires it is a statement about the past, not a pointer at
+        // something callable; naming it with no such word is exactly the stale pointer this gate
+        // is for.
+        if (/\b(?:dropped|gone|removed|superseded|no longer)\b/i.test(line)) return;
+        // §4 of the spec compares this surface against Playwright MCP's, tool name by tool name.
+        // Those names look exactly like ours and are not ours; a line that invokes Playwright is
+        // talking about another product's API, not pointing at anything callable here.
+        if (/playwright|not adopted/i.test(line)) return;
         if (/^\s*browser_[a-z_0-9]+:\s*($|")/i.test(line) && f === "mcp/index.js") return; // legacy hints map
         for (const m of line.matchAll(/\bbrowser_[a-z_0-9]+/g)) {
           if (!known.has(m[0]) && !bad.some((b) => b.endsWith(m[0])))
@@ -537,6 +570,94 @@ gate("no live pointer to a removed tool", () => {
       });
   }
   if (bad.length) throw new Error(`points at a tool that does not exist: ${bad.join(", ")}`);
+  return `${files.length} files`;
+});
+
+// ------------------------------------ 6b. no live pointer to a removed PARAMETER
+// The gate above catches a tool that no longer exists. It does not catch a tool that still
+// exists being called with a parameter that no longer does, and that is the exact shape the
+// v0.8 clean break creates: addressing collapsed into `target`, so every hint, example and
+// error string that still spelled `ref:` or `selector:` became syntax the server hands out
+// and then refuses. It happened in CLI_TO_MCP, where six rewrites kept emitting
+// browser_get_property({ref:...}) months after that parameter was gone, and every other gate
+// passed the whole time.
+//
+// Derived, not listed: the allowed keys come from each tool's own schema, so a parameter
+// renamed tomorrow is checked tomorrow without anyone editing this gate. Only the first
+// brace group after the call is read, and only its top-level keys — a nested object is a
+// value, not a parameter.
+gate("every tool call in a string names real parameters", () => {
+  const files = GUARDED_PATHS;
+
+  // Walk from the opening brace and return the top-level comma-separated segments, so that
+  // fields:{title:'h3'} contributes `fields` and never `title`. Quotes are tracked because a
+  // selector may legitimately contain a brace.
+  function topLevelSegments(src, open) {
+    let depth = 0,
+      quote = null,
+      seg = "";
+    const out = [];
+    for (let i = open; i < src.length; i++) {
+      const c = src[i];
+      if (quote) {
+        if (c === quote && src[i - 1] !== "\\") quote = null;
+        seg += c;
+        continue;
+      }
+      if (c === '"' || c === "'" || c === "`") {
+        quote = c;
+        seg += c;
+        continue;
+      }
+      if (c === "{" || c === "[") {
+        depth++;
+        if (depth === 1) {
+          seg = "";
+          continue;
+        }
+      }
+      if (c === "}" || c === "]") {
+        depth--;
+        if (depth === 0) {
+          out.push(seg);
+          return out;
+        }
+      }
+      if (c === "," && depth === 1) {
+        out.push(seg);
+        seg = "";
+        continue;
+      }
+      seg += c;
+    }
+    return null; // unbalanced: prose, not a call
+  }
+
+  const bad = [];
+  for (const f of files) {
+    if (!existsSync(join(ROOT, f))) continue;
+    const src = read(f);
+    const lines = src.split("\n");
+    for (const m of src.matchAll(/\bbrowser_[a-z_0-9]+\(\s*\{/g)) {
+      const name = m[0].match(/browser_[a-z_0-9]+/)[0];
+      const declared = Object.keys(TOOLS[name]?.inputSchema?.shape || {});
+      if (!declared.length) continue; // unknown tool: the gate above owns that
+      const allowed = new Set([...declared, "tabId", "tab_id"]);
+      const segments = topLevelSegments(src, m.index + m[0].length - 1);
+      if (!segments) continue;
+      const line = src.slice(0, m.index).split("\n").length;
+      for (const s of segments) {
+        const key = s.match(/^\s*['"]?([A-Za-z_$][\w$]*)['"]?\s*(:|$)/);
+        if (!key) continue; // a spread, a placeholder, or an ellipsis
+        if (!allowed.has(key[1]))
+          bad.push(`${f}:${line} ${name} names '${key[1]}' — ${lines[line - 1].trim().slice(0, 80)}`);
+      }
+    }
+  }
+  if (bad.length)
+    throw new Error(
+      `hands out call syntax the server will refuse: ${bad.join("; ")}\n    Fix the string, not the schema — addressing is one parameter, 'target'.`
+    );
   return `${files.length} files`;
 });
 

@@ -1159,13 +1159,13 @@ test("Inline hints reach an MCP agent in a syntax it can call (F78)", async () =
   // \"Notifications\" ... — use 'dismiss' to close]" with no browser_dismiss to call.
   const dialogHint = mcpifyHints(`[Open dialog: "Notifications" 360x722 (@ref_57), does not block the page — read it with 'get text @ref_57'; close it with 'dismiss']`);
   assert.ok(dialogHint.includes('browser_action({action:"dismiss"})'), "F78: the dialog hint must name a callable close");
-  assert.ok(dialogHint.includes('browser_get_property({ref:"ref_57"})'), "F78: the dialog hint must name the region read, by ref");
+  assert.ok(dialogHint.includes('browser_get_property({target:"ref_57"})'), "F78: the dialog hint must name the region read, by ref");
   assert.ok(!/use 'dismiss'|with 'dismiss'/.test(dialogHint), "F78: the CLI verb must not survive the rewrite");
 
   // A real ref keeps its number; the bare placeholder stays a placeholder.
-  assert.ok(mcpifyHints("[+168 chars: get text @ref_48]").includes('browser_get_property({ref:"ref_48"})'),
+  assert.ok(mcpifyHints("[+168 chars: get text @ref_48]").includes('browser_get_property({target:"ref_48"})'),
     "F78: a concrete ref must survive the rewrite");
-  assert.ok(mcpifyHints("[read: get text @ref]").includes('{ref:"<ref>"}'),
+  assert.ok(mcpifyHints("[read: get text @ref]").includes('{target:"<ref>"}'),
     "F78: the bare @ref placeholder must not become a literal ref named 'ref'");
 
   // Page text is not a hint. Rewriting outside brackets would report words the page

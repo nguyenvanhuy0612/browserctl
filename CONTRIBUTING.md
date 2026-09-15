@@ -40,9 +40,10 @@ whether it is already stated somewhere else, and delete as much as you add.
 **Enforced by** the `the agent's reading budget is respected` gate in `scripts/preflight.mjs`,
 which fails on three things:
 
-1. **Budget.** What a default session is handed has a ceiling (`AGENT_TEXT_BUDGET`): the 24 core
-   tools' descriptions, their parameter `describe()`s, and the instructions block. Today it sits
-   at 18.2k of 19k characters — about 4.5k tokens every session pays before it does anything.
+1. **Budget.** What a default session is handed has a ceiling (`AGENT_TEXT_BUDGET`): the core
+   tools' descriptions, their parameter `describe()`s, and the instructions block. `npm run
+   preflight` prints where it currently sits — a few thousand tokens every session pays
+   before it does anything.
    There is no comfortable headroom on purpose: a real addition has to be funded by a real
    deletion, or by raising the ceiling deliberately and saying why in the commit.
 
@@ -59,7 +60,7 @@ which fails on three things:
 
 **The one allowed exception, and what it costs.** Target resolution is stated three times: in the
 server instructions (the agent, which cannot open a file), in `docs/REFERENCE.md` (the reader, who
-never sees the instructions) and in `docs/tool-surface-design-v2.md` (the spec). Three audiences,
+never sees the instructions) and in `docs/internal/tool-surface.md` (the spec). Three audiences,
 none able to follow a cross-reference. The price of the exception is a gate —
 `every copy of the target-resolution rules agrees` — which pins the six resolution modes and the four
 prefixes in all three. It caught a real drift the first time it ran: the instructions still
@@ -80,7 +81,8 @@ and a maintainer ends up fixing three of them.
 | How a human installs and runs it | `docs/INSTALL.md` |
 | The full parameter dictionary | `docs/REFERENCE.md` |
 | The tool surface as it actually is | `docs/TOOLS.md`, generated |
-| Design intent and its review history | `docs/tool-surface-design-v2.md`, internal |
+| The tool surface as designed, and why | `docs/internal/tool-surface.md`, internal |
+| How it came to be designed that way | `docs/internal/history.md`, internal, append-only |
 
 **Why the budget and not just taste.** Description text competes with the page the agent is
 actually reading. Tokens spent restating what another tool already said are tokens not spent on
@@ -99,11 +101,31 @@ a paragraph in the instructions before anyone noticed, because each step looked 
 change it belonged to. Look at the whole surface after a change, not only the diff. A number
 under budget is not the same as a change that earned its place.
 
+## Before you remove or rename a parameter
+
+Grep the strings, not just the call sites. A removed parameter leaves copies of itself in the
+places a compiler never looks: hint rewrites, recovery hints, error messages, README examples.
+Those strings are instructions to an agent, so a stale one is worse than dead code — the server
+hands out call syntax and then refuses it.
+
+The v0.8 break did exactly this. Addressing collapsed into `target`, and six rewrites in
+`CLI_TO_MCP` went on naming the removed `ref` and `selector` parameters afterwards. Every gate
+passed, because the tool still existed and only its parameters had moved.
+
+The gate *every tool call in a string names real parameters* now covers this. It reads every
+tool call written out in shipped source or docs and checks its top-level keys against that
+tool's own schema, so the check follows a rename without being edited. If it fires, fix the
+string — never widen the schema to match the string.
+
+Note what this gate implies for prose: a document may not spell out a call that would be
+refused, not even to explain a past mistake, because a reader who copies the example is handed
+the mistake again. Describe the wrong call in words, as the paragraph above does.
+
 ## What ships
 
 `package.json`'s `files` lists every published path **by name**. Do not add a bare directory.
 
-A `"docs/"` entry once published `docs/tool-surface-design-v2.md` — 56 kB of implementation
+A `"docs/"` entry once published the internal design document — 56 kB of implementation
 review, counter-review and owner directives — to every npm consumer. Working documents are not
 product.
 
@@ -132,5 +154,5 @@ deleting it is not a fix.
 - A new **parameter** → `docs/REFERENCE.md` and the `describe()` on its schema. A parameter
   documented in neither is invisible to both humans and agents, which is what the
   `every core tool parameter is documented` gate exists to catch.
-- A change to the **tool surface** → `docs/tool-surface-design-v2.md`, which is the design of
+- A change to the **tool surface** → `docs/internal/tool-surface.md`, which is the design of
   record and stays internal.

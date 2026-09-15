@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.8.2
+
+A patch release with one behavioural fix. Everything else changed below the published surface.
+
+### Fixed
+- **The server no longer hands an agent call syntax it will then refuse.** When a result carried
+  an inline CLI-style hint, the MCP layer rewrote it into MCP form — and six of those rewrites
+  still named the `ref` and `selector` parameters that 0.8.0 removed from `browser_get_property`.
+  An agent that followed the hint verbatim got its call rejected by the very server that had just
+  suggested it. The rewrites now name `target`, like everything else since the clean break.
+
+### Internal
+- A gate now reads every tool call written out in shipped source or docs and checks its keys
+  against that tool's own schema, so a parameter that is renamed cannot leave working examples
+  behind. The gate that already watched for removed *tools* never looked at parameters, which is
+  how the fix above stayed invisible through two releases.
+- The gates that scan "everywhere the surface is described" shared three copies of one file list,
+  and two of those copies named files that no longer exist — so each reported a wider scan than it
+  performed. One list now, with a gate asserting every path in it is still there.
+- The internal design document is split in two: a spec that states what is true now, and an
+  append-only history of how it got that way. Neither ships. A count that had been wrong in four
+  places for eleven revisions came out of the spec entirely — `preflight` prints it.
+- Everything private now lives under one directory that the public sync excludes by location,
+  replacing five patterns that matched by filename.
+
 ## 0.8.1
 
 **0.8.0 was published on 13 Sep and withdrawn the same day; npm never allows a withdrawn version

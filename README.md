@@ -1,6 +1,6 @@
 # browserctl
 
-Universal Browser Control Protocol & MCP Server for AI Agents and Developers (v0.8.1).
+Universal Browser Control Protocol & MCP Server for AI Agents and Developers (v0.8.2).
 
 browserctl provides 25 core tools (69 tools across all profiles) designed specifically for LLM agents to inspect, navigate, and drive real browser sessions with high token efficiency and deterministic execution.
 
