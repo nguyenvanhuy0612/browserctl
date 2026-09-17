@@ -149,12 +149,15 @@ const CALL_LOG_MAX_BYTES = (() => {
   const mb = Number(process.env.BROWSERCTL_CALL_LOG_MAX_MB);
   return Number.isFinite(mb) && mb > 0 ? Math.round(mb * 1024 * 1024) : 8 * 1024 * 1024;
 })();
-let callLogBytes = 0;
-if (CALL_LOG_PATH) {
+// The size on disk, read fresh. The file is not ours alone: it can be truncated, deleted or
+// rotated by anything on the machine, and a counter kept in memory would then be wrong for the
+// life of the process — rotating early and overwriting a .1 that still held data.
+function callLogSize() {
+  if (!CALL_LOG_PATH) return 0;
   try {
-    callLogBytes = statSync(CALL_LOG_PATH).size;
+    return statSync(CALL_LOG_PATH).size;
   } catch {
-    callLogBytes = 0;
+    return 0;
   }
 }
 let callSeq = 0;
@@ -179,14 +182,12 @@ function logCall(entry) {
   if (!CALL_LOG_PATH) return;
   try {
     const line = JSON.stringify(entry) + "\n";
-    if (callLogBytes + line.length > CALL_LOG_MAX_BYTES) {
-      try {
-        renameSync(CALL_LOG_PATH, CALL_LOG_PATH + ".1");
-      } catch {}
-      callLogBytes = 0;
+    // The cap only holds if the rename succeeded. Resetting the count on a failed rotation
+    // would let the file grow past CALL_LOG_MAX_BYTES with nothing to stop it.
+    if (callLogSize() + line.length > CALL_LOG_MAX_BYTES) {
+      renameSync(CALL_LOG_PATH, CALL_LOG_PATH + ".1");
     }
     appendFileSync(CALL_LOG_PATH, line);
-    callLogBytes += line.length;
   } catch (_err) {}
 }
 
@@ -196,13 +197,24 @@ function statusPayload() {
     extensionConnected: extensionSocket != null,
     runId: RUN_ID,
     callLog: CALL_LOG_PATH || null,
-    callLogBytes: CALL_LOG_PATH ? callLogBytes : null,
+    callLogBytes: CALL_LOG_PATH ? callLogSize() : null,
     callLogMaxBytes: CALL_LOG_PATH ? CALL_LOG_MAX_BYTES : null,
   };
 }
 
+// Who is calling, as declared by the caller: a session id that lasts one client process, and a
+// source naming the surface it came through. Both are optional and both are free text, so they
+// are clamped and never trusted for anything but reading the log back.
+function clientTag(client) {
+  const pick = (v, max) => (typeof v === "string" && v ? v.slice(0, max) : null);
+  return {
+    session: pick(client && client.session, 32),
+    source: pick(client && client.source, 16),
+  };
+}
+
 function handleCommand(body, res) {
-  const { action, params } = body || {};
+  const { action, params, client } = body || {};
   if (!action || typeof action !== "string") {
     return sendJson(res, 400, { ok: false, error: "missing 'action'" });
   }
@@ -285,11 +297,14 @@ function handleCommand(body, res) {
   const message = { id, action, params: params || {} };
   const seq = ++callSeq;
   const startedAt = Date.now();
+  const who = clientTag(client);
   const record = (ok, extra) =>
     logCall({
       ts: new Date().toISOString(),
       runId: RUN_ID,
       runStartedAt: RUN_STARTED_AT,
+      session: who.session,
+      source: who.source,
       seq,
       action,
       tabId: (params && (params.tabId ?? params.tab_id)) ?? null,
@@ -402,7 +417,7 @@ server.listen(PORT, HOST, () => {
   if (CALL_LOG_PATH) {
     const mb = (n) => (n / 1024 / 1024).toFixed(1);
     log(
-      `call log ON -> ${CALL_LOG_PATH} (${mb(callLogBytes)}MB, rotates at ${mb(CALL_LOG_MAX_BYTES)}MB, ` +
+      `call log ON -> ${CALL_LOG_PATH} (${mb(callLogSize())}MB, rotates at ${mb(CALL_LOG_MAX_BYTES)}MB, ` +
         `keeps one .1 file; parameter values are never written). Unset BROWSERCTL_CALL_LOG to stop.`
     );
   }

@@ -24,6 +24,10 @@ function envStr(name, fallback) {
 
 export const BRIDGE = envStr("BROWSERCTL_BRIDGE_URL", envStr("BRIDGE_URL", "http://127.0.0.1:8765"));
 
+// Tags every command this run sends, so e2e traffic is distinguishable from an agent's in the
+// bridge call log. One daemon and one extension serve every client, so the runs share a log.
+const CLIENT = { session: `e2e-${process.pid}`, source: "e2e" };
+
 export const used = new Set();
 const ledger = { tabs: new Set(), groups: new Set(), mainTab: null };
 const results = [];
@@ -34,7 +38,7 @@ export async function cmd(action, params = {}) {
   const res = await fetch(`${BRIDGE}/command`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action, params }),
+    body: JSON.stringify({ action, params, client: CLIENT }),
   });
   const data = await res.json().catch(() => ({}));
   if (!data.ok) throw new Error(`${action}: ${data.error || "HTTP " + res.status}`);

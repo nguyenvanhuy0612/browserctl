@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.8.3
+
+### Fixed
+- **Closing a tab that is already closed succeeds.** `chrome.tabs.remove` throws on a tab that is
+  gone, so a caller that closed a tab and then cleaned up got a failure for reaching the state it
+  asked for. It now reports `alreadyClosed: true`; a failure with the tab still open is still a
+  failure and still throws. The pinned-tab release moved with it — closing the pinned tab used to
+  leave the pin on a tab that no longer existed, so every later untargeted command went nowhere.
+- **The call log's size cap is honoured.** The size was read once at start-up and then only added
+  to, so anything that truncated or replaced the file from outside left the count wrong for the
+  life of the daemon — rotating early and overwriting the kept `.1`. The size is now read from
+  disk, and the count is no longer reset when the rotation itself fails, which previously let the
+  file grow past the cap with nothing to stop it.
+
+### Added
+- **A caller can name itself in the call log.** `POST /command` accepts an optional
+  `client: {session, source}`, recorded on each logged call. One bridge and one extension serve
+  every client on the machine, so their commands share a log; without this, a single agent
+  session cannot be told apart from a test run, and `runId` identifies the daemon process rather
+  than the caller. The MCP server, the CLI, the e2e suite and the benchmark harness each tag
+  their own traffic. Both fields are optional, clamped, and absent from a call that does not send
+  them.
+
 ## 0.8.2
 
 A patch release with one behavioural fix. Everything else changed below the published surface.

@@ -20,6 +20,9 @@ function envStr(name, fallback) {
 }
 
 const BRIDGE_URL = envStr("BROWSERCTL_BRIDGE_URL", envStr("BRIDGE_URL", "http://127.0.0.1:8765"));
+// Names this invocation in the bridge call log. One id per command, because a CLI process is
+// one command — there is no session to group.
+const CLIENT = { session: `cli-${process.pid}`, source: "cli" };
 
 function printHelp() {
   console.log(`
@@ -909,7 +912,7 @@ async function main() {
     const res = await fetch(`${BRIDGE_URL}/command`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, params }),
+      body: JSON.stringify({ action, params, client: CLIENT }),
     });
     const data = await res.json();
 

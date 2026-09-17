@@ -12,11 +12,13 @@ const __dirname = dirname(__filename);
 const BRIDGE_URL = process.env.BROWSERCTL_BRIDGE_URL || "http://127.0.0.1:8765";
 const TELEMETRY_FILE = join(__dirname, "..", "..", "bridge", "telemetry.jsonl");
 
+const CLIENT = { session: `benchmark-${process.pid}`, source: "benchmark" };
+
 async function callBridge(action, params = {}) {
   const res = await fetch(`${BRIDGE_URL}/command`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action, params }),
+    body: JSON.stringify({ action, params, client: CLIENT }),
     signal: AbortSignal.timeout(45000),
   });
   const data = await res.json().catch(() => ({}));

@@ -892,11 +892,27 @@ async function closeTab(params = {}) {
     const tab = await targetTab(params);
     id = tab.id;
   }
-  await chrome.tabs.remove(id);
+  // Closing a tab that is already gone is the state the caller asked for, so it succeeds and
+  // says so. A failure with the tab still open is a real failure and throws, leaving the pin
+  // alone because the tab it points at is still there.
+  let alreadyClosed = false;
+  try {
+    await chrome.tabs.remove(id);
+  } catch (err) {
+    const stillOpen = await chrome.tabs
+      .get(id)
+      .then(() => true)
+      .catch(() => false);
+    if (stillOpen) throw err;
+    alreadyClosed = true;
+  }
   if (id === targetTabId) unpinTarget();
-  return { id };
+  return { id, alreadyClosed };
 }
 
+// History is driven through the page's own history object via chrome.scripting, not through
+// chrome.tabs.goBack/goForward, which answers "Cannot find a next page in history" on a tab that
+// is not active. Background tabs are the state this product exists to drive.
 async function historyGo(params, delta) {
   const tab = await targetTab(params);
   const before = tab.url;

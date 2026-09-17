@@ -1,35 +1,50 @@
-// The shipped source carries no commentary. Rationale for shipped behaviour lives in a test
-// that fails when the behaviour drifts, in CHANGELOG.md, and in each tool's description() —
-// none of which go quiet when the code changes underneath them, the way a comment does.
-// scripts/ and tests/ are exempt: they are not published, and a gate whose reason is not
-// written down is a gate somebody deletes to get a green run.
+// Comments in shipped source describe the code as it stands. A comment names what the thing
+// does and the constraints on it, not how it came to be that way: no revision history, no
+// account of what was tried first, no note addressed to whoever is reading it this session.
+// Those belong in CHANGELOG.md, in a test that fails when the behaviour drifts, or in the
+// tool's own description(). A comment that narrates a change goes silent the next time the
+// code changes; a comment that states what the code is can be checked against it.
 // See CONTRIBUTING.md.
 const ALLOWED_PRAGMA = /^\s*(prettier-ignore|eslint-|@ts-|global\s|globals\s|#|!)/;
 
-const shippedSourceHasNoComments = {
+const HISTORY_IN_COMMENT = [
+  [/\b(used to|previously|formerly|originally|no longer|superseded|it turned out)\b/i, "narrates history"],
+  [/\bwe (tried|changed|renamed|moved|removed|added|had)\b/i, "narrates the change rather than the code"],
+  [/\b(rev \d+|§\d)/i, "points into a design document"],
+  [/\bv\d+\.\d+/i, "names a version; CHANGELOG.md owns versions"],
+  [/\b20\d{2}-\d{2}-\d{2}\b/, "carries a date"],
+  [/\bthe old [a-z_]+\b/i, "describes code by contrast with a past version"],
+];
+
+const commentsDescribeTheCode = {
   meta: {
     type: "problem",
-    docs: { description: "published source carries no commentary; pragmas only" },
+    docs: { description: "comments state what the code is, not how it got that way" },
     schema: [],
   },
   create(context) {
     return {
       Program() {
         for (const c of context.sourceCode.getAllComments()) {
-          if (c.type === "Shebang" || c.range[0] === 0) continue;
+          if (c.type === "Shebang" || c.type === "Hashbang") continue;
           if (ALLOWED_PRAGMA.test(c.value)) continue;
-          context.report({
-            loc: c.loc,
-            message:
-              "published source carries no comments. Put the reason in a test that fails without it, in CHANGELOG.md, or in the tool's description(). Pragmas (prettier-ignore, eslint-*) are allowed. See CONTRIBUTING.md.",
-          });
+          for (const [pattern, why] of HISTORY_IN_COMMENT) {
+            if (!pattern.test(c.value)) continue;
+            context.report({
+              loc: c.loc,
+              message:
+                `this comment ${why}. Say what the code does now and what constrains it. ` +
+                "History goes in CHANGELOG.md, rationale in a test that fails without it. See CONTRIBUTING.md.",
+            });
+            break;
+          }
         }
       },
     };
   },
 };
 
-const local = { rules: { "shipped-source-has-no-comments": shippedSourceHasNoComments } };
+const local = { rules: { "comments-describe-the-code": commentsDescribeTheCode } };
 
 const nodeGlobals = {
   process: "readonly",
@@ -129,6 +144,6 @@ export default [
   {
     files: ["cli.js", "bridge/**/*.js", "mcp/**/*.js", "extension/**/*.js"],
     plugins: { local },
-    rules: { "local/shipped-source-has-no-comments": "error" },
+    rules: { "local/comments-describe-the-code": "error" },
   },
 ];

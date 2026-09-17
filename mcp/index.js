@@ -7,6 +7,7 @@ import fs from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   getDaemonState,
@@ -109,6 +110,10 @@ async function ensureBridge(forceAuto = false) {
 const tabStore = new AsyncLocalStorage();
 const formatStore = new AsyncLocalStorage();
 
+// One id per server process. It is what makes a single agent session findable in the bridge's
+// call log, which records commands from every client that shares the daemon.
+const CLIENT = { session: randomUUID().slice(0, 8), source: "mcp" };
+
 async function callBridge(action, params = {}) {
   const tabId = tabStore.getStore();
   if (tabId != null && params.tabId == null) params = { ...params, tabId };
@@ -132,7 +137,7 @@ async function callBridge(action, params = {}) {
       const res = await fetch(`${BRIDGE_URL}/command`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action, params }),
+        body: JSON.stringify({ action, params, client: CLIENT }),
         signal: AbortSignal.timeout(timeoutMs),
       });
       const data = await res.json().catch(() => ({}));

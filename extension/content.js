@@ -494,6 +494,9 @@
     return "main";
   }
 
+  // A region's name is what it declares: aria-label, then aria-labelledby, then nothing. Not
+  // accessibleName(), whose innerText rung would name a region after its own contents, and not
+  // the first heading inside it, for the same reason. An unnamed region prints without a name.
   function regionName(node) {
     if (!node || !node.getAttribute) return "";
     const clean = (s) => (s ? String(s).trim().replace(/\s+/g, " ").slice(0, 40) : "");
@@ -1496,6 +1499,9 @@
     );
   }
 
+  // `ref`, `selector`, `text`, `placeholder` and `index` are accepted here and folded into a
+  // single target string. The MCP surface does not offer them — the CLI does, where a human
+  // types `--selector` — so this branch is load-bearing for the terminal and invisible to agents.
   function resolveTarget({ target, index, ref, selector, text, placeholder } = {}) {
     const rawTarget =
       target !== undefined && target !== null

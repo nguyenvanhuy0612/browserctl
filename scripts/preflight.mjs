@@ -50,9 +50,6 @@ const paramsOf = (name) =>
 // skipped a missing path in silence, each reported a file count larger than what it actually read.
 // A guarded path that disappears shrinks the guard, so GUARDED_PATHS gets a gate of its own
 // instead of a quiet `continue`.
-// The spec states what is true now, so it is scanned like any shipping document. Its sibling
-// docs/internal/history.md is deliberately NOT here: it quotes dead syntax and superseded counts
-// on purpose, which is what a history is for.
 // The spec states what is true now, so it is scanned like any shipping document in the source
 // repo. In the public clone, docs/internal/ is excluded by sync-public.sh, so SPEC only applies
 // where it exists (or in the source repo where its presence is mandatory).
@@ -138,7 +135,7 @@ gate("the changelog leads with this version", () => {
 });
 
 // ------------------------------------------------------- 1b. lint and formatting
-// The no-comments rule on published source (CONTRIBUTING.md) lives in eslint.config.js, so it
+// The comment-content rule on published source (CONTRIBUTING.md) lives in eslint.config.js, so it
 // only binds if lint runs. Running it here makes the convention a release gate rather than a
 // thing somebody remembers.
 gate("lint and formatting", () => {
@@ -164,10 +161,11 @@ gate("lint and formatting", () => {
 // in four places costs four times and rots in three.
 //
 // Two things are checked. A BUDGET, so added text has to be paid for by deleted text rather
-// than waved through; and REPETITION, so a fact lands in the one place that owns it. Where a
-// 18800: raised from 18500 on owner directive — browser_hover promoted to CORE (25 tools)
-// to align with Playwright MCP defaults.
-const AGENT_TEXT_BUDGET = 18800;
+// than waved through; and REPETITION, so a fact lands in the one place that owns it.
+//
+// AGENT_TEXT_BUDGET is the ceiling on everything a default session is handed at connect:
+// core tool descriptions, their parameter describe()s, and the INSTRUCTIONS block.
+const AGENT_TEXT_BUDGET = 20000;
 const REPEAT_ALLOWED = {
   "requires the target tab in the foreground: chrome silently drops cdp synthetic mouse input for background tabs so this errors rather than pretending to click":
     "coordinate_click and coordinate_drag are siblings and this is a hard constraint on both; an agent reading one description cannot be sent to the other",

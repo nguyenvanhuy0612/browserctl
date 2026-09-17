@@ -29,10 +29,13 @@ number copied into prose is stale by the next commit.
 
 ## 3. Invariants
 
-1. **No comments in shipped source.** `cli.js`, `bridge/`, `mcp/`, `extension/` carry no
-   commentary — only pragmas (`prettier-ignore`, `eslint-*`, `@ts-*`, shebang). `scripts/`
-   and `tests/` are exempt and should be commented normally.
-   Enforced by `local/shipped-source-has-no-comments` in `eslint.config.js`.
+1. **A comment describes the code, not its history.** Comments are welcome anywhere,
+   including shipped source. A comment says what the thing does and what constrains it —
+   directly, briefly, about that code. It does not carry revision history, does not explain
+   what was tried first, and is not a note to whoever is reading it this session. When code
+   changes, its comment is rewritten to describe the new code, never amended to record the
+   change. History belongs in `CHANGELOG.md`.
+   Enforced by `local/comments-describe-the-code` in `eslint.config.js`.
 2. **The agent reading budget is capped.** Everything handed to an agent at connect — core
    tool descriptions, parameter descriptions, instructions — is capped at
    `AGENT_TEXT_BUDGET` in `scripts/preflight.mjs`. Any addition must be funded by a
@@ -56,10 +59,8 @@ version number inside it.
 
 ## 5. Ground truth
 
-- `docs/internal/` — working documents, not part of the published package. `tool-surface.md` is
-  the spec: authoritative target-resolution rules and tool design, stated as what is true now.
-  `history.md` holds decisions, reviews, superseded designs and the revision log — read it for
-  how something came to be, never quote it as current behaviour.
+- `docs/internal/tool-surface.md` — the spec, not part of the published package: authoritative
+  target-resolution rules and tool design, stated as what is true now.
 - `docs/REFERENCE.md` — human-facing dictionary of core tool parameters.
 - `docs/TOOLS.md` — generated catalogue of the tool surface. Never hand-edit; regenerate.
 - `CONTRIBUTING.md` — the rationale for each gate.

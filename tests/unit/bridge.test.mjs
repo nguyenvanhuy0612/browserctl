@@ -8,6 +8,9 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { WebSocket } from "ws";
+import { readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Small, test-only overrides so timeout/payload-cap behavior can be exercised in
 // milliseconds/kilobytes instead of real minutes/megabytes. Must be set before
@@ -17,6 +20,10 @@ const TEST_MAX_WS_PAYLOAD_BYTES = 4096;
 process.env.PORT = "0"; // OS-assigned free port, so tests never collide with a real bridge
 process.env.COMMAND_TIMEOUT_MS = String(TEST_COMMAND_TIMEOUT_MS);
 process.env.MAX_WS_PAYLOAD_BYTES = String(TEST_MAX_WS_PAYLOAD_BYTES);
+// The call log is off unless asked for, so the tests that read it back turn it on — into a temp
+// file, before server.js is imported and reads the path into a module-level constant.
+const TEST_CALL_LOG = join(tmpdir(), `browserctl-calls-${process.pid}.jsonl`);
+process.env.BROWSERCTL_CALL_LOG = TEST_CALL_LOG;
 
 const { server, wss, computeTimeoutMs } = await import("../../bridge/server.js");
 
@@ -35,11 +42,11 @@ const PORT = server.address().port;
 const BASE = `http://127.0.0.1:${PORT}`;
 const WS_URL = `ws://127.0.0.1:${PORT}/extension`;
 
-async function post(action, params) {
+async function post(action, params, client) {
   const res = await fetch(`${BASE}/command`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action, params }),
+    body: JSON.stringify(client === undefined ? { action, params } : { action, params, client }),
   });
   const data = await res.json().catch(() => ({}));
   return { status: res.status, data };
@@ -300,3 +307,48 @@ test("POST /command upload: a readable file gets past the check and on to the ex
   const r = await post("upload", { files: [new URL(import.meta.url).pathname] });
   assert.equal(r.status, 503, `expected the relay to take it, got ${r.status}: ${JSON.stringify(r.data)}`);
 });
+
+// ---- the client tag on a logged call ----
+
+// The last command the bridge relayed, as it was written to the log.
+function lastLoggedCall() {
+  const lines = readFileSync(TEST_CALL_LOG, "utf8").trim().split("\n").filter(Boolean);
+  return JSON.parse(lines[lines.length - 1]);
+}
+
+test("a logged call carries the caller's session and source", async () => {
+  const ext = await connectFakeExtension();
+  const p = post("eval_js", { expression: "1" }, { session: "sess-abc", source: "mcp" });
+  const msg = await nextMessage(ext);
+  ext.send(JSON.stringify({ id: msg.id, ok: true, result: { value: 1 } }));
+  await p;
+  const entry = lastLoggedCall();
+  assert.equal(entry.session, "sess-abc");
+  assert.equal(entry.source, "mcp");
+  ext.close();
+});
+
+test("a call with no client tag logs null rather than inventing one", async () => {
+  const ext = await connectFakeExtension();
+  const { data } = await roundTrip(ext, "eval_js", { expression: "2" }, { value: 2 });
+  assert.equal(data.ok, true);
+  const entry = lastLoggedCall();
+  assert.equal(entry.session, null);
+  assert.equal(entry.source, null);
+  ext.close();
+});
+
+test("a junk client tag is clamped, never trusted", async () => {
+  const ext = await connectFakeExtension();
+  const junk = { session: "x".repeat(200), source: { evil: true } };
+  const p = post("eval_js", { expression: "3" }, junk);
+  const msg = await nextMessage(ext);
+  ext.send(JSON.stringify({ id: msg.id, ok: true, result: { value: 3 } }));
+  await p;
+  const entry = lastLoggedCall();
+  assert.equal(entry.session.length, 32);
+  assert.equal(entry.source, null);
+  ext.close();
+});
+
+after(() => rmSync(TEST_CALL_LOG, { force: true }));

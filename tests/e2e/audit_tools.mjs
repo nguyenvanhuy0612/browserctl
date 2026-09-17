@@ -4,12 +4,14 @@
 import http from "node:http";
 import { writeFileSync } from "node:fs";
 
+const CLIENT = { session: `e2e-${process.pid}`, source: "e2e" };
+
 const BRIDGE = "http://127.0.0.1:8765";
 const [, , SITE_URL, LABEL] = process.argv;
 
 function call(action, params = {}, timeoutMs = 30000) {
   return new Promise((resolve) => {
-    const body = JSON.stringify({ action, params });
+    const body = JSON.stringify({ action, params, client: CLIENT });
     const started = Date.now();
     const req = http.request(`${BRIDGE}/command`, {
       method: "POST",

@@ -19,6 +19,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
+const CLIENT = { session: `benchmark-${process.pid}`, source: "benchmark" };
+
 const BRIDGE = process.env.BROWSERCTL_BRIDGE_URL || "http://127.0.0.1:8765";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PAGE = readFileSync(join(HERE, "..", "e2e", "testpage.html"), "utf8").replace(
@@ -32,7 +34,7 @@ async function cmd(action, params = {}) {
   const res = await fetch(`${BRIDGE}/command`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action, params }),
+    body: JSON.stringify({ action, params, client: CLIENT }),
   });
   const data = await res.json().catch(() => ({}));
   if (!data.ok) throw new Error(data.error || "failed");

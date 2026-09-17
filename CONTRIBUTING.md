@@ -3,32 +3,42 @@
 Conventions that are enforced by a gate, and the reasoning behind each one. This file is not
 published to npm — see "What ships" below.
 
-## Comments: none in published source
+## Comments: about the code, not about the change
 
-**Rule.** `cli.js`, `bridge/`, `mcp/` and `extension/` carry no commentary. Pragmas are the only
-exception: `prettier-ignore`, `eslint-*`, `@ts-*`, `global`/`globals`, and the shebang.
+**Rule.** Comments are allowed everywhere, shipped source included. What a comment may contain
+is the part that is fixed: it describes the code it sits above — what it does, what constrains
+it, what it is related to. It does not narrate how that code came to be.
 
-`scripts/` and `tests/` are exempt and are commented normally — around 12–18% of their lines.
+Concretely, a comment does not say that something used to work differently, does not explain
+which approach was tried first, does not name a version or a date, and is not addressed to
+whoever happens to be reading the file today. When the code below it changes, the comment is
+rewritten to describe the new code. It is never amended to record the change, and no part of it
+is left standing to describe a shape the code no longer has.
 
-**Enforced by** `npm run lint`, via the local ESLint rule
-`local/shipped-source-has-no-comments` in `eslint.config.js`.
+Short is part of the rule. A comment that needs a paragraph is usually describing a design
+decision rather than the code, and that belongs elsewhere.
+
+**Enforced by** `npm run lint`, via the local ESLint rule `local/comments-describe-the-code` in
+`eslint.config.js`. The rule reads comment text and rejects the phrasings that carry history —
+"used to", "previously", "we changed", a version number, a date, "the old X". It is a filter on
+the obvious cases, not a judge of prose; the rule above still binds where the pattern is silent.
 
 **Why.** A comment is the only artefact in the repo that stays silent when the code beneath it
-changes. The reasons behind shipped behaviour live in three places that do not go silent:
+changes. That is an argument for keeping comments pointed at the code — something a reader can
+check against the lines below in a second — rather than at history, which nothing can check and
+which has somewhere better to live:
 
 1. **A test that fails without it.** Test names carry the finding they came from — for example
    `"Counting answers zero and separates invalid syntax (F52)"`. If the behaviour drifts, the
-   suite goes red; a comment would simply become wrong.
+   suite goes red.
 2. **`CHANGELOG.md`.** The user-facing "why", including the approaches that were tried and
    failed — 0.7.1 records that a click's first movement check used a 1px tolerance and therefore
    read a 400px-over-10s slide as stationary.
 3. **The tool's own `description()`.** What an agent needs at call time belongs in the schema it
    reads, not in a comment no agent will ever see.
 
-`scripts/` and `tests/` are exempt for the opposite reason: a gate whose purpose is not written
-down is a gate someone deletes to get a green run. That has already happened once — five
-documentation gates were removed rather than migrated during the v2 rename, and the stale tool
-references they existed to catch survived into the working tree.
+`scripts/` and `tests/` are not linted by `npm run lint`, so the rule is convention there rather
+than a gate. It is the same convention.
 
 ## Text an agent reads: say it once, and pay for what you add
 
@@ -77,12 +87,12 @@ and a maintainer ends up fixing three of them.
 | What a family of tools is for | `GROUP_NOTE`, generated from `TOOL_GROUPS` |
 | What one tool does, and what it refuses | that tool's `description` |
 | What one parameter means | that parameter's `describe()` |
-| Why the code is the way it is | a test that fails without it, or `CHANGELOG.md` — never a comment |
+| What constrains this code, and what it rules out | a comment on it, or a test that fails without it |
+| What changed, and when | `CHANGELOG.md` |
 | How a human installs and runs it | `docs/INSTALL.md` |
 | The full parameter dictionary | `docs/REFERENCE.md` |
 | The tool surface as it actually is | `docs/TOOLS.md`, generated |
 | The tool surface as designed, and why | `docs/internal/tool-surface.md`, internal |
-| How it came to be designed that way | `docs/internal/history.md`, internal, append-only |
 
 **Why the budget and not just taste.** Description text competes with the page the agent is
 actually reading. Tokens spent restating what another tool already said are tokens not spent on
@@ -138,14 +148,36 @@ Published docs are `docs/INSTALL.md`, `docs/REFERENCE.md` and `docs/TOOLS.md` on
 ## Before pushing
 
 ```sh
-npm run lint          # includes the no-comments rule
+npm run lint          # includes the comment-content rule
 npm run format:check  # prettier, source only
-npm run preflight     # 13 gates, runs the unit suite
+npm run preflight     # every gate, runs the unit suite
 npm run preflight -- --e2e   # before cutting a release: needs the bridge and extension up
 ```
 
 `npm run preflight` is the release gate, not `npm test`. If a gate is wrong, fix the gate —
 deleting it is not a fix.
+
+**Commit before you test a gate.** Proving a gate can fail means putting a violation into the
+tree and taking it out again, and `git checkout <file>` as the undo destroys every uncommitted
+change in that file, not just the injected one. An uncommitted working tree is the only copy
+there is.
+
+## The e2e suite stays basic
+
+One check per core capability, plus the tab lifecycle, target resolution and verified cleanup.
+Not one check per protocol action: a suite that covers everything is slow and order-dependent,
+and a suite that is a chore stops being run. The coverage gate is `e2e covers every core tool`,
+derived from the registry, and anything excused from it carries its reason in `NOT_EXERCISED`.
+
+**Every check is self-contained.** A check that inherits page state or navigation from an
+earlier one is not testing what it says it tests — it hides whatever the earlier check happened
+to set up. `browser_go_back` was broken on every tab while a longer suite passed it, because an
+earlier test had left history behind.
+
+**Do not write a test against a version.** Assert the rule, from the source: compare against
+`TOOL_CATEGORIES.core` rather than a list of names, and assert that element addressing is one
+parameter rather than that some older spelling is refused. A test that names an old version has
+to be rewritten every time the old version recedes further.
 
 ## Docs that must move together
 

@@ -1,11 +1,13 @@
 // Ground-truth coverage check: everything snapshot --all can see must be reachable by
 // the tools an agent would actually use to act on it.
 import http from "node:http";
+
+const CLIENT = { session: `e2e-${process.pid}`, source: "e2e" };
 const BRIDGE = "http://127.0.0.1:8765";
 const [, , URL_, LABEL] = process.argv;
 
 const call = (action, params = {}) => new Promise((resolve) => {
-  const body = JSON.stringify({ action, params });
+  const body = JSON.stringify({ action, params, client: CLIENT });
   const req = http.request(`${BRIDGE}/command`, { method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) }, timeout: 30000 },
     (res) => { let r = ""; res.on("data", (c) => (r += c)); res.on("end", () => { try { resolve(JSON.parse(r)); } catch { resolve({ ok: false, error: "bad json" }); } }); });
   req.on("timeout", () => { req.destroy(); resolve({ ok: false, error: "TIMEOUT" }); });
