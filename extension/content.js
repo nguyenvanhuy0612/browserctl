@@ -40,6 +40,21 @@
     "aria-disabled",
   ];
 
+  // id and label[for] references resolve in the tree the element lives in: a control inside a
+  // shadow root is labelled by elements in that same root, which document-level lookups miss.
+  function elementByIdNear(el, id) {
+    const root = el && el.getRootNode ? el.getRootNode() : null;
+    const hit = root && root !== document && root.getElementById ? root.getElementById(id) : null;
+    return hit || document.getElementById(id);
+  }
+
+  function labelForId(el) {
+    const sel = `label[for="${CSS.escape(el.id)}"]`;
+    const root = el.getRootNode ? el.getRootNode() : null;
+    const hit = root && root !== document && root.querySelector ? root.querySelector(sel) : null;
+    return hit || document.querySelector(sel);
+  }
+
   function createStructuredError(message, code, diagnostics = {}, recoveryHint = null) {
     const err = new Error(message);
     err.code = code;
@@ -70,7 +85,7 @@
     if (reason !== "opacity:0" && reason !== "zero-size rect") return false;
     let label = null;
     try {
-      if (el.id) label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+      if (el.id) label = labelForId(el);
       if (!label && el.closest) label = el.closest("label");
     } catch {
       return false;
@@ -504,7 +519,7 @@
     if (direct) return direct;
     const by = node.getAttribute("aria-labelledby");
     if (by) {
-      const lbl = document.getElementById(by.split(/\s+/)[0]);
+      const lbl = elementByIdNear(node, by.split(/\s+/)[0]);
       const t = lbl && clean(lbl.innerText);
       if (t) return t;
     }
@@ -714,7 +729,7 @@
           .split(/\s+/)
           .map((id) => {
             try {
-              return document.getElementById(id);
+              return elementByIdNear(el, id);
             } catch {
               return null;
             }
@@ -788,7 +803,7 @@
         .split(/\s+/)
         .map((id) => {
           try {
-            return document.getElementById(id);
+            return elementByIdNear(el, id);
           } catch {
             return null;
           }
@@ -800,7 +815,7 @@
     }
     if (el.id) {
       try {
-        const lab = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        const lab = labelForId(el);
         const t = lab && clean(lab.innerText);
         if (t) return t;
       } catch {}
@@ -1327,7 +1342,9 @@
     };
   }
 
-  const textOnlyMatches = new WeakSet();
+  // The element the latest resolveTarget call reached only as plain text inside a container,
+  // or null. Reset on every call, so a later resolution by ref is judged on its own.
+  let lastTextOnlyMatch = null;
 
   function findInteractiveAncestor(el, maxDepth = 6) {
     let node = el;
@@ -1346,9 +1363,29 @@
 
   const refLabels = Object.create(null);
 
+  // Refs are handed out for the life of the document, so both maps are swept every
+  // REF_SWEEP_EVERY new refs: a ref whose element is gone or detached is dropped (resolveRef
+  // drops it the same way on use), and a remembered label outlives its element only while it
+  // is among the newest MAX_REF_LABELS refs, which is what the stale-ref hint needs.
+  const REF_SWEEP_EVERY = 2000;
+  const MAX_REF_LABELS = 20000;
+  function sweepRefs() {
+    for (const ref of Object.keys(refMap)) {
+      const el = refMap[ref].deref();
+      if (!el || !el.isConnected) delete refMap[ref];
+    }
+    const oldestKept = refCounter - MAX_REF_LABELS;
+    for (const ref of Object.keys(refLabels)) {
+      if (refMap[ref]) continue;
+      const n = Number(ref.slice(4));
+      if (n <= oldestKept) delete refLabels[ref];
+    }
+  }
+
   function getOrAssignRef(el) {
     const existing = reverseRefMap.get(el);
     if (existing && refMap[existing] && refMap[existing].deref() === el) return existing;
+    if (refCounter > 0 && refCounter % REF_SWEEP_EVERY === 0) sweepRefs();
     const ref = `ref_${++refCounter}`;
     refMap[ref] = new WeakRef(el);
     reverseRefMap.set(el, ref);
@@ -1429,6 +1466,28 @@
       .toLowerCase();
   }
 
+  // True when b sits anywhere under a, crossing open shadow roots.
+  function containsDeep(a, b) {
+    let n = b && (b.parentNode || b.host);
+    while (n) {
+      if (n === a) return true;
+      n = n.parentNode || n.host;
+    }
+    return false;
+  }
+
+  // One control matched several times over: a wrapper around the match (<li> around <a>, a
+  // row around its button) and a <label> naming the control it labels are the same hit.
+  // Keeps the innermost element of each.
+  function innermostMatches(items, elOf = (x) => x) {
+    const els = items.map(elOf);
+    return items.filter((item) => {
+      const el = elOf(item);
+      if (el && el.tagName === "LABEL" && el.control && els.includes(el.control)) return false;
+      return !els.some((other) => other !== el && containsDeep(el, other));
+    });
+  }
+
   function matchesByText(text, { max = 20 } = {}) {
     const q = String(text).toLowerCase();
     const out = [];
@@ -1447,10 +1506,14 @@
     for (const el of deepQueryAll(ARIA_TEXT_SELECTOR)) consider(el, "aria");
     if (out.length >= max) return out;
 
+    // A custom element counts only when its own text is short: an app shell such as <app-root>
+    // holds the whole page's text and would otherwise match every query.
     for (const el of deepQueryAll("*")) {
-      if (el.tagName && el.tagName.includes("-")) consider(el, "custom-element");
+      if (!el.tagName || !el.tagName.includes("-")) continue;
+      if (elementText(el).trim().length > q.length + 60) continue;
+      consider(el, "custom-element");
     }
-    if (out.length > 0) return out;
+    if (out.length > 0) return innermostMatches(out, (m) => m.el);
 
     const containers = deepQueryAll("span, p, h1, h2, h3, h4, h5, h6, b, strong, div").filter(
       (el) => {
@@ -1503,6 +1566,7 @@
   // single target string. The MCP surface does not offer them — the CLI does, where a human
   // types `--selector` — so this branch is load-bearing for the terminal and invisible to agents.
   function resolveTarget({ target, index, ref, selector, text, placeholder } = {}) {
+    lastTextOnlyMatch = null;
     const rawTarget =
       target !== undefined && target !== null
         ? target
@@ -1641,7 +1705,7 @@
       }
       if (sub.length === 1) {
         const el = sub[0].el;
-        if (sub[0].step === "text-container") textOnlyMatches.add(el);
+        if (sub[0].step === "text-container") lastTextOnlyMatch = el;
         el._resolved = {
           by: "text-substring",
           ref: "@" + getOrAssignRef(el),
@@ -1660,13 +1724,24 @@
     }
 
     if (tStr.startsWith("placeholder=")) {
+      // Step 4 forced: an exact placeholder or aria-label wins, so 'placeholder=Name' is not
+      // ambiguous between "First name" and "Name"; a substring is the fallback.
       const ph = tStr.slice(12).trim().toLowerCase();
-      const phMatches = deepQueryAll("input, textarea").filter((el) => {
-        if (!isVisible(el)) return false;
-        const p = (el.getAttribute("placeholder") || "").toLowerCase();
-        const aria = (el.getAttribute("aria-label") || "").toLowerCase();
-        return p.includes(ph) || aria.includes(ph);
-      });
+      const phPool = [
+        ...new Set(
+          deepQueryAll(
+            "input, textarea, [contenteditable], [role=textbox], [role=searchbox], [role=combobox]"
+          )
+        ),
+      ].filter(isVisible);
+      const phText = (el) => [
+        (el.getAttribute("placeholder") || "").trim().toLowerCase(),
+        (el.getAttribute("aria-label") || "").trim().toLowerCase(),
+      ];
+      const phExact = phPool.filter((el) => phText(el).includes(ph));
+      const phMatches = phExact.length
+        ? phExact
+        : phPool.filter((el) => phText(el).some((t) => t && t.includes(ph)));
       if (phMatches.length > 1) {
         ambiguityError(tStr, phMatches.map(makeCandidate), "placeholder match");
       }
@@ -1689,11 +1764,11 @@
       );
     }
 
-    const refMatch = tStr.match(/^@?(ref_\d+|e\d+)$/i);
+    const refMatch = tStr.match(/^@?(ref_\d+|e\d+)$/);
     if (refMatch) {
       const canonicalRef = tStr.replace(/^@/, "");
       let el = resolveRef(canonicalRef);
-      if (!el && /^e\d+$/i.test(canonicalRef)) {
+      if (!el && /^e\d+$/.test(canonicalRef)) {
         el = resolveRef(`ref_${canonicalRef.slice(1)}`);
       }
       if (el) {
@@ -1707,7 +1782,7 @@
         return el;
       }
 
-      const atMatch = tStr.match(/^@?(?:ref_|e)(\d+)$/i);
+      const atMatch = tStr.match(/^@?(?:ref_|e)(\d+)$/);
       // prettier-ignore
       const canonical = atMatch ? `ref_${parseInt(atMatch[1], 10)}` : String(tStr).trim().replace(/^@/, "");
       const moved = relocateByLabel(canonical);
@@ -1752,11 +1827,13 @@
     const interactive = deepQueryAll(INTERACTIVE_SELECTOR)
       .concat(deepQueryAll(ARIA_TEXT_SELECTOR))
       .filter(isVisible);
-    const exactMatches = [...new Set(interactive)].filter((el) => {
-      const txt = elementText(el).trim().toLowerCase();
-      const acc = accessibleName(el).trim().toLowerCase();
-      return txt === tLower || acc === tLower;
-    });
+    const exactMatches = innermostMatches(
+      [...new Set(interactive)].filter((el) => {
+        const txt = elementText(el).trim().toLowerCase();
+        const acc = accessibleName(el).trim().toLowerCase();
+        return txt === tLower || acc === tLower;
+      })
+    );
     if (exactMatches.length > 1) {
       ambiguityError(tStr, exactMatches.map(makeCandidate), "exact visible text match");
     }
@@ -1803,7 +1880,7 @@
     }
     if (sub.length === 1) {
       const el = sub[0].el;
-      if (sub[0].step === "text-container") textOnlyMatches.add(el);
+      if (sub[0].step === "text-container") lastTextOnlyMatch = el;
       el._resolved = {
         by: "text-substring",
         ref: "@" + getOrAssignRef(el),
@@ -1909,7 +1986,7 @@
     if (n) return n;
     const labelledby = el.getAttribute && el.getAttribute("aria-labelledby");
     if (labelledby) {
-      const lbl = document.getElementById(labelledby.split(/\s+/)[0]);
+      const lbl = elementByIdNear(el, labelledby.split(/\s+/)[0]);
       if (lbl) {
         n = pick(lbl.innerText);
         if (n) return n;
@@ -1922,7 +1999,7 @@
     n = pick(el.getAttribute && el.getAttribute("alt"));
     if (n) return n;
     if (el.id) {
-      const lab = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+      const lab = labelForId(el);
       if (lab) {
         n = pick(lab.innerText);
         if (n) return n;
@@ -2458,7 +2535,7 @@
     settleMs = 150,
   } = {}) {
     const el = resolveTarget({ target, index, ref, selector, text });
-    if (textOnlyMatches.has(el)) {
+    if (lastTextOnlyMatch === el) {
       const nearby = deepQueryAll(INTERACTIVE_SELECTOR)
         .filter(isVisible)
         .slice(0, 3)
@@ -2606,6 +2683,60 @@
     return out;
   }
 
+  // method 'type': replaces the content, then enters it one character at a time with the key
+  // and input events a keyboard produces, for fields that react per keystroke (autocomplete,
+  // masks, live validation). Checkboxes, radios and anything else take the 'set' path.
+  // Only free-text inputs take a value one character at a time: number, date, color and the
+  // like sanitize a partial value (so "1." reads back empty), and file refuses a value at all.
+  const KEYSTROKE_INPUT_TYPES = new Set(["", "text", "search", "url", "tel", "password", "email"]);
+
+  function typeKeystrokes(el, text) {
+    const inputType = el.tagName === "INPUT" ? (el.type || "").toLowerCase() : "";
+    const isField =
+      (el.tagName === "INPUT" && KEYSTROKE_INPUT_TYPES.has(inputType)) || el.tagName === "TEXTAREA";
+    if (!isField && !el.isContentEditable) return false;
+    el.focus();
+    if (isField) {
+      setNativeValue(el, "");
+    } else {
+      try {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        document.execCommand("delete");
+      } catch {}
+    }
+    el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContent" }));
+    for (const ch of String(text)) {
+      const keyOpts = { key: ch, bubbles: true, cancelable: true };
+      const proceed = el.dispatchEvent(new KeyboardEvent("keydown", keyOpts));
+      el.dispatchEvent(new KeyboardEvent("keypress", keyOpts));
+      if (proceed) {
+        const before = new InputEvent("beforeinput", {
+          bubbles: true,
+          cancelable: true,
+          inputType: "insertText",
+          data: ch,
+        });
+        if (el.dispatchEvent(before)) {
+          if (isField) {
+            setNativeValue(el, String(el.value ?? "") + ch);
+            el.dispatchEvent(
+              new InputEvent("input", { bubbles: true, inputType: "insertText", data: ch })
+            );
+          } else {
+            document.execCommand("insertText", false, ch);
+          }
+        }
+      }
+      el.dispatchEvent(new KeyboardEvent("keyup", keyOpts));
+    }
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    return true;
+  }
+
   function insertIntoEditable(el, text, { paste = false } = {}) {
     el.focus();
     const inputType = el.tagName === "INPUT" ? (el.type || "").toLowerCase() : "";
@@ -2714,11 +2845,21 @@
     settleMs = 100,
   } = {}) {
     const el = resolveTarget({ target, index, ref, selector, placeholder });
+    if (el.tagName === "SELECT") {
+      throw createStructuredError(
+        "the target is a <select>: typing into it would clear the selection rather than choose an option",
+        "WRONG_TOOL",
+        { tag: "select" },
+        "Use select_option with the option's value or visible text."
+      );
+    }
     const warning = actionability(el);
     const urlBefore = location.href;
     el.scrollIntoView({ block: "center", inline: "center" });
     const mutations = startMutationCounter();
-    insertIntoEditable(el, text, { paste: method === "paste" });
+    if (method !== "type" || !typeKeystrokes(el, text)) {
+      insertIntoEditable(el, text, { paste: method === "paste" });
+    }
     if (submit) {
       const opts = { bubbles: true, cancelable: true, key: "Enter", code: "Enter", keyCode: 13 };
       const form = el.form;
@@ -2727,12 +2868,13 @@
         submittedByKey = true;
       };
       if (form) form.addEventListener("submit", noteSubmit, { capture: true });
-      el.dispatchEvent(new KeyboardEvent("keydown", opts));
+      // A page that cancels Enter has taken the submit over itself, as press_key assumes too.
+      const keydownNotPrevented = el.dispatchEvent(new KeyboardEvent("keydown", opts));
       el.dispatchEvent(new KeyboardEvent("keypress", opts));
       el.dispatchEvent(new KeyboardEvent("keyup", opts));
       if (form) {
         form.removeEventListener("submit", noteSubmit, { capture: true });
-        if (!submittedByKey) form.requestSubmit?.();
+        if (!submittedByKey && keydownNotPrevented) form.requestSubmit?.();
       }
     }
     if (waitFor) {
@@ -2785,12 +2927,13 @@
         submittedByKey = true;
       };
       if (form) form.addEventListener("submit", noteSubmit, { capture: true });
-      el.dispatchEvent(new KeyboardEvent("keydown", opts));
+      // A page that cancels Enter has taken the submit over itself, as press_key assumes too.
+      const keydownNotPrevented = el.dispatchEvent(new KeyboardEvent("keydown", opts));
       el.dispatchEvent(new KeyboardEvent("keypress", opts));
       el.dispatchEvent(new KeyboardEvent("keyup", opts));
       if (form) {
         form.removeEventListener("submit", noteSubmit, { capture: true });
-        if (!submittedByKey) form.requestSubmit?.();
+        if (!submittedByKey && keydownNotPrevented) form.requestSubmit?.();
       }
     }
     if (waitFor) {
@@ -2951,7 +3094,7 @@
     return { scrolledY: window.scrollY, delta: window.scrollY - prevY };
   }
 
-  async function dismiss_modal({ ref, selector } = {}) {
+  async function dismiss_modal({ target, ref, selector } = {}) {
     const before = findActiveModal();
 
     const confirm = async (method, extra = {}) => {
@@ -2964,11 +3107,11 @@
       return null;
     };
 
-    if (ref || selector) {
-      const el = resolveTarget({ ref, selector });
+    if (target != null || ref || selector) {
+      const el = resolveTarget({ target, ref, selector });
       if (el) {
         (shadowInteractiveTarget(el) || el).click();
-        const ok = await confirm("target_click", { target: ref || selector });
+        const ok = await confirm("target_click", { target: target ?? (ref || selector) });
         if (ok) return ok;
       }
     }
@@ -3010,7 +3153,7 @@
       if (ok) return ok;
     }
 
-    const target = document.activeElement || active || document.body;
+    const escTarget = document.activeElement || active || document.body;
     const evOpts = {
       key: "Escape",
       code: "Escape",
@@ -3019,7 +3162,7 @@
       bubbles: true,
       cancelable: true,
     };
-    for (const node of [target, window]) {
+    for (const node of [escTarget, window]) {
       node.dispatchEvent(new KeyboardEvent("keydown", evOpts));
       node.dispatchEvent(new KeyboardEvent("keyup", evOpts));
     }
@@ -3063,7 +3206,10 @@
     if (autoSettle && settleMs > 0) {
       await wait_settle({ timeoutMs: settleMs });
     }
-    const out = { hovered: ref != null ? ref : selector || text || index };
+    const out = {
+      hovered: target ?? (ref != null ? ref : selector || text || index),
+      resolved: el._resolved,
+    };
     if (warning)
       out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
     return out;
@@ -3147,10 +3293,10 @@
   }
 
   function press_key({ key, target: targetInput, index, ref, modifiers }) {
-    const target =
-      targetInput !== undefined || index !== undefined || ref !== undefined
-        ? resolveTarget({ target: targetInput, index, ref })
-        : document.activeElement || document.body;
+    const named = targetInput !== undefined || index !== undefined || ref !== undefined;
+    const target = named
+      ? resolveTarget({ target: targetInput, index, ref })
+      : document.activeElement || document.body;
     if (target.focus) target.focus();
     const set = new Set((modifiers || []).map((m) => String(m).toLowerCase()));
     const opts = {
@@ -3182,7 +3328,7 @@
       pressed: key,
       modifiers: modifiers || [],
       via: "dom",
-      ...(target._resolved ? { resolved: target._resolved } : {}),
+      ...(named && target._resolved ? { resolved: target._resolved } : {}),
       ...(form ? { submittedByPage: submittedByKey, keydownPrevented: !keydownNotPrevented } : {}),
     };
   }
@@ -3304,7 +3450,7 @@
           );
         } else {
           const forId = el.getAttribute && el.getAttribute("for");
-          const byFor = forId ? document.getElementById(forId) : null;
+          const byFor = forId ? elementByIdNear(el, forId) : null;
           const label = el.closest ? el.closest("label") : null;
           const byLabel = label && label.control ? label.control : null;
           if (isFileInput(byFor)) {
@@ -3351,15 +3497,45 @@
     };
   }
 
-  function element_rect({ index, ref } = {}) {
-    const el = resolveTarget({ index, ref });
-    el.scrollIntoView({ block: "center", inline: "center" });
+  // The element's box in the TOP page's viewport coordinates, which is what a CDP capture
+  // clips against. Scrolling is instant so the box is read where it will be captured, and a
+  // box inside a same-origin frame is offset by each enclosing frame's position.
+  function element_rect({ target, selector, index, ref, text, placeholder } = {}) {
+    const el = resolveTarget({ target, selector, index, ref, text, placeholder });
+    el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
     const r = el.getBoundingClientRect();
-    return { x: r.x, y: r.y, width: r.width, height: r.height };
+    if (!r.width || !r.height) {
+      throw createStructuredError(
+        `the element has no size to capture (${Math.round(r.width)}x${Math.round(r.height)})`,
+        "ELEMENT_NOT_VISIBLE",
+        { target: target ?? ref ?? selector ?? text ?? placeholder ?? index },
+        "Run describe_element on it to see why it is not rendered."
+      );
+    }
+    let x = r.x;
+    let y = r.y;
+    for (let w = window; w !== w.top; w = w.parent) {
+      let frame = null;
+      try {
+        frame = w.frameElement;
+      } catch {}
+      if (!frame) {
+        throw createStructuredError(
+          "the element is inside a cross-origin frame, whose position in the page cannot be read from inside it",
+          "CROSS_ORIGIN_FRAME",
+          {},
+          "Capture the viewport with take_screenshot instead."
+        );
+      }
+      const fr = frame.getBoundingClientRect();
+      x += fr.x + frame.clientLeft;
+      y += fr.y + frame.clientTop;
+    }
+    return { x, y, width: r.width, height: r.height };
   }
 
-  function describe_element({ index, ref, selector, text, placeholder } = {}) {
-    const el = resolveTarget({ index, ref, selector, text, placeholder });
+  function describe_element({ target, index, ref, selector, text, placeholder } = {}) {
+    const el = resolveTarget({ target, index, ref, selector, text, placeholder });
     const attributes = {};
     for (const attr of el.attributes) attributes[attr.name] = attr.value;
     const r = el.getBoundingClientRect();
@@ -3482,7 +3658,9 @@
   }
 
   function pickStore(area) {
-    return area === "session" ? sessionStorage : localStorage;
+    if (area === undefined || area === null || area === "local") return localStorage;
+    if (area === "session") return sessionStorage;
+    throw new Error(`unknown storage area "${area}" — use "local" or "session"`);
   }
 
   function storage_get({ area, key } = {}) {
@@ -3500,6 +3678,7 @@
 
   function storage_set({ area, key, value } = {}) {
     if (key === undefined) throw new Error("storage_set requires key");
+    if (value === undefined) throw new Error("storage_set requires value");
     pickStore(area).setItem(key, value);
     return { set: key };
   }
@@ -3570,7 +3749,11 @@
     if (!t || !t.tagName) return;
     const tag = t.tagName;
     if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") return;
-    emitStep({ type: "input", selector: cssSelector(t), value: t.value });
+    const kind = tag === "INPUT" ? (t.type || "").toLowerCase() : "";
+    // A checkbox or radio replays by its state; its value attribute ("on", "male") says nothing
+    // about whether it ended up checked.
+    const value = kind === "checkbox" || kind === "radio" ? String(t.checked) : t.value;
+    emitStep({ type: "input", selector: cssSelector(t), value });
   }
 
   function record_start() {
@@ -3685,7 +3868,16 @@
       try {
         const el = resolveTarget({ target: f.target });
         const method = f.method || "set";
-        insertIntoEditable(el, f.value ?? "", { paste: method === "paste" });
+        // A <select> takes an option (by value or visible text) and refuses one it lacks;
+        // writing a label into .value would silently clear the selection instead.
+        if (el.tagName === "SELECT") {
+          select_option({ target: f.target, values: [f.value ?? ""] });
+        } else {
+          actionability(el);
+          if (method !== "type" || !typeKeystrokes(el, f.value ?? "")) {
+            insertIntoEditable(el, f.value ?? "", { paste: method === "paste" });
+          }
+        }
         filled.push({
           index: i,
           target: f.target,
@@ -3943,6 +4135,7 @@
   }
 
   function clear_input({
+    target,
     index,
     ref,
     selector,
@@ -3950,7 +4143,7 @@
     autoSettle: _autoSettle = true,
     settleMs: _settleMs = 100,
   } = {}) {
-    const el = resolveTarget({ index, ref, selector, placeholder });
+    const el = resolveTarget({ target, index, ref, selector, placeholder });
     const warning = actionability(el);
     el.scrollIntoView({ block: "center", inline: "center" });
     el.focus();
@@ -3964,12 +4157,13 @@
     } else {
       throw new Error("target element is not editable");
     }
-    const out = { cleared: ref != null ? ref : selector || placeholder || index };
+    const out = { cleared: target ?? (ref != null ? ref : selector || placeholder || index) };
     if (warning) out.warning = `element is not visible (${warning})`;
     return out;
   }
 
   function set_checked({
+    target,
     index,
     ref,
     selector,
@@ -3978,40 +4172,43 @@
     autoSettle: _autoSettle = true,
     settleMs: _settleMs = 100,
   } = {}) {
-    const el = resolveTarget({ index, ref, selector, text });
+    const el = resolveTarget({ target, index, ref, selector, text });
     const warning = actionability(el);
     el.scrollIntoView({ block: "center", inline: "center" });
     el.checked = !!checked;
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
     const out = {
-      [checked ? "checked" : "unchecked"]: ref != null ? ref : selector || text || index,
+      [checked ? "checked" : "unchecked"]:
+        target ?? (ref != null ? ref : selector || text || index),
     };
     if (warning) out.warning = `element is not visible (${warning})`;
     return out;
   }
 
-  function dblclick_element({ index, ref, selector, text } = {}) {
-    const el = resolveTarget({ index, ref, selector, text });
+  function dblclick_element({ target, index, ref, selector, text } = {}) {
+    const el = resolveTarget({ target, index, ref, selector, text });
     const warning = actionability(el);
     el.scrollIntoView({ block: "center", inline: "center" });
     el.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
-    const out = { dblclicked: ref != null ? ref : selector || text || index };
+    const out = { dblclicked: target ?? (ref != null ? ref : selector || text || index) };
     if (warning) out.warning = `element is not visible (${warning})`;
     return out;
   }
 
-  function focus_element({ index, ref, selector, text, placeholder } = {}) {
-    const el = resolveTarget({ index, ref, selector, text, placeholder });
+  function focus_element({ target, index, ref, selector, text, placeholder } = {}) {
+    const el = resolveTarget({ target, index, ref, selector, text, placeholder });
     el.scrollIntoView({ block: "center", inline: "center" });
     el.focus();
-    return { focused: ref != null ? ref : selector || placeholder || text || index };
+    return { focused: target ?? (ref != null ? ref : selector || placeholder || text || index) };
   }
 
-  function scroll_into_view({ index, ref, selector, text, placeholder } = {}) {
-    const el = resolveTarget({ index, ref, selector, text, placeholder });
+  function scroll_into_view({ target, index, ref, selector, text, placeholder } = {}) {
+    const el = resolveTarget({ target, index, ref, selector, text, placeholder });
     el.scrollIntoView({ block: "center", inline: "center" });
-    return { scrolledIntoView: ref != null ? ref : selector || placeholder || text || index };
+    return {
+      scrolledIntoView: target ?? (ref != null ? ref : selector || placeholder || text || index),
+    };
   }
 
   const handlers = {

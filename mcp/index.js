@@ -25,6 +25,16 @@ function envStr(name, fallback) {
 }
 
 const BRIDGE_URL = envStr("BROWSERCTL_BRIDGE_URL", envStr("BRIDGE_URL", "http://127.0.0.1:8765"));
+// The port a spawned or stopped bridge uses: the one in BRIDGE_URL, so a custom URL is where
+// the daemon is started and looked for.
+const BRIDGE_PORT = (() => {
+  try {
+    const u = new URL(BRIDGE_URL);
+    return Number(u.port) || (u.protocol === "https:" ? 443 : 80);
+  } catch {
+    return 8765;
+  }
+})();
 
 let isStartingDaemon = null;
 let lastSpawnAttempt = 0;
@@ -54,17 +64,16 @@ async function startBridgeDaemon() {
   isStartingDaemon = (async () => {
     lastSpawnAttempt = Date.now();
     const serverPath = join(__dirname, "..", "bridge", "server.js");
-    if (!fs.existsSync(serverPath)) {
-      spawnFailCount++;
-      return false;
-    }
-
     try {
+      if (!fs.existsSync(serverPath)) {
+        spawnFailCount++;
+        return false;
+      }
       const child = spawn(process.execPath, [serverPath], {
         detached: true,
         stdio: "ignore",
         windowsHide: true,
-        env: { ...process.env, PORT: "8765" },
+        env: { ...process.env, PORT: String(BRIDGE_PORT) },
       });
       child.unref();
 
@@ -74,7 +83,7 @@ async function startBridgeDaemon() {
         if (await isBridgeRunning()) {
           spawnFailCount = 0;
           try {
-            markDaemonRunning({ pid: child.pid, port: 8765, url: BRIDGE_URL });
+            markDaemonRunning({ pid: child.pid, port: BRIDGE_PORT, url: BRIDGE_URL });
           } catch {}
           return true;
         }
@@ -114,6 +123,15 @@ const formatStore = new AsyncLocalStorage();
 // call log, which records commands from every client that shares the daemon.
 const CLIENT = { session: randomUUID().slice(0, 8), source: "mcp" };
 
+// The bridge's own long-action budgets (bridge/server.js ACTION_TIMEOUT_MS), plus a margin, so
+// the client never gives up on a command the bridge is still allowed to finish.
+const LONG_ACTION_TIMEOUT_MS = { replay: 125_000, export_har: 125_000 };
+
+function isConnectionRefused(err) {
+  const code = err?.cause?.code ?? err?.code;
+  return code === "ECONNREFUSED";
+}
+
 async function callBridge(action, params = {}) {
   const tabId = tabStore.getStore();
   if (tabId != null && params.tabId == null) params = { ...params, tabId };
@@ -133,7 +151,9 @@ async function callBridge(action, params = {}) {
       await ensureBridge();
     }
     try {
-      const timeoutMs = params.timeoutMs ? params.timeoutMs + 5000 : 65000;
+      const timeoutMs = params.timeoutMs
+        ? params.timeoutMs + 5000
+        : (LONG_ACTION_TIMEOUT_MS[action] ?? 65000);
       const res = await fetch(`${BRIDGE_URL}/command`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -152,6 +172,15 @@ async function callBridge(action, params = {}) {
       return data.result;
     } catch (err) {
       if (err?.isApplicationError) throw err;
+      // Only a refused connection proves the command never reached the bridge. After a
+      // timeout or a dropped connection it may have run, and sending it again could repeat it.
+      if (!isConnectionRefused(err)) {
+        throw new Error(
+          err?.name === "TimeoutError"
+            ? `'${action}' got no answer from the bridge in time. It was not retried, because it may still have run: read the page to see its effect.`
+            : `'${action}' lost its connection to the bridge (${err?.message || err}). It was not retried, because it may have run: read the page to see its effect.`
+        );
+      }
       lastErr = err;
       if (attempt === 1) {
         await ensureBridge();
@@ -636,6 +665,8 @@ const PARAM_REDIRECTS = {
   browser_get_property: TARGET_REDIRECT,
   browser_hover: TARGET_REDIRECT,
   browser_take_screenshot: TARGET_REDIRECT,
+  browser_element_screenshot: TARGET_REDIRECT,
+  browser_describe_element: TARGET_REDIRECT,
   browser_read_page: { ...TARGET_REDIRECT, ref_id: "the subtree is chosen with target: '@ref_1'." },
   browser_find: {
     text: "browser_find searches with 'query'. 'text' is what browser_type writes, so the two never share a name.",
@@ -723,6 +754,43 @@ function normalizeParams(name, args) {
   return out;
 }
 
+// Every registered tool's handler and input schema, so browser_action can run a named action
+// exactly as its tool would (see runToolAsAction).
+const TOOL_HANDLERS = new Map();
+
+// Runs a tool from inside browser_action with the checks an MCP call would get: the unknown-key
+// refusal, then the schema itself (types and refinements), which the SDK applies only to a
+// direct call. browser_action's own tabId and format carry over unless params name their own.
+async function runToolAsAction(name, params) {
+  const { handler, schema } = TOOL_HANDLERS.get(name);
+  const declared = DECLARED_PARAMS.get(name);
+  const args = { ...params };
+  const outerTab = tabStore.getStore();
+  const outerFormat = formatStore.getStore();
+  if (outerTab != null && args.tabId == null && declared?.has("tabId")) args.tabId = outerTab;
+  if (outerFormat != null && args.format == null && declared?.has("format"))
+    args.format = outerFormat;
+  let normalized;
+  try {
+    normalized = normalizeParams(name, args);
+  } catch (err) {
+    return fail(err);
+  }
+  if (schema && typeof schema.safeParse === "function") {
+    const parsed = schema.safeParse(normalized);
+    if (!parsed.success) {
+      const issues = parsed.error.issues.map((i) => {
+        if (!i.path || !i.path.length) return i.message;
+        const value = i.path.reduce((o, k) => (o == null ? o : o[k]), normalized);
+        return value === undefined
+          ? `'${i.path.join(".")}' is required`
+          : `${i.path.join(".")}: ${i.message}`;
+      });
+      return fail(new Error(`${name}: ${issues.join("; ")}`));
+    }
+  }
+  return handler(normalized);
+}
 const _registerTool = server.registerTool.bind(server);
 server.registerTool = (name, config, handler) => {
   if (!NO_TAB_TOOLS.has(name) && config && "inputSchema" in config) {
@@ -747,6 +815,7 @@ server.registerTool = (name, config, handler) => {
       return inner(normalized, extra);
     };
   }
+  TOOL_HANDLERS.set(name, { handler, schema: config && config.inputSchema });
   const reg = _registerTool(name, config, handler);
   if (MCP_PROFILE !== "all" && MCP_PROFILE !== "full" && !CORE_TOOLS.has(name)) {
     if (server._registeredTools?.[name]) {
@@ -761,7 +830,7 @@ server.registerTool(
   {
     title: "Dynamically load tools into session",
     description:
-      "Load a profile of tools that are not currently visible: network (capture every request, read response bodies, export a HAR, wait for network idle), cookies (read, set, delete), storage (localStorage, sessionStorage, IndexedDB), console (console messages and page errors), cdp (raw CDP, coordinate input, audit), record (record and replay), tabs (windows, groups, visibility), advanced (a11y tree, PDF, history, element screenshots, hover), system (a shell command on the bridge host, not the page), or all.\n" +
+      "Load a profile of tools that are not currently visible: network (capture every request, read response bodies, export a HAR, wait for network idle), cookies (read, set, delete), storage (localStorage, sessionStorage), console (console messages and page errors), cdp (raw CDP, coordinate input, audit), record (record and replay), tabs (windows, groups, visibility), advanced (a11y tree, PDF, history, element screenshots), system (a shell command on the bridge host, not the page), or all.\n" +
       "browser_action reaches any single action without loading its profile; this is for when you want the tools themselves.",
     inputSchema: {
       profile: z
@@ -1021,8 +1090,6 @@ server.registerTool(
         actions,
       });
     }
-    const mapped = ACTION_ALIASES[action];
-    if (mapped) return text(await callBridge(mapped.action, { ...mapped.params, ...params }));
     if (MCP_ONLY_TOOLS.has(action)) {
       const err = new Error(
         `'${action}' is handled by the MCP server itself, not by the browser — call the tool browser_${action} directly rather than routing it through browser_action.`
@@ -1031,6 +1098,9 @@ server.registerTool(
       err.recoveryHint = `Call browser_${action}.`;
       throw err;
     }
+    if (TOOL_HANDLERS.has(`browser_${action}`)) return runToolAsAction(`browser_${action}`, params);
+    const mapped = ACTION_ALIASES[action];
+    if (mapped) return text(await callBridge(mapped.action, { ...mapped.params, ...params }));
     return text(await callBridge(action, params));
   })
 );
@@ -1307,45 +1377,23 @@ server.registerTool(
           ),
         settleMs: z.number().int().optional().describe("Settle timeout in ms (default 150)"),
       })
-      .refine(
-        (v) =>
-          v.target !== undefined ||
-          v.index !== undefined ||
-          v.ref !== undefined ||
-          v.selector !== undefined ||
-          v.text !== undefined,
-        {
-          message: "Provide 'target' (or 'ref', 'index', 'selector', or 'text').",
-        }
-      ),
+      .refine((v) => v.target !== undefined, {
+        message:
+          "Provide 'target': a ref '@ref_1', a CSS selector, the control's visible text, or a snapshot index.",
+      }),
   },
-  tool(
-    "click",
-    async ({
-      target,
-      index,
-      ref,
-      selector,
-      text: t,
-      doubleClick,
-      button,
-      waitFor,
-      autoSettle,
-      settleMs,
-    }) => {
-      const tgt = target ?? ref ?? selector ?? t ?? index;
-      return text(
-        await callBridge("click", {
-          target: tgt,
-          doubleClick,
-          button,
-          waitFor,
-          autoSettle,
-          settleMs,
-        })
-      );
-    }
-  )
+  tool("click", async ({ target, doubleClick, button, waitFor, autoSettle, settleMs }) => {
+    return text(
+      await callBridge("click", {
+        target,
+        doubleClick,
+        button,
+        waitFor,
+        autoSettle,
+        settleMs,
+      })
+    );
+  })
 );
 
 server.registerTool(
@@ -1378,47 +1426,25 @@ server.registerTool(
           ),
         settleMs: z.number().int().optional().describe("Settle timeout in ms (default 100)"),
       })
-      .refine(
-        (v) =>
-          v.target !== undefined ||
-          v.index !== undefined ||
-          v.ref !== undefined ||
-          v.selector !== undefined ||
-          v.placeholder !== undefined,
-        {
-          message: "Provide 'target' (or 'ref', 'index', 'selector', or 'placeholder').",
-        }
-      ),
+      .refine((v) => v.target !== undefined, {
+        message:
+          "Provide 'target': a ref '@ref_1', a CSS selector, the control's visible text, or a snapshot index.",
+      }),
   },
-  tool(
-    "type",
-    async ({
-      target,
-      index,
-      ref,
-      selector,
-      placeholder,
-      text: t,
-      method,
-      submit,
-      waitFor,
-      autoSettle,
-      settleMs,
-    }) => {
-      const tgt = target ?? ref ?? selector ?? placeholder ?? index;
-      const action = method === "type" ? "type" : method === "paste" ? "paste" : "fill";
-      return text(
-        await callBridge(action, {
-          target: tgt,
-          text: t,
-          submit,
-          waitFor,
-          autoSettle,
-          settleMs,
-        })
-      );
-    }
-  )
+  tool("type", async ({ target, text: t, method, submit, waitFor, autoSettle, settleMs }) => {
+    const action = method === "type" ? "type" : method === "paste" ? "paste" : "fill";
+    return text(
+      await callBridge(action, {
+        target,
+        text: t,
+        ...(method ? { method } : {}),
+        submit,
+        waitFor,
+        autoSettle,
+        settleMs,
+      })
+    );
+  })
 );
 
 server.registerTool(
@@ -1474,16 +1500,10 @@ server.registerTool(
         option: z.string().optional().describe("Option to select (alias for values)"),
         label: z.string().optional().describe("Visible label to select (alias for values)"),
       })
-      .refine(
-        (v) =>
-          v.target !== undefined ||
-          v.ref !== undefined ||
-          v.selector !== undefined ||
-          v.index !== undefined,
-        {
-          message: "Provide 'target' (or 'ref', 'selector', 'index').",
-        }
-      )
+      .refine((v) => v.target !== undefined, {
+        message:
+          "Provide 'target': a ref '@ref_1', a CSS selector, the control's visible text, or a snapshot index.",
+      })
       .refine(
         (v) =>
           v.values !== undefined ||
@@ -1495,8 +1515,7 @@ server.registerTool(
         }
       ),
   },
-  tool("select_option", async ({ target, ref, selector, index, values, value, option, label }) => {
-    const tgt = target ?? ref ?? selector ?? index;
+  tool("select_option", async ({ target, values, value, option, label }) => {
     const v =
       values !== undefined
         ? Array.isArray(values)
@@ -1506,7 +1525,7 @@ server.registerTool(
     const vals = Array.isArray(v) ? v : [v];
     return text(
       await callBridge("select_option", {
-        target: tgt,
+        target,
         values: vals,
         option: option ?? vals[0],
       })
@@ -1523,17 +1542,16 @@ server.registerTool(
       "A container that cannot scroll is refused with the reason, rather than reported as a scroll that did nothing. To see what is below without moving, browser_snapshot({scope: 'all'}).",
     inputSchema: {
       direction: z.enum(["up", "down", "left", "right"]).optional().describe("Default 'down'"),
-      amount: z.number().optional().describe("Pixels to scroll, default 600"),
+      amount: z.number().optional().describe("Pixels to scroll, default 400"),
       target: z
         .union([z.string(), z.number().int()])
         .optional()
         .describe("Target scrollable element (ref, CSS selector, or index)"),
     },
   },
-  tool("scroll", async ({ direction, amount, target, ref, selector, index }) => {
-    const tgt = target ?? ref ?? selector ?? index;
-    return text(await callBridge("scroll", { direction, amount, target: tgt }));
-  })
+  tool("scroll", async ({ direction, amount, target }) =>
+    text(await callBridge("scroll", { direction, amount, target }))
+  )
 );
 
 server.registerTool(
@@ -1790,7 +1808,7 @@ server.registerTool(
       format: z
         .enum(["smart", "json", "pretty", "raw"])
         .optional()
-        .describe("Output formatting: 'smart' (default), 'json', 'pretty', or 'raw'"),
+        .describe("Output formatting: 'json' (default), 'smart', 'pretty', or 'raw'"),
     },
   },
   tool("evaluate", async ({ expression, format }) =>
@@ -1803,10 +1821,19 @@ server.registerTool(
   {
     title: "Spoof page visibility (unblock background lazy-load)",
     description:
-      "Make the target tab's page JS believe it's visible/focused (document.hidden=false, document.visibilityState='visible', fires a visibilitychange event), WITHOUT actually foregrounding the tab or stealing the user's focus. Use this when scrolling a backgrounded tab isn't loading new content — many sites (e.g. infinite-scroll feeds) deliberately pause lazy-loading via the Page Visibility API while a tab is hidden, as a resource-saving pattern. This is explicit and opt-in on purpose: call it once before scrolling a background tab that needs to lazy-load, not automatically on every scroll — visibility state is also used for other things a site might not want spoofed unconditionally (video autoplay, polling/websocket resume, analytics time-on-page). Attaches the CDP debugger if not already attached (shows the 'is being debugged' bar). KNOWN LIMITATION: this patches JS-visible state only — it does not lift Chrome's renderer-level throttling of a backgrounded tab (requestAnimationFrame doesn't fire, IntersectionObserver rides the same throttled pipeline). If a site's lazy-load is driven by rAF/IO rather than a visibilitychange or scroll listener, this may not help; there is no further automatic fallback (foregrounding the tab, even briefly, is a deliberate manual decision this tool will never make for you).",
-    inputSchema: {},
+      "Make the target tab's page JS believe it's visible/focused (document.hidden=false, document.visibilityState='visible', fires a visibilitychange event), WITHOUT actually foregrounding the tab or stealing the user's focus. Use this when scrolling a backgrounded tab isn't loading new content — many sites (e.g. infinite-scroll feeds) deliberately pause lazy-loading via the Page Visibility API while a tab is hidden, as a resource-saving pattern. This is explicit and opt-in on purpose: call it once before scrolling a background tab that needs to lazy-load, not automatically on every scroll — visibility state is also used for other things a site might not want spoofed unconditionally (video autoplay, polling/websocket resume, analytics time-on-page). Attaches the CDP debugger if not already attached (shows the 'is being debugged' bar). KNOWN LIMITATION: this patches JS-visible state only — it does not lift Chrome's renderer-level throttling of a backgrounded tab (requestAnimationFrame doesn't fire, IntersectionObserver rides the same throttled pipeline). If a site's lazy-load is driven by rAF/IO rather than a visibilitychange or scroll listener, this may not help; there is no further automatic fallback (foregrounding the tab, even briefly, is a deliberate manual decision this tool will never make for you). The spoof lasts until the page navigates or reloads; call it again on the new page, or pass restore: true to undo it.",
+    inputSchema: {
+      restore: z
+        .boolean()
+        .optional()
+        .describe(
+          "Undo an earlier spoof on this page: the real hidden/visibilityState come back and focus emulation is turned off."
+        ),
+    },
   },
-  tool("spoof_visibility", async () => text(await callBridge("spoof_visibility")))
+  tool("spoof_visibility", async ({ restore }) =>
+    text(await callBridge("spoof_visibility", { restore }))
+  )
 );
 
 server.registerTool(
@@ -1850,12 +1877,11 @@ server.registerTool(
         ),
     },
   },
-  tool("press_key", async ({ key, target, index, ref, modifiers, allowSynthetic }) => {
-    const tgt = target ?? ref ?? index;
+  tool("press_key", async ({ key, target, modifiers, allowSynthetic }) => {
     return text(
       await callBridge("press_key", {
         key,
-        target: tgt,
+        target,
         modifiers,
         allowSynthetic,
       })
@@ -1888,12 +1914,8 @@ server.registerTool(
         message: "Provide 'files' (array) or 'file' (string).",
       }),
   },
-  tool(
-    "file_upload",
-    async ({ target, files, file, ref, index, selector, text: t, placeholder }) => {
-      const tgt = target ?? ref ?? index ?? selector ?? t ?? placeholder;
-      return text(await callBridge("upload", { target: tgt, files, file }));
-    }
+  tool("file_upload", async ({ target, files, file }) =>
+    text(await callBridge("upload", { target, files, file }))
   )
 );
 
@@ -1993,36 +2015,18 @@ server.registerTool(
             "Attribute name, required when property='attr' (e.g. 'href', 'src', 'aria-label')"
           ),
       })
-      .refine(
-        (v) =>
-          v.target !== undefined ||
-          v.selector !== undefined ||
-          v.ref !== undefined ||
-          v.index !== undefined ||
-          v.placeholder !== undefined,
-        {
-          message: "Provide 'target' (or 'selector', 'ref', 'index', or 'placeholder').",
-        }
-      )
+      .refine((v) => v.target !== undefined, {
+        message:
+          "Provide 'target': a ref '@ref_1', a CSS selector, the control's visible text, or a snapshot index.",
+      })
       .refine((v) => v.property !== "attr" || v.attr !== undefined, {
         message:
           "property='attr' needs 'attr' — the name of the attribute to read (e.g. attr='href').",
       }),
   },
-  tool("get_property", async ({ target, selector, ref, index, placeholder, property, attr }) => {
-    const tgt = target ?? selector ?? ref ?? index ?? placeholder;
-    return text(
-      await callBridge("get_property", {
-        target: tgt,
-        selector,
-        ref,
-        index,
-        placeholder,
-        property: property || "text",
-        attr,
-      })
-    );
-  })
+  tool("get_property", async ({ target, property, attr }) =>
+    text(await callBridge("get_property", { target, property: property || "text", attr }))
+  )
 );
 
 server.registerTool(
@@ -2212,15 +2216,16 @@ server.registerTool(
   {
     title: "Screenshot one element",
     description:
-      "Capture just one element as an image, identified by 'ref' (from browser_read_page/browser_find/browser_snapshot) or 'index' (from the latest browser_snapshot). Prefer ref. Requires browser_cdp_attach.",
+      "Capture just one element as an image, named by 'target' (ref '@ref_1', CSS selector, visible text, or snapshot index). Same capture as browser_take_screenshot with a target. Requires browser_cdp_attach.",
     inputSchema: {
-      index: z.number().int().optional().describe("Element index from browser_snapshot"),
-      ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5')"),
+      target: z
+        .union([z.string(), z.number().int()])
+        .describe("Element to capture: ref '@ref_1', CSS selector, visible text, or index"),
       format: z.enum(["png", "jpeg"]).optional(),
     },
   },
-  tool("element_screenshot", async ({ index, ref, format }) => {
-    const { dataUrl } = await callBridge("element_screenshot", { index, ref, format });
+  tool("element_screenshot", async ({ target, format }) => {
+    const { dataUrl } = await callBridge("element_screenshot", { target, format });
     const m = dataUrl.match(/^data:image\/(png|jpeg);base64,(.*)$/);
     if (!m)
       throw new Error(
@@ -2235,32 +2240,17 @@ server.registerTool(
   {
     title: "Describe one element",
     description:
-      "Given a CSS 'selector', 'ref', or 'index', return everything useful for debugging it: tag, full attribute dump, bounding rect, visibility verdict WITH the specific reason ('visible' | 'display:none' | 'visibility:hidden' | 'zero-size rect' | 'opacity:0' | 'disabled'), and whether it matches the interactive selector. Pierces open Shadow DOM.",
-    inputSchema: z
-      .object({
-        selector: z
-          .string()
-          .optional()
-          .describe(
-            "CSS selector to describe (e.g. 'ytd-active-account-header-renderer', '#submit-btn')"
-          ),
-        ref: z.string().optional().describe("Stable element ref (e.g. 'ref_5', '@ref_1')"),
-        index: z.number().int().optional().describe("Element index from browser_snapshot"),
-        placeholder: z.string().optional().describe("Match input by placeholder attribute"),
-      })
-      .refine(
-        (v) =>
-          v.selector !== undefined ||
-          v.ref !== undefined ||
-          v.index !== undefined ||
-          v.placeholder !== undefined,
-        {
-          message: "Provide at least one of 'selector', 'ref', 'index', or 'placeholder'.",
-        }
-      ),
+      "Given a 'target' (ref '@ref_1', CSS selector, visible text, or snapshot index), return everything useful for debugging it: tag, full attribute dump, bounding rect, visibility verdict WITH the specific reason ('visible' | 'display:none' | 'visibility:hidden' | 'zero-size rect' | 'opacity:0' | 'disabled'), and whether it matches the interactive selector. Pierces open Shadow DOM.",
+    inputSchema: {
+      target: z
+        .union([z.string(), z.number().int()])
+        .describe(
+          "Element to describe: ref '@ref_1', CSS selector (e.g. '#submit-btn'), visible text, or index"
+        ),
+    },
   },
-  tool("describe_element", async ({ selector, ref, index, placeholder }) =>
-    text(await callBridge("describe_element", { selector, ref, index, placeholder }))
+  tool("describe_element", async ({ target }) =>
+    text(await callBridge("describe_element", { target }))
   )
 );
 
@@ -2478,7 +2468,16 @@ server.registerTool(
   },
   async () => {
     const running = await isBridgeRunning();
-    if (running) return text({ ok: true, message: "Bridge is already running", url: BRIDGE_URL });
+    if (running) {
+      // A daemon that answers is running, whatever an earlier stop recorded; clearing that
+      // record lets auto-restart work again if it later exits.
+      if (isDaemonExplicitlyStopped()) {
+        try {
+          markDaemonRunning({ pid: null, port: BRIDGE_PORT, url: BRIDGE_URL });
+        } catch {}
+      }
+      return text({ ok: true, message: "Bridge is already running", url: BRIDGE_URL });
+    }
     const started = await startBridgeDaemon();
     return text({
       ok: started,
@@ -2495,11 +2494,49 @@ server.registerTool(
     description:
       "Stop the local browserctl bridge daemon. DO NOT call this to tidy up when a task is finished — \n" +
       "the daemon is shared with the user and with any other agent driving a tab, it starts and maintains \n" +
-      "itself, and stopping it interrupts their work and records an explicit stopped state that blocks ",
+      "itself, and stopping it interrupts their work and records an explicit stopped state that blocks \n" +
+      "auto-restart until browser_start.",
     inputSchema: {},
   },
   async () => {
+    // Only the pid a live bridge reports for itself is signalled: a pid kept in the state file
+    // can be stale and reused by an unrelated process.
+    let pid = null;
+    try {
+      const res = await fetch(`${BRIDGE_URL}/status`, { signal: AbortSignal.timeout(1500) });
+      const body = await res.json();
+      if (Number.isInteger(body.pid) && body.pid > 0) pid = body.pid;
+    } catch {}
     markDaemonStopped({ stoppedBy: "mcp_stop" });
+    // A pid is a local process number: signal it only when the bridge runs on this machine.
+    const local = (() => {
+      try {
+        return ["127.0.0.1", "localhost", "[::1]", "::1"].includes(new URL(BRIDGE_URL).hostname);
+      } catch {
+        return false;
+      }
+    })();
+    if (pid && local) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {}
+    }
+    for (let i = 0; i < 20 && (await isBridgeRunning()); i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (await isBridgeRunning()) {
+      return text({
+        ok: false,
+        message:
+          "Recorded the stopped state, but the bridge is still answering" +
+          (!local
+            ? ` at ${BRIDGE_URL}, which is not on this machine`
+            : pid
+              ? ` (pid ${pid} did not exit)`
+              : " and did not report its pid") +
+          ". Run 'browserctl stop' in a terminal to end the process.",
+      });
+    }
     return text({ ok: true, message: "Bridge daemon stopped" });
   }
 );

@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.8.4
+
+A fix release. Most of it closes gaps where a tool reported success for something that did not
+happen, or where the one-parameter `target` addressing of 0.8.0 had not reached every path.
+
+### Changed
+- **`browser_element_screenshot` and `browser_describe_element` take `target`.** They were the
+  last tools still declaring `ref` / `index` / `selector` / `placeholder`; those are now refused
+  with the one-parameter form, as on every other tool.
+- **`browser_action` runs a tool's name exactly as that tool.** `browser_action({action:
+  "read_page", params})` goes through `browser_read_page` itself: the same parameter check, the
+  same schema, the same mapping onto protocol actions. A removed spelling such as `ref` is refused
+  there too, and `browser_action`'s own `tabId` and `format` carry over.
+- **Calls that used to report success for nothing now fail.** `replay` stops at the first step
+  that fails and names it; `go_back` / `go_forward` fail when the tab does not move;
+  `record_start` fails on a page it cannot hook; `fill_form` refuses an option a `<select>` does
+  not have; `browser_type` on a `<select>` points to `browser_select_option`.
+- **`browser_spoof_visibility` takes `restore: true`** to put the page's own `hidden` /
+  `visibilityState` back and turn focus emulation off. Its result now says the spoof lasts until
+  the page navigates.
+
+### Fixed
+- **An action is sent once.** On a debugger-attached tab the dialog watcher gave up after 3 s and
+  sent the action again, so a slow click or type ran two or three times. The MCP client no longer
+  resends after a timeout or a dropped connection either — only a refused connection proves the
+  command never arrived.
+- **Frame-qualified refs work through `target`.** A ref such as `@f3:ref_5` from a snapshot was
+  sent to the top frame and not found; `browser_file_upload` dropped `target` altogether and fell
+  back to the page's only file input.
+- **`method: "type"` types.** The method never reached the extension, so it behaved as `set`. It
+  now sends key and input events per character on free-text fields, and uses `set` on fields that
+  sanitize a partial value (number, date).
+- **Target resolution:** a `<label>` and the control it names, or an `<li>` around its link, are
+  one match rather than an ambiguity; an app-shell custom element no longer matches every text
+  query; `E5` is a label, not a ref; `placeholder=` prefers an exact match and is not confused by
+  a labelled region around the input; labels and `aria-labelledby` inside a shadow root name
+  their control; a control once matched as plain text is no longer refused on every later call.
+- **Recording:** a checkbox or radio replays to the state it was left in, not to its value
+  attribute; recording continues after the page navigates; steps from another tab are ignored.
+- **`element_screenshot`** clips the right area on pages with smooth scrolling and for elements
+  inside same-origin frames, and says so when the element has no size.
+- **Submitting with `type` / `paste`** no longer submits twice when the page handles Enter itself.
+- **CDP:** dialog events arrive on every attached tab; the network buffer keeps the newest 2000
+  requests instead of the first 2000; two actions on one tab no longer cancel each other's dialog
+  watch.
+- **Long-lived pages** no longer accumulate every ref ever issued.
+- **`browser_stop` stops the daemon.** It recorded a stopped state and reported success while the
+  bridge kept running. `browser_start` on a running bridge clears that state.
+- **`browserctl stop` on Windows** killed every process in `netstat` output for the port, Chrome
+  included; it now kills the listener only.
+- **Custom `BROWSERCTL_BRIDGE_URL`:** the daemon is started on, and stopped at, the URL's port.
+- **Smaller fixes:** `wait_for({for: "settle"})` is no longer cut off at 30 s; full-page capture
+  through `screenshot_fullpage` and the CLI's `-f`; the CLI reads `--cursor`, `find … --max N` and
+  `upload '#input' file`; `hover` returns its `resolved` block; storage refuses an unknown area.
+
+### Internal
+- The call log records each response's size in `bytes`.
+- `run_extended.mjs`, the live suite for the loadable profiles, runs in the release gate.
+- Unit tests no longer write the real `~/.browserctl/daemon.json`.
+
 ## 0.8.3
 
 ### Fixed

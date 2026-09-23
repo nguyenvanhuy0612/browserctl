@@ -25,7 +25,7 @@ const PORT = envNum("PORT", 8765);
 const HOST = envStr("HOST", "0.0.0.0");
 const COMMAND_TIMEOUT_MS = envNum("COMMAND_TIMEOUT_MS", 30_000);
 const ACTION_TIMEOUT_MS = { replay: 120_000, export_har: 120_000 };
-const WAIT_ACTIONS = new Set(["wait_for", "wait_network_idle"]);
+const WAIT_ACTIONS = new Set(["wait_for", "wait_settle", "wait_network_idle"]);
 const TIMEOUT_BUFFER_MS = 5_000;
 const MAX_TIMEOUT_MS = 300_000;
 const HEARTBEAT_MS = 20_000;
@@ -196,6 +196,7 @@ function statusPayload() {
     bridgeUrl: `http://${HOST === "0.0.0.0" ? "127.0.0.1" : HOST}:${PORT}`,
     extensionConnected: extensionSocket != null,
     runId: RUN_ID,
+    pid: process.pid,
     callLog: CALL_LOG_PATH || null,
     callLogBytes: CALL_LOG_PATH ? callLogSize() : null,
     callLogMaxBytes: CALL_LOG_PATH ? CALL_LOG_MAX_BYTES : null,
@@ -300,6 +301,9 @@ function handleCommand(body, res) {
   const who = clientTag(client);
   const record = (ok, extra) =>
     logCall({
+      // The response size is what a page read actually costs an agent, and the only honest way
+      // to compare two runs: token totals carry the agent's own reasoning, which varies far
+      // more between runs than the payload does.
       ts: new Date().toISOString(),
       runId: RUN_ID,
       runStartedAt: RUN_STARTED_AT,
@@ -337,7 +341,14 @@ function handleCommand(body, res) {
 
   wait
     .then((reply) => {
-      record(!!reply.ok, reply.ok ? null : { code: reply.code || null });
+      const bytes = (() => {
+        try {
+          return JSON.stringify(reply.result ?? reply).length;
+        } catch {
+          return null;
+        }
+      })();
+      record(!!reply.ok, { bytes, ...(reply.ok ? null : { code: reply.code || null }) });
       return sendJson(res, reply.ok ? 200 : 400, reply);
     })
     .catch((err) => {

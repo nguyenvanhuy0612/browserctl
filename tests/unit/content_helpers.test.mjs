@@ -962,6 +962,8 @@ function loadResolveTarget(elements = [], { refMap = {}, refLabels = {}, customM
     extractFunction(SRC, "makeCandidate"),
     extractFunction(SRC, "ambiguityError"),
     extractFunction(SRC, "resolveRef"),
+    extractFunction(SRC, "containsDeep"),
+    extractFunction(SRC, "innermostMatches"),
     extractFunction(SRC, "resolveTarget"),
   ];
   for (const el of elements) {
@@ -997,7 +999,7 @@ function loadResolveTarget(elements = [], { refMap = {}, refLabels = {}, customM
         : elements
             .filter((e) => (e.innerText || "").toLowerCase().includes(t.toLowerCase()))
             .map((el) => ({ el, step: "interactive" })),
-    textOnlyMatches: new Set(),
+    lastTextOnlyMatch: null,
   };
   const { resolveTarget } = loadFromContentJs(slices, ["resolveTarget"], stubs);
   return resolveTarget;
@@ -1164,6 +1166,7 @@ test("fill_form: sequential stop-on-failure contract returns completed fields an
       return { _resolved: { by: "css", ref: "@ref_1", matchCount: 1 } };
     },
     insertIntoEditable: (el, val) => filledFields.push(val),
+    actionability: () => null,
   };
   const { fill_form } = loadFromContentJs(slices, ["fill_form"], stubs);
 
@@ -1185,4 +1188,79 @@ test("fill_form: sequential stop-on-failure contract returns completed fields an
     }
   );
   assert.deepEqual(filledFields, ["hello"]);
+});
+
+test("resolveTarget: a label and the control it names are one exact-text hit, not two", () => {
+  const input = { tagName: "INPUT", innerText: "", "aria-label": "Email", isConnected: true, __ref: "ref_7" };
+  const label = { tagName: "LABEL", innerText: "Email", isConnected: true, control: input };
+  const resolveTarget = loadResolveTarget([label, input]);
+  assert.equal(resolveTarget({ target: "Email" }), input);
+});
+
+test("resolveTarget: a wrapper around the matching control is not a second match", () => {
+  const li = { tagName: "LI", innerText: "Home", isConnected: true };
+  const a = { tagName: "A", innerText: "Home", isConnected: true, parentNode: li, __ref: "ref_8" };
+  const resolveTarget = loadResolveTarget([li, a]);
+  assert.equal(resolveTarget({ target: "Home" }), a);
+});
+
+test("resolveTarget: a ref is lower-case, so a control labelled 'E5' is reached by its text", () => {
+  const cell = { tagName: "BUTTON", innerText: "E5", isConnected: true, __ref: "ref_9" };
+  const resolveTarget = loadResolveTarget([cell]);
+  assert.equal(resolveTarget({ target: "E5" }), cell);
+});
+
+test("fill_form: a <select> field chooses an option instead of writing into .value", async () => {
+  const slices = [extractFunction(SRC, "createStructuredError"), extractFunction(SRC, "fill_form")];
+  const chosen = [];
+  const written = [];
+  const stubs = {
+    location: { href: "https://site.test" },
+    startMutationCounter: () => ({ stop: () => 0 }),
+    buildEffect: () => ({ mutations: 0 }),
+    resolveTarget: ({ target }) => ({ tagName: target === "country" ? "SELECT" : "INPUT", _resolved: {} }),
+    select_option: ({ target, values }) => {
+      if (values[0] === "Atlantis") throw new Error('no option matching "Atlantis"');
+      chosen.push([target, values[0]]);
+    },
+    insertIntoEditable: (el, val) => written.push(val),
+    actionability: () => null,
+  };
+  const { fill_form } = loadFromContentJs(slices, ["fill_form"], stubs);
+  await fill_form({ fields: [{ target: "name", value: "An" }, { target: "country", value: "Vietnam" }], autoSettle: false });
+  assert.deepEqual(chosen, [["country", "Vietnam"]]);
+  assert.deepEqual(written, ["An"]);
+  await assert.rejects(
+    () => fill_form({ fields: [{ target: "country", value: "Atlantis" }], autoSettle: false }),
+    (err) => err.code === "FILL_FORM_PARTIAL_FAILURE" && /Atlantis/.test(err.message)
+  );
+});
+
+test("refs: the maps are swept, so a long-lived page does not keep every ref it ever issued", () => {
+  const slices = [extractFunction(SRC, "sweepRefs"), extractFunction(SRC, "getOrAssignRef")];
+  const ctx = {
+    refCounter: 0,
+    refMap: {},
+    refLabels: Object.create(null),
+    reverseRefMap: new WeakMap(),
+    REF_SWEEP_EVERY: 100,
+    MAX_REF_LABELS: 250,
+    fullElementText: (el) => el.label,
+  };
+  const { getOrAssignRef } = loadFromContentJs(slices, ["getOrAssignRef"], ctx);
+  const keep = { tagName: "BUTTON", label: "Keep me", isConnected: true };
+  const keepRef = getOrAssignRef(keep);
+  // A feed that renders and drops rows: every row gets a ref, then leaves the DOM.
+  for (let i = 0; i < 1000; i++) {
+    const row = { tagName: "DIV", label: `row ${i}`, isConnected: true };
+    getOrAssignRef(row);
+    row.isConnected = false;
+  }
+  const live = Object.keys(ctx.refMap).length;
+  assert.ok(live < 150, `detached refs must be swept, ${live} left`);
+  assert.equal(getOrAssignRef(keep), keepRef, "a live element keeps its ref across sweeps");
+  const labels = Object.keys(ctx.refLabels).length;
+  assert.ok(labels <= 250 + 100 + 1, `labels must be capped, ${labels} kept`);
+  assert.ok(ctx.refLabels[keepRef], "a live ref keeps its label");
+  assert.ok(ctx.refLabels.ref_1001, "the newest refs keep their labels for the stale-ref hint");
 });

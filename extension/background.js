@@ -72,6 +72,7 @@ function persistRecording(on) {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.__bctl_record_step) {
+    if (!isRecording || (_sender.tab && _sender.tab.id !== recordingTabId)) return;
     recordingSteps.push(msg.__bctl_record_step);
     if (recordingSteps.length > MAX_RECORD_STEPS) recordingSteps.shift();
     return;
@@ -283,12 +284,13 @@ async function dispatch({ action, params = {} }) {
     const marked = await toContent(
       "upload_mark",
       {
+        target: p.target,
         index: p.index,
         ref: p.ref,
         selector: p.selector,
         text: p.text,
         placeholder: p.placeholder,
-        tabId: params.tabId,
+        tabId: tab.id,
       },
       frameId
     );
@@ -319,7 +321,15 @@ async function dispatch({ action, params = {} }) {
     const { frameId, params: p } = frameRoute(params);
     const rectReply = await toContent(
       "element_rect",
-      { index: p.index, ref: p.ref, tabId: params.tabId },
+      {
+        target: p.target,
+        selector: p.selector,
+        index: p.index,
+        ref: p.ref,
+        text: p.text,
+        placeholder: p.placeholder,
+        tabId: tab.id,
+      },
       frameId
     );
     if (!rectReply.ok) return rectReply;
@@ -392,6 +402,11 @@ async function dispatch({ action, params = {} }) {
     case "navigate":
       return { ok: true, result: await navigate(params) };
     case "screenshot":
+      if (params.fullPage) {
+        const tab = await targetTab(params);
+        await ensureAttached(tab.id);
+        return await handleCdp("capture_screenshot", params, tab.id);
+      }
       return { ok: true, result: await screenshot(params) };
     case "list_tabs":
       return { ok: true, result: await listTabs() };
@@ -438,9 +453,9 @@ async function dispatch({ action, params = {} }) {
     case "reload_extension":
       return { ok: true, result: reloadExtension() };
     case "record_start":
-      return { ok: true, result: await recordStart(params) };
+      return await recordStart(params);
     case "record_stop":
-      return { ok: true, result: await recordStop(params) };
+      return await recordStop(params);
     case "record_get": {
       if (!isRecording && recordingSteps.length === 0) {
         const { [RECORDING_KEY]: wasRecording } = await chrome.storage.session.get(RECORDING_KEY);
@@ -454,7 +469,7 @@ async function dispatch({ action, params = {} }) {
       return { ok: true, result: { count: recordingSteps.length, steps: recordingSteps } };
     }
     case "replay":
-      return { ok: true, result: await replay(params) };
+      return await replay(params);
 
     default:
       throw new Error(`unknown action: ${action}`);
@@ -542,20 +557,36 @@ function reloadExtension() {
   return { reloading: true };
 }
 
+let recordingTabId = null;
+
 async function recordStart(params) {
+  const tab = await targetTab(params || {});
+  const reply = await toContent("record_start", { tabId: tab.id });
+  if (!reply || !reply.ok) return reply || { ok: false, error: "record_start got no reply" };
   recordingSteps = [];
   isRecording = true;
+  recordingTabId = tab.id;
   persistRecording(true);
-  await toContent("record_start", { tabId: params && params.tabId });
-  return { recording: true };
+  return { ok: true, result: { recording: true } };
 }
 
 async function recordStop(params) {
   isRecording = false;
   persistRecording(false);
-  await toContent("record_stop", { tabId: params && params.tabId });
-  return { recording: false, count: recordingSteps.length };
+  const tabId = recordingTabId ?? (params && params.tabId);
+  recordingTabId = null;
+  try {
+    await toContent("record_stop", { tabId });
+  } catch {}
+  return { ok: true, result: { recording: false, count: recordingSteps.length } };
 }
+
+// A navigation replaces the content script and its listeners, so the recorded tab is re-armed
+// each time a new document finishes loading.
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (!isRecording || tabId !== recordingTabId || info.status !== "complete") return;
+  toContent("record_start", { tabId }).catch(() => {});
+});
 
 async function replay({ steps, startUrl, tabId } = {}) {
   const plan = steps || recordingSteps;
@@ -563,20 +594,34 @@ async function replay({ steps, startUrl, tabId } = {}) {
     await navigate({ url: startUrl, tabId });
   }
   const done = [];
-  for (const step of plan) {
+  for (const [i, step] of plan.entries()) {
+    let reply = null;
     if (step.type === "navigate" && step.url) {
       await navigate({ url: step.url, tabId });
     } else if (step.type === "click") {
-      await toContent("click_selector", { selector: step.selector, tabId });
+      reply = await toContent("click_selector", { selector: step.selector, tabId });
     } else if (step.type === "input") {
-      await toContent("fill_selector", { selector: step.selector, value: step.value, tabId });
+      reply = await toContent("fill_selector", {
+        selector: step.selector,
+        value: step.value,
+        tabId,
+      });
     } else {
       continue;
+    }
+    // A failed step stops the run: every later step assumes the page it would have left.
+    if (reply && !reply.ok) {
+      return {
+        ok: false,
+        error: `replay stopped at step ${i} (${step.type} ${step.selector || ""}): ${reply.error}`,
+        code: "REPLAY_STEP_FAILED",
+        data: { replayed: done.length, steps: plan.length, failedAt: i, step },
+      };
     }
     done.push(step.type);
     await new Promise((r) => setTimeout(r, 400));
   }
-  return { replayed: done.length, steps: plan.length };
+  return { ok: true, result: { replayed: done.length, steps: plan.length } };
 }
 
 async function waitFor(params) {
@@ -920,6 +965,9 @@ async function historyGo(params, delta) {
   const [res] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     func: (d) => {
+      // Only a single-entry history is known to have nothing behind it. The Navigation API
+      // lists same-origin entries only, so its "no" cannot be trusted across origins; whether
+      // the move happened is checked afterwards instead.
       if (d < 0 && history.length <= 1) return { moved: false, length: history.length };
       history.go(d);
       return { moved: true, length: history.length };
@@ -933,6 +981,11 @@ async function historyGo(params, delta) {
   }
   await done;
   const after = await chrome.tabs.get(tab.id);
+  if (after.url === before) {
+    throw new Error(
+      `no ${delta < 0 ? "previous" : "next"} page in this tab's history — the tab is still on ${before}`
+    );
+  }
   return { id: tab.id, from: before, url: after.url };
 }
 
@@ -1009,14 +1062,28 @@ async function withDialogGuard(action, params, frameId, tabId) {
     return res;
   }
   if (!isAttached(tabId)) return await toContent(action, rest, frameId);
+  const alreadyOpen = pendingDialog(tabId);
+  if (alreadyOpen) {
+    return {
+      ok: false,
+      error: `a ${alreadyOpen.type} dialog is already open and the page is suspended until it is answered: "${alreadyOpen.message}". Answer it with handle_dialog, then retry '${action}'.`,
+      code: "DIALOG_BLOCKED",
+      data: { dialog: alreadyOpen },
+    };
+  }
   let seen = null;
   const stop = onDialogOpened(tabId, (d) => (seen = d));
+  // The action is sent exactly once. The watcher only answers when a dialog opens while the
+  // action is still pending; it never ends the race on its own.
+  let settled = false;
+  const run = toContent(action, rest, frameId).finally(() => (settled = true));
+  run.catch(() => {});
   try {
-    const res = await Promise.race([
-      toContent(action, rest, frameId),
+    return await Promise.race([
+      run,
       (async () => {
-        for (let i = 0; i < 60 && !seen; i++) await new Promise((r) => setTimeout(r, 50));
-        if (!seen) return null;
+        while (!seen && !settled) await new Promise((r) => setTimeout(r, 50));
+        if (!seen) return run;
         return {
           ok: false,
           error: `'${action}' raised a ${seen.type} dialog and the page is suspended until it is answered: "${seen.message}". Retry with onDialog: "accept" or "dismiss" (promptText for a prompt), or answer the open one with handle_dialog.`,
@@ -1025,7 +1092,6 @@ async function withDialogGuard(action, params, frameId, tabId) {
         };
       })(),
     ]);
-    return res || (await toContent(action, rest, frameId));
   } finally {
     stop();
   }
@@ -1046,13 +1112,23 @@ async function toContent(action, params, frameId = 0) {
     try {
       after = await chrome.tabs.get(tab.id);
     } catch {}
-    if (after && after.url && urlBefore && after.url !== urlBefore) {
+    // A navigation the action started shows as a changed url, a pending url that has not
+    // committed yet, or a tab that was loaded and is loading again.
+    const pendingBefore = tab.pendingUrl || urlBefore;
+    const navigatedTo =
+      after &&
+      ((after.url && urlBefore && after.url !== urlBefore && after.url) ||
+        (after.pendingUrl && after.pendingUrl !== pendingBefore && after.pendingUrl) ||
+        (tab.status === "complete" &&
+          after.status === "loading" &&
+          (after.pendingUrl || after.url)));
+    if (navigatedTo) {
       return {
         ok: true,
         result: {
           navigated: true,
           from: urlBefore,
-          to: after.url,
+          to: navigatedTo,
           effect: { measured: false, urlChanged: true },
           note:
             `'${action}' navigated the page, so the content script running it was replaced and its ` +
@@ -1074,14 +1150,19 @@ async function toContent(action, params, frameId = 0) {
   }
 }
 
+// A frame-qualified ref ('@f3:ref_5') routes to that frame with the bare ref. On 'target' only a
+// ref-shaped inner part counts, so visible text such as 'f2: Settings' stays in the top frame.
 function frameRoute(params = {}) {
-  for (const key of ["ref", "ref_id"]) {
+  for (const key of ["target", "ref", "ref_id"]) {
     const v = params[key];
     const m = typeof v === "string" && v.match(/^@?f(\d+):(.+)$/i);
-    if (m) {
-      const innerRef = m[2].startsWith("@") ? m[2].slice(1) : m[2];
-      return { frameId: Number(m[1]), params: { ...params, [key]: innerRef } };
+    if (!m) continue;
+    const bare = m[2].startsWith("@") ? m[2].slice(1) : m[2];
+    if (key === "target") {
+      if (!/^(?:ref_\d+|e\d+)$/.test(bare)) continue;
+      return { frameId: Number(m[1]), params: { ...params, target: "@" + bare } };
     }
+    return { frameId: Number(m[1]), params: { ...params, [key]: bare } };
   }
   return { frameId: 0, params };
 }

@@ -173,11 +173,10 @@ async function send(tabId, method, params = {}) {
     if (/debugger is not attached/i.test(e.message || "")) {
       await attach(tabId);
       const s = sessions.get(tabId);
-      if (s && s.domainsEnabled) {
-        try {
-          await enableDomains(tabId);
-        } catch {}
-      }
+      try {
+        if (s && s.domainsEnabled) await enableDomains(tabId);
+        else await sendRaw(tabId, "Page.enable");
+      } catch {}
       return await sendRaw(tabId, method, params);
     }
     throw e;
@@ -189,11 +188,16 @@ function persistAttached() {
   chrome.storage.session.set({ [ATTACHED_KEY]: [...sessions.keys()] }).catch(() => {});
 }
 
+// Page events are on for every session, however it was attached: a JavaScript dialog is only
+// reported (Page.javascriptDialogOpening) once Page.enable has run.
 export async function ensureAttached(tabId) {
   if (!sessions.has(tabId)) {
     await attach(tabId);
     sessions.set(tabId, { console: [], network: new Map(), domainsEnabled: false });
     persistAttached();
+    try {
+      await sendRaw(tabId, "Page.enable");
+    } catch {}
   }
   return sessions.get(tabId);
 }
@@ -310,10 +314,16 @@ export async function handleDialog(tabId, { action = "dismiss", promptText } = {
   return d.answered;
 }
 
+// Each pending action on a tab has its own waiter; removing one leaves the others in place.
 const dialogWaiters = new Map();
 export function onDialogOpened(tabId, fn) {
-  dialogWaiters.set(tabId, fn);
-  return () => dialogWaiters.delete(tabId);
+  if (!dialogWaiters.has(tabId)) dialogWaiters.set(tabId, new Set());
+  const set = dialogWaiters.get(tabId);
+  set.add(fn);
+  return () => {
+    set.delete(fn);
+    if (!set.size && dialogWaiters.get(tabId) === set) dialogWaiters.delete(tabId);
+  };
 }
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
@@ -348,8 +358,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
           })
           .catch(() => {});
       } else {
-        const waiter = dialogWaiters.get(source.tabId);
-        if (waiter) waiter(open);
+        for (const waiter of dialogWaiters.get(source.tabId) || []) waiter(open);
       }
       break;
     }
@@ -385,15 +394,17 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       break;
 
     case "Network.requestWillBeSent":
-      if (s.network.size < MAX_NETWORK) {
-        s.network.set(params.requestId, {
-          requestId: params.requestId,
-          request: params.request,
-          resourceType: params.type,
-          wallTime: params.wallTime,
-          startTs: params.timestamp,
-        });
+      // Newest requests win: once full, the oldest entry (first in insertion order) goes.
+      if (!s.network.has(params.requestId) && s.network.size >= MAX_NETWORK) {
+        s.network.delete(s.network.keys().next().value);
       }
+      s.network.set(params.requestId, {
+        requestId: params.requestId,
+        request: params.request,
+        resourceType: params.type,
+        wallTime: params.wallTime,
+        startTs: params.timestamp,
+      });
       break;
     case "Network.responseReceived": {
       const e = s.network.get(params.requestId);
@@ -702,13 +713,42 @@ export async function handleCdp(action, params, tabId) {
       return { ok: true, result: { dataUrl: `data:image/${format};base64,${res.data}` } };
     }
 
+    // The patch keeps the page's own descriptors on window.__bctlVisibility so that restore can
+    // put them back. It lives in the document, so a navigation or reload ends it as well.
     case "spoof_visibility": {
       await ensureAttached(tabId);
+      if (params.restore) {
+        try {
+          await send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: false });
+        } catch {}
+        const undo = `(() => {
+          const saved = window.__bctlVisibility;
+          if (!saved) return false;
+          for (const [k, d] of Object.entries(saved)) {
+            try {
+              Object.defineProperty(Document.prototype, k, d);
+            } catch (e) {}
+          }
+          delete window.__bctlVisibility;
+          document.dispatchEvent(new Event("visibilitychange"));
+          return true;
+        })()`;
+        const { value } = await runtimeEval(tabId, undo);
+        return { ok: true, result: { restored: value === true, tabId } };
+      }
       try {
         await send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
       } catch {}
       const patch = `(() => {
         const patched = { visibilityState: false, hidden: false };
+        if (!window.__bctlVisibility) {
+          const saved = {};
+          for (const k of ["hidden", "visibilityState"]) {
+            const d = Object.getOwnPropertyDescriptor(Document.prototype, k);
+            if (d) saved[k] = d;
+          }
+          window.__bctlVisibility = saved;
+        }
         try {
           Object.defineProperty(Document.prototype, "hidden", { configurable: true, get: () => false });
           patched.hidden = true;
@@ -721,7 +761,10 @@ export async function handleCdp(action, params, tabId) {
         return patched;
       })()`;
       const { value } = await runtimeEval(tabId, patch);
-      return { ok: true, result: { spoofed: value, tabId } };
+      return {
+        ok: true,
+        result: { spoofed: value, tabId, until: "the page navigates or reloads" },
+      };
     }
 
     case "eval_js": {
@@ -997,16 +1040,8 @@ export async function handleCdp(action, params, tabId) {
     case "element_screenshot": {
       requireSession(tabId);
       const format = params.format || "png";
-      let r = params.rect;
-      if (!r) {
-        const index = params.index;
-        const rect = await send(tabId, "Runtime.evaluate", {
-          expression: `(()=>{const e=document.querySelector('[data-bctl-ref="${index}"]');if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}})()`,
-          returnByValue: true,
-        });
-        r = rect.result && rect.result.value;
-      }
-      if (!r) throw new Error(`element not found (snapshot first, or pass a valid ref/index)`);
+      const r = params.rect;
+      if (!r) throw new Error("element_screenshot needs the element's rect from element_rect");
       let scrollX = 0,
         scrollY = 0;
       try {

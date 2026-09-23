@@ -869,6 +869,7 @@ gate("end-to-end (live browser)", () => {
     ["tests/e2e/run_multiframe.mjs", null],
     ["tests/e2e/run_labels.mjs", /all label paths agree/],
     ["tests/e2e/run_editors.mjs", null],
+    ["tests/e2e/run_extended.mjs", null],
   ];
   const runOnce = (file) => {
     try {

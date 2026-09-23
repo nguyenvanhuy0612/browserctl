@@ -101,7 +101,23 @@ test("MCP: core profile registers lifecycle and dynamic load/unload tools", asyn
   assert.ok(stdout.includes("DYNAMIC_LOAD_OK"));
 });
 
-test("State Manager: transitions between running, stopped, and uninitialized correctly", () => {
+test("State Manager: transitions between running, stopped, and uninitialized correctly", async (t) => {
+  // The state file lives under the home directory; point it at a scratch one so the test
+  // never rewrites the real daemon record (os.homedir() reads HOME / USERPROFILE per call).
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const scratch = mkdtempSync(join(tmpdir(), "bctl-state-"));
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = scratch;
+  process.env.USERPROFILE = scratch;
+  t.after(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(scratch, { recursive: true, force: true });
+  });
+
   // Test running state
   const runState = markDaemonRunning({ pid: 12345, port: 8765 });
   assert.equal(runState.state, "running");
@@ -117,6 +133,7 @@ test("State Manager: transitions between running, stopped, and uninitialized cor
   // Recover back to running
   markDaemonRunning({ pid: 54321, port: 8765 });
   assert.equal(isDaemonExplicitlyStopped(), false);
+  assert.ok(getDaemonState().pid === 54321, "the scratch record is the one written");
 });
 
 test("CLI: prints full subcommands in help output", async () => {
@@ -1320,6 +1337,185 @@ test("MCP: a parameter that is not in the schema is refused, and the refusal say
   assert.ok(stdout.includes("PARAM_GUARD_OK"));
 });
 
+// Loadable tools address elements the way core tools do: one 'target', forwarded as given,
+// and the removed spellings refused with the form that replaces them.
+test("MCP: loadable element tools take 'target' and refuse the removed spellings", async () => {
+  const script = `
+    import http from "node:http";
+    const calls = [];
+    const stub = http.createServer((req, res) => {
+      if (req.url === "/status") { res.writeHead(200, {"content-type":"application/json"}); return res.end(JSON.stringify({ ok: true })); }
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        calls.push(JSON.parse(body));
+        res.writeHead(200, {"content-type":"application/json"});
+        res.end(JSON.stringify({ ok: true, result: { dataUrl: "data:image/png;base64,AAAA", tag: "button" } }));
+      });
+    });
+    await new Promise((r) => stub.listen(0, "127.0.0.1", r));
+    process.env.BROWSERCTL_BRIDGE_URL = "http://127.0.0.1:" + stub.address().port;
+    process.env.BROWSERCTL_MCP_PROFILE = "core";
+    const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
+    const call = (n, a) => server._registeredTools[n].handler(a);
+
+    const shot = await call("browser_element_screenshot", { target: "@ref_2", format: "png" });
+    if (shot.isError) throw new Error("element_screenshot refused target: " + shot.content[0].text);
+    if (calls.at(-1).action !== "element_screenshot" || calls.at(-1).params.target !== "@ref_2") {
+      throw new Error("element_screenshot did not forward target: " + JSON.stringify(calls.at(-1)));
+    }
+    const desc = await call("browser_describe_element", { target: "css=#btn" });
+    if (desc.isError) throw new Error("describe_element refused target: " + desc.content[0].text);
+    if (calls.at(-1).action !== "describe_element" || calls.at(-1).params.target !== "css=#btn") {
+      throw new Error("describe_element did not forward target: " + JSON.stringify(calls.at(-1)));
+    }
+
+    const sent = calls.length;
+    for (const [tool, args] of [
+      ["browser_element_screenshot", { ref: "ref_2" }],
+      ["browser_element_screenshot", { index: 3 }],
+      ["browser_describe_element", { selector: "#btn" }],
+      ["browser_describe_element", { placeholder: "Email" }],
+    ]) {
+      const r = await call(tool, args);
+      if (!r.isError) throw new Error(tool + " accepted " + Object.keys(args)[0]);
+      if (!/one parameter now/.test(r.content[0].text)) throw new Error("no guidance: " + r.content[0].text);
+    }
+    if (calls.length !== sent) throw new Error("a refused call still reached the bridge");
+
+    console.log("LOADABLE_TARGET_OK");
+    process.exit(0);
+  `;
+  let stdout = "";
+  try {
+    ({ stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]));
+  } catch (err) {
+    throw new Error(
+      "loadable target child: " +
+        String(err.stdout || "") +
+        " | " +
+        String(err.stderr || "").slice(0, 400)
+    );
+  }
+  assert.ok(stdout.includes("LOADABLE_TARGET_OK"));
+});
+
+// A command that may already have run is never sent twice: only a refused connection proves
+// it did not reach the bridge.
+test("MCP: a timed-out or dropped command is not sent again", async () => {
+  const script = `
+    import http from "node:http";
+    let hits = 0;
+    const stub = http.createServer((req, res) => {
+      if (req.url === "/status") { res.writeHead(200, {"content-type":"application/json"}); return res.end(JSON.stringify({ ok: true })); }
+      hits++;
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const { action } = JSON.parse(body);
+        if (action === "wait_for") return; // never answers: the client times out
+        req.socket.destroy(); // drops the connection after the command arrived
+      });
+    });
+    await new Promise((r) => stub.listen(0, "127.0.0.1", r));
+    process.env.BROWSERCTL_BRIDGE_URL = "http://127.0.0.1:" + stub.address().port;
+    process.env.BROWSERCTL_MCP_PROFILE = "core";
+    const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
+    const call = (n, a) => server._registeredTools[n].handler(a);
+
+    const dropped = await call("browser_click", { target: "@ref_1" });
+    if (!dropped.isError) throw new Error("a dropped click reported success");
+    if (hits !== 1) throw new Error("a dropped click was sent " + hits + " times");
+    if (!/not retried/.test(dropped.content[0].text)) throw new Error("no explanation: " + dropped.content[0].text);
+
+    hits = 0;
+    const late = await call("browser_wait_for", { selector: "#x", timeoutMs: 50 });
+    if (!late.isError) throw new Error("a timed-out wait reported success");
+    if (hits !== 1) throw new Error("a timed-out wait was sent " + hits + " times");
+
+    console.log("NO_RESEND_OK");
+    process.exit(0);
+  `;
+  let stdout = "";
+  try {
+    ({ stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]));
+  } catch (err) {
+    throw new Error("no-resend child: " + String(err.stdout || "") + " | " + String(err.stderr || "").slice(0, 400));
+  }
+  assert.ok(stdout.includes("NO_RESEND_OK"));
+});
+
+// browser_action runs a tool's name the way the tool runs it: the same parameter check, and
+// the same mapping from parameters to protocol action.
+test("MCP: browser_action with a tool's name behaves as that tool", async () => {
+  const script = `
+    import http from "node:http";
+    const calls = [];
+    const stub = http.createServer((req, res) => {
+      if (req.url === "/status") { res.writeHead(200, {"content-type":"application/json"}); return res.end(JSON.stringify({ ok: true })); }
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        calls.push(JSON.parse(body));
+        res.writeHead(200, {"content-type":"application/json"});
+        res.end(JSON.stringify({ ok: true, result: { dataUrl: "data:image/png;base64,AAAA", tree: "", value: 1 } }));
+      });
+    });
+    await new Promise((r) => stub.listen(0, "127.0.0.1", r));
+    process.env.BROWSERCTL_BRIDGE_URL = "http://127.0.0.1:" + stub.address().port;
+    process.env.BROWSERCTL_MCP_PROFILE = "core";
+    const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
+    const act = (action, params) => server._registeredTools["browser_action"].handler({ action, params });
+
+    const refused = await act("click", { ref: "@ref_1" });
+    if (!refused.isError || !/one parameter now/.test(refused.content[0].text)) {
+      throw new Error("browser_action let a removed spelling through: " + JSON.stringify(refused));
+    }
+
+    await act("read_page", { target: "@ref_2" });
+    if (calls.at(-1).action !== "read_page" || calls.at(-1).params.ref_id !== "@ref_2") {
+      throw new Error("read_page target did not become the subtree: " + JSON.stringify(calls.at(-1)));
+    }
+    await act("take_screenshot", { target: "@ref_3" });
+    if (calls.at(-1).action !== "element_screenshot") {
+      throw new Error("take_screenshot with a target did not capture the element: " + JSON.stringify(calls.at(-1)));
+    }
+    await act("wait_for", { for: "settle" });
+    if (calls.at(-1).action !== "wait_settle") throw new Error("wait_for settle: " + calls.at(-1).action);
+
+    await act("get_text", { target: "@ref_4" });
+    if (calls.at(-1).action !== "get_property" || calls.at(-1).params.property !== "text") {
+      throw new Error("get_text alias broke: " + JSON.stringify(calls.at(-1)));
+    }
+    await act("check", { target: "@ref_5" });
+    if (calls.at(-1).action !== "check") throw new Error("an action with no tool must still dispatch");
+
+    const bareClick = await act("click", {});
+    if (!bareClick.isError || !/'target' is required|Provide 'target'/.test(bareClick.content[0].text)) {
+      throw new Error("the tool's own schema must run inside browser_action: " + JSON.stringify(bareClick));
+    }
+    await server._registeredTools["browser_action"].handler({ action: "click", tabId: 42, params: { target: "@ref_6" } });
+    if (calls.at(-1).params.tabId !== 42) {
+      throw new Error("browser_action's tabId was lost: " + JSON.stringify(calls.at(-1)));
+    }
+
+    await server._registeredTools["browser_type"].handler({ target: "@ref_7", text: "hi", method: "type" });
+    if (calls.at(-1).action !== "type" || calls.at(-1).params.method !== "type") {
+      throw new Error("method 'type' must reach the extension: " + JSON.stringify(calls.at(-1)));
+    }
+
+    console.log("ACTION_AS_TOOL_OK");
+    process.exit(0);
+  `;
+  let stdout = "";
+  try {
+    ({ stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]));
+  } catch (err) {
+    throw new Error("action-as-tool child: " + String(err.stdout || "") + " | " + String(err.stderr || "").slice(0, 400));
+  }
+  assert.ok(stdout.includes("ACTION_AS_TOOL_OK"));
+});
+
 // One tool with a parameter serves several intents. What each parameter value must do is
 // reach the protocol action that performs it — a tool that accepts a mode and then runs the
 // wrong action is worse than one that never offered it.
@@ -1586,3 +1782,33 @@ test("browser_navigate and browser_tabs dispatch properly (F98)", async () => {
 
 
 
+
+// Windows `stop` kills what listens on the bridge port, and only that: Chrome holds a client
+// connection to the same port and appears in the same netstat output.
+test("CLI: stop on Windows picks the listener out of netstat, not its clients", async () => {
+  const { readFileSync } = await import("node:fs");
+  const vm = await import("node:vm");
+  const src = readFileSync(cliPath, "utf8");
+  const start = src.indexOf("function listenerPidsFromNetstat(");
+  assert.ok(start >= 0, "listenerPidsFromNetstat not found in cli.js");
+  const end = src.indexOf("\n}\n", start) + 2;
+  const ctx = vm.createContext({});
+  vm.runInContext(src.slice(start, end) + "\nglobalThis.__fn = listenerPidsFromNetstat;", ctx);
+  const out = [
+    "Active Connections",
+    "  Proto  Local Address          Foreign Address        State           PID",
+    "  TCP    0.0.0.0:8765           0.0.0.0:0              LISTENING       4100",
+    "  TCP    127.0.0.1:8765         127.0.0.1:51234        ESTABLISHED     4100",
+    "  TCP    127.0.0.1:51234        127.0.0.1:8765         ESTABLISHED     9900",
+    "  TCP    0.0.0.0:18765          0.0.0.0:0              LISTENING       7000",
+    "  TCP    [::]:8765              [::]:0                 LISTENING       4100",
+  ].join("\r\n");
+  assert.deepEqual([...ctx.__fn(out, 8765)], ["4100"]);
+});
+
+// browser_stop ends the bridge that answers, identified by the pid it reports for itself —
+// not a pid remembered in the state file, which can be stale and belong to anything by now.
+test("MCP: browser_stop ends the running bridge, found by the pid it reports", async () => {
+  const stdout = await runChild("stop-bridge.mjs");
+  assert.ok(stdout.includes("STOP_BRIDGE_OK"));
+});

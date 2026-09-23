@@ -198,6 +198,22 @@ async function main() {
       const r = await cmd("get_property", { property: "text", ref: iframeBtnRef });
       assert(/Iframe Clicked/.test(r.value || r.text || JSON.stringify(r)), `expected "Iframe Clicked", got ${JSON.stringify(r)}`);
     });
+    // The MCP surface passes the same ref as 'target', so the frame has to be read from there too.
+    await test("frame-qualified ref passed as target reaches the right frame", async () => {
+      const r = await cmd("get_property", {
+        property: "text",
+        target: "@" + iframeBtnRef.replace(/^@/, ""),
+      });
+      assert(
+        /Iframe Clicked/.test(r.value || JSON.stringify(r)),
+        `target missed the iframe: ${JSON.stringify(r)}`
+      );
+      const c = await cmd("click", { target: iframeBtnRef });
+      assert(
+        c.resolved && c.resolved.matchCount === 1,
+        `click by target did not resolve in the frame: ${JSON.stringify(c)}`
+      );
+    });
   } finally {
     await teardown();
     await test("cleanup leaves no tab and no synced group behind", async () => {

@@ -20,6 +20,16 @@ function envStr(name, fallback) {
 }
 
 const BRIDGE_URL = envStr("BROWSERCTL_BRIDGE_URL", envStr("BRIDGE_URL", "http://127.0.0.1:8765"));
+// The port a spawned or stopped bridge uses: the one in BRIDGE_URL, so a custom URL is where
+// the daemon is started and looked for.
+const BRIDGE_PORT = (() => {
+  try {
+    const u = new URL(BRIDGE_URL);
+    return Number(u.port) || (u.protocol === "https:" ? 443 : 80);
+  } catch {
+    return 8765;
+  }
+})();
 // Names this invocation in the bridge call log. One id per command, because a CLI process is
 // one command — there is no session to group.
 const CLIENT = { session: `cli-${process.pid}`, source: "cli" };
@@ -131,14 +141,13 @@ async function startBridgeDaemon() {
 
   isStartingDaemon = (async () => {
     const serverPath = join(__dirname, "bridge", "server.js");
-    if (!fs.existsSync(serverPath)) return false;
-
     try {
+      if (!fs.existsSync(serverPath)) return false;
       const child = spawn(process.execPath, [serverPath], {
         detached: true,
         stdio: "ignore",
         windowsHide: true,
-        env: { ...process.env, PORT: "8765" },
+        env: { ...process.env, PORT: String(BRIDGE_PORT) },
       });
       child.unref();
 
@@ -147,7 +156,7 @@ async function startBridgeDaemon() {
         await new Promise((r) => setTimeout(r, 100));
         if (await isBridgeRunning()) {
           try {
-            markDaemonRunning({ pid: child.pid, port: 8765, url: BRIDGE_URL });
+            markDaemonRunning({ pid: child.pid, port: BRIDGE_PORT, url: BRIDGE_URL });
           } catch {}
           return true;
         }
@@ -163,24 +172,43 @@ async function startBridgeDaemon() {
   return isStartingDaemon;
 }
 
+// PIDs listening on the port, from `netstat -ano` output. A listener's local address ends in
+// the port and its remote address is the wildcard; the clients connected to it (Chrome's
+// WebSocket among them) have a real remote address and are left alone.
+function listenerPidsFromNetstat(out, port) {
+  const pids = new Set();
+  for (const line of out.split(/\r?\n/)) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 4 || !/^TCP$/i.test(parts[0])) continue;
+    const [, local, remote] = parts;
+    const pid = parts[parts.length - 1];
+    if (!local.endsWith(`:${port}`)) continue;
+    if (!/^(?:0\.0\.0\.0|\[::\]):0$/.test(remote)) continue;
+    if (/^\d+$/.test(pid) && pid !== "0") pids.add(pid);
+  }
+  return [...pids];
+}
+
 function stopBridgeDaemon() {
   try {
     if (process.platform === "win32") {
-      const out = execSync("netstat -ano | findstr :8765", { encoding: "utf8" });
-      const lines = out.trim().split("\n");
-      for (const line of lines) {
-        const parts = line.trim().split(/\s+/);
-        const pid = parts[parts.length - 1];
-        if (/^\d+$/.test(pid) && pid !== "0") {
-          try {
-            execSync(`taskkill /F /PID ${pid}`);
-          } catch {}
+      const out = execSync("netstat -ano -p TCP", { encoding: "utf8" });
+      const v6 = (() => {
+        try {
+          return execSync("netstat -ano -p TCPv6", { encoding: "utf8" });
+        } catch {
+          return "";
         }
+      })();
+      for (const pid of listenerPidsFromNetstat(out + "\n" + v6, BRIDGE_PORT)) {
+        try {
+          execSync(`taskkill /F /PID ${pid}`);
+        } catch {}
       }
       markDaemonStopped({ stoppedBy: "cli_stop" });
       return true;
     } else {
-      const pids = execSync("lsof -ti :8765 -sTCP:LISTEN", { encoding: "utf8" })
+      const pids = execSync(`lsof -ti :${BRIDGE_PORT} -sTCP:LISTEN`, { encoding: "utf8" })
         .trim()
         .split("\n")
         .filter(Boolean);
@@ -224,7 +252,7 @@ async function ensureBridge(autoDaemon = true, forceAuto = false) {
   }
 
   process.stderr.write(
-    "[browserctl] Bridge daemon not detected. Starting bridge on http://127.0.0.1:8765...\n"
+    `[browserctl] Bridge daemon not detected. Starting bridge on ${BRIDGE_URL}...\n`
   );
   const started = await startBridgeDaemon();
   if (started) {
@@ -412,7 +440,7 @@ async function main() {
 
   if (action === "start" || action === "daemon") {
     if (await isBridgeRunning()) {
-      markDaemonRunning({ port: 8765, url: BRIDGE_URL });
+      markDaemonRunning({ port: BRIDGE_PORT, url: BRIDGE_URL });
       const out = { ok: true, message: "Bridge is already running", url: BRIDGE_URL };
       if (prettyOutput) console.log(JSON.stringify(out, null, 2));
       else if (jsonOutput) console.log(JSON.stringify(out));
@@ -592,6 +620,16 @@ async function main() {
         if (compactMode || (!jsonOutput && !prettyOutput)) params.compact = true;
         if (rawArgs.includes("--all")) params.scope = "all";
         if (args[0] && /^\d+$/.test(args[0])) params.maxText = parseInt(args[0], 10);
+        for (let i = 0; i < rawArgs.length; i++) {
+          const m = /^--cursor(?:=(.*))?$/.exec(rawArgs[i]);
+          if (!m) continue;
+          const n = Number(m[1] ?? rawArgs[i + 1]);
+          if (!Number.isInteger(n) || n < 0) {
+            console.error("snapshot: --cursor needs a whole number, e.g. --cursor 60");
+            process.exit(2);
+          }
+          params.cursor = n;
+        }
         break;
 
       case "read_page":
@@ -684,6 +722,13 @@ async function main() {
             params.text = args[++i];
           } else if (/^@|^\d+$/.test(args[i])) {
             parseTarget(args[i], params);
+          } else if (
+            !fs.existsSync(resolvePath(args[i])) &&
+            /^[#.[]/.test(args[i]) &&
+            !/^\.\.?[\\/]/.test(args[i])
+          ) {
+            // Not a file on disk and shaped like a CSS selector: it names the input.
+            params.selector = args[i];
           } else {
             (params.files || (params.files = [])).push(resolvePath(args[i]));
           }
@@ -768,8 +813,11 @@ async function main() {
 
       case "screenshot":
       case "screenshot_fullpage": {
+        if (fullpageMode || action === "screenshot_fullpage") {
+          params.fullPage = true;
+          params.format = "png";
+        }
         action = "screenshot";
-        if (fullpageMode) params.format = "png";
         if (args[0] && !args[0].startsWith("-")) {
           saveFilePath = args[0];
         }
@@ -869,9 +917,13 @@ async function main() {
       case "find":
       case "find_text":
         if (args.length) {
-          params.query = args.filter((a) => !a.startsWith("-")).join(" ");
-          const max = rawArgs.indexOf("--max");
-          if (max >= 0 && rawArgs[max + 1]) params.max = parseInt(rawArgs[max + 1], 10);
+          const words = [];
+          for (let i = 0; i < args.length; i++) {
+            if (args[i] === "--max") {
+              if (args[i + 1]) params.max = parseInt(args[++i], 10);
+            } else if (!args[i].startsWith("-")) words.push(args[i]);
+          }
+          params.query = words.join(" ");
         }
         if (!params.query) {
           console.error(`${action}: needs a query, e.g. browserctl ${action} "Sign in"`);

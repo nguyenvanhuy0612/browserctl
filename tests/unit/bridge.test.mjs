@@ -76,8 +76,9 @@ test("computeTimeoutMs: default action uses the (overridable) command timeout", 
   assert.equal(computeTimeoutMs("click", {}), TEST_COMMAND_TIMEOUT_MS);
 });
 
-test("computeTimeoutMs: wait_for/wait_network_idle honor caller timeoutMs + buffer", () => {
+test("computeTimeoutMs: wait_for/wait_settle/wait_network_idle honor caller timeoutMs + buffer", () => {
   assert.equal(computeTimeoutMs("wait_for", { timeoutMs: 60_000 }), 65_000);
+  assert.equal(computeTimeoutMs("wait_settle", { timeoutMs: 45_000 }), 50_000);
   assert.equal(computeTimeoutMs("wait_network_idle", { timeoutMs: 1_000 }), 6_000);
 });
 

@@ -16,7 +16,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SRC = readFileSync(join(__dirname, "..", "..", "extension", "background.js"), "utf8");
 
 function extractFunction(name) {
-  const m = SRC.match(new RegExp(`async function\\s+${name}\\s*\\(`));
+  const m = SRC.match(new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\(`));
   if (!m) throw new Error(`function ${name} not found in background.js`);
   const braceStart = SRC.indexOf("{", SRC.indexOf(")", m.index));
   let depth = 0;
@@ -99,4 +99,35 @@ test("an unmeasured effect (autoSettle off) is left alone", async () => {
   const out = await fn(reply, 1, "https://example.com/");
   assert.equal(out.result.effect.urlChanged, false);
   assert.equal(seen.length, 0);
+});
+
+function loadFrameRoute() {
+  const ctx = vm.createContext({});
+  vm.runInContext(extractFunction("frameRoute") + "\nglobalThis.__fn = frameRoute;", ctx);
+  return ctx.__fn;
+}
+
+test("a frame-qualified ref in 'target' routes to that frame", () => {
+  const frameRoute = loadFrameRoute();
+  for (const target of ["@f3:ref_5", "f3:ref_5", "@f3:@ref_5"]) {
+    const out = frameRoute({ target, tabId: 7 });
+    assert.equal(out.frameId, 3, target);
+    assert.equal(out.params.target, "@ref_5", target);
+    assert.equal(out.params.tabId, 7);
+  }
+});
+
+test("text in 'target' that only looks frame-qualified stays in the top frame", () => {
+  const frameRoute = loadFrameRoute();
+  for (const target of ["f2: Settings", "f1:help", "css=#a", 4]) {
+    const out = frameRoute({ target });
+    assert.equal(out.frameId, 0, String(target));
+    assert.equal(out.params.target, target);
+  }
+});
+
+test("the CLI's frame-qualified 'ref' still routes", () => {
+  const out = loadFrameRoute()({ ref: "@f12:ref_3" });
+  assert.equal(out.frameId, 12);
+  assert.equal(out.params.ref, "ref_3");
 });
