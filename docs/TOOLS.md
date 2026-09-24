@@ -1,4 +1,4 @@
-# Tool surface as it actually is — generated 2026-09-23, browserctl 0.8.4
+# Tool surface as it actually is — generated 2026-09-24, browserctl 0.9.0
 
 Generated from the running server (`server._registeredTools`), not written by hand — the last
 hand-written version of this list claimed `all` on a tool that did not have it.
@@ -25,7 +25,7 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 | `select_option` | *target, values, value, option, label, format | [ACT] Select one or more options in a <select> element. Values are matched by value first, then by visible label. |
 | `press_key` | *key, target, modifiers, allowSynthetic, format | [ACT] Send a key, or a chord with modifiers, to an element or to whatever has focus. |
 | `scroll` | direction, amount, target, format | [ACT] Scroll the page, or a specific container when the window itself does not move — a drawer, a table, an overflow:auto div. |
-| `hover` | *target, format | [ACT] Move the pointer onto an element, to open a flyout menu or raise a tooltip. |
+| `hover` | *target, format | [ACT] Send the pointer and mouse events of hovering an element, to open a flyout menu or raise a tooltip. A menu shown by CSS :hover alone does not open this way; its items are usually already in browser_snapshot, tagged [hidden until hover/focus]. |
 | `file_upload` | target, files, file, format | [ACT] Attach one or more local files to an <input type=file> and fire the page's change/input handlers, the way a human's file picker does. |
 | `wait_for` | for, selector, text, gone, timeoutMs, format | [WAIT] Wait for a selector or page text to appear, or to disappear with gone: true. |
 | `take_screenshot` | fullPage, target, format, quality | [WAIT] Capture the target tab as an image, without activating it. JPEG by default; format: 'png' for a lossless one. |
@@ -119,7 +119,7 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 | `describe_element` | *target, format | Given a 'target' (ref '@ref_1', CSS selector, visible text, or snapshot index), return everything useful for debugging it: tag, full attribute dump, bounding rect, visibility verdict WITH the specific reason ('visible' \| 'display:none' \| 'visibility:hidden' \| 'zero-size rect' \| 'opacity:0' \| 'disabled'), and whether it matches the interactive selector. Pierces open Shadow DOM. |
 | `a11y_snapshot` | max, format | SECOND OPINION on the page, from Chrome itself. Returns Chrome's own accessibility tree — the role, name and state it computes for every control by the HTML-AAM spec — not browserctl's census. Each node carries a 'ref' where the census has the same control, so results are directly actionable. |
 | `read_pdf` | format | Call this when the target tab is showing a PDF (browser_get_content/browser_find/browser_snapshot/browser_click all fail on a PDF tab with 'no readable DOM' — Chrome's built-in PDF viewer isn't a real DOM, so those tools cannot see its text). Returns the tab's URL and an isPdf verdict; this extension does NOT extract PDF text itself (a hand-rolled parser silently mis-reads subset/CID-font PDFs — dangerous for numeric data like a rate sheet). Fetch the returned URL yourself and read it with your own PDF-reading capability instead of retrying the DOM-based tools. |
-| `element_screenshot` | *target, format | Capture just one element as an image, named by 'target' (ref '@ref_1', CSS selector, visible text, or snapshot index). Same capture as browser_take_screenshot with a target. Requires browser_cdp_attach. |
+| `element_screenshot` | *target, format | Capture just one element as an image, named by 'target' (ref '@ref_1', CSS selector, visible text, or snapshot index). Same capture as browser_take_screenshot with a target: a visible tab is cropped without the debugger, a background tab attaches it. |
 | `print_pdf` | format | Render the page to a PDF; returns base64 (save it to a .pdf file). Requires browser_cdp_attach. |
 | `go_back` | format | Navigate back in the target tab's history. |
 | `go_forward` | format | Navigate forward in the target tab's history. |

@@ -63,11 +63,11 @@
     return err;
   }
 
-  function visibilityReason(el) {
+  function visibilityReason(el, { ignoreDisabled = false } = {}) {
     const style = getComputedStyle(el);
     if (style.display === "none") return "display:none";
     if (style.visibility === "hidden") return "visibility:hidden";
-    if (el.disabled) return "disabled";
+    if (el.disabled && !ignoreDisabled) return "disabled";
     if (style.opacity === "0") return "opacity:0";
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return "zero-size rect";
@@ -123,8 +123,14 @@
     }
   }
 
+  // A disabled control is still on screen and still tells the reader something (the form is
+  // incomplete), so the census lists it, tagged [disabled], though it cannot be acted on.
   function isCensusVisible(el) {
-    return isVisible(el) || isOperableDespiteHidden(el) || isRevealable(el);
+    return isVisible(el) || isShownDisabled(el) || isOperableDespiteHidden(el) || isRevealable(el);
+  }
+
+  function isShownDisabled(el) {
+    return !!el.disabled && visibilityReason(el, { ignoreDisabled: true }) === null;
   }
 
   function isInViewport(el) {
@@ -147,6 +153,43 @@
 
   const CONVENTIONAL_TRACKING =
     /^(utm_|_?ga(_|$)|_hs|mc_[ce]id$|vero_|s_kwcid$)|clid$|^ref(errer)?$/i;
+
+  // A control's state as census tags. A state that is on reads as its name ("checked"); the
+  // off side is spelled out only where it is an answer in itself — an unchecked box, a closed
+  // menu — and omitted where "not selected" is just the default.
+  const OFF_TAGS = { checked: "unchecked", expanded: "collapsed" };
+  function stateTags(state) {
+    if (!state) return [];
+    const tags = [];
+    for (const [k, v] of Object.entries(state)) {
+      if (v === "true") tags.push(k);
+      else if (v === "false") {
+        if (OFF_TAGS[k]) tags.push(OFF_TAGS[k]);
+      } else if (v === "page" || v === "mixed") tags.push(`${k}=${v}`);
+    }
+    return tags;
+  }
+
+  // The state a native control carries in properties rather than aria-* attributes: whether a
+  // checkbox or radio is checked, and whether a form control is disabled.
+  function nativeState(el) {
+    const out = {};
+    const type = el.tagName === "INPUT" ? (el.type || "").toLowerCase() : "";
+    if (type === "checkbox" || type === "radio") out.checked = String(!!el.checked);
+    if ("disabled" in el && el.disabled === true) out.disabled = "true";
+    return out;
+  }
+
+  // Everything a control's state is read from: its properties (a native checkbox's checked,
+  // a disabled field), then its aria-* attributes, which win where both are set.
+  function controlState(el) {
+    const state = nativeState(el);
+    for (const a of STATE_ATTRS) {
+      const v = el.getAttribute(a);
+      if (v !== null && v !== "") state[a.replace("aria-", "")] = v;
+    }
+    return state;
+  }
 
   function shortHref(href) {
     if (!href) return href;
@@ -706,12 +749,17 @@
 
   const TEXT_IS_CONTENT = new Set(["SELECT", "TEXTAREA", "OPTION", "PROGRESS", "METER"]);
 
+  // The name a control is listed under: its rendered text, then aria-label / aria-labelledby,
+  // image alt, the form <label>, title / placeholder, and textContent last. Rendered text means
+  // innerText: textContent also carries an SVG's <title> and hidden text, so taken first it
+  // would outrank the aria-label the page gave the control.
   function fullElementText(el) {
     if (!el) return "";
     let text = "";
     try {
       if (!TEXT_IS_CONTENT.has(el.tagName)) {
-        text = (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ");
+        const rendered = typeof el.innerText === "string" ? el.innerText : el.textContent;
+        text = (rendered || "").trim().replace(/\s+/g, " ");
       }
     } catch {}
     if (text) return text;
@@ -759,6 +807,11 @@
     } catch {}
 
     try {
+      const formLabel = controlLabelOf(el);
+      if (formLabel) return formLabel;
+    } catch {}
+
+    try {
       attr = (
         el.getAttribute("title") ||
         el.getAttribute("alt") ||
@@ -769,11 +822,6 @@
     if (attr) return attr;
 
     try {
-      const formLabel = controlLabelOf(el);
-      if (formLabel) return formLabel;
-    } catch {}
-
-    try {
       const tag = el.tagName;
       const type = (el.getAttribute("type") || "").toLowerCase();
       if (tag === "INPUT" && ["button", "submit", "reset"].includes(type)) {
@@ -782,10 +830,25 @@
       }
     } catch {}
     try {
-      return slotLabelOf(el) || "";
+      const slotted = slotLabelOf(el);
+      if (slotted) return slotted;
+    } catch {}
+    try {
+      return (el.textContent || "").trim().replace(/\s+/g, " ");
     } catch {
       return "";
     }
+  }
+
+  // A label's own words. A label that wraps its control would otherwise also carry the
+  // control's text — every option of a <select>, the value of a textarea.
+  function labelOwnText(label) {
+    if (!label.querySelector || !label.querySelector("select, textarea, input, datalist")) {
+      return label.innerText || label.textContent || "";
+    }
+    const copy = label.cloneNode(true);
+    for (const n of copy.querySelectorAll("select, textarea, input, datalist")) n.remove();
+    return copy.textContent || "";
   }
 
   function controlLabelOf(el) {
@@ -816,13 +879,13 @@
     if (el.id) {
       try {
         const lab = labelForId(el);
-        const t = lab && clean(lab.innerText);
+        const t = lab && clean(labelOwnText(lab));
         if (t) return t;
       } catch {}
     }
     const wrapping = el.closest && el.closest("label");
     if (wrapping) {
-      const t = clean(wrapping.innerText);
+      const t = clean(labelOwnText(wrapping));
       if (t) return t;
     }
     let node = el.parentElement;
@@ -928,6 +991,13 @@
     else el.value = value;
   }
 
+  // Inputs, textareas and selects are listed first, under their own heading, and only there:
+  // the rest of the census continues without them, so each control appears once.
+  function splitHoistedInputs(elements) {
+    const isInput = (e) => e.tag === "input" || e.tag === "textarea" || e.tag === "select";
+    return { hoisted: elements.filter(isInput), listed: elements.filter((e) => !isInput(e)) };
+  }
+
   function snapshot(params = {}) {
     const maxText = params.maxText ?? 4000;
     const compact = !!params.compact;
@@ -1002,7 +1072,7 @@
       if (region) item.region = region;
       if (info.truncatedBy > 0) item.textTruncatedBy = info.truncatedBy;
       try {
-        if (!isVisible(el)) {
+        if (!isVisible(el) && !isShownDisabled(el)) {
           if (isOperableDespiteHidden(el)) item.viaLabel = true;
           else if (isRevealable(el)) item.revealOn = "hover/focus";
         }
@@ -1010,10 +1080,8 @@
       try {
         const r = el.getAttribute("role");
         if (r) item.role = r;
-        for (const a of STATE_ATTRS) {
-          const v = el.getAttribute(a);
-          if (v !== null && v !== "") (item.state || (item.state = {}))[a.replace("aria-", "")] = v;
-        }
+        const state = controlState(el);
+        if (Object.keys(state).length) item.state = state;
       } catch {}
       if (el.tagName === "A" && el.href) {
         item.href = el.getAttribute("href");
@@ -1021,7 +1089,9 @@
       }
       if (el.tagName === "INPUT") {
         item.type = el.type || "text";
-        item.value = el.value || "";
+        // A checkbox or radio's value is what it submits ("on" unless set), not its state.
+        const choice = item.type === "checkbox" || item.type === "radio";
+        item.value = choice && el.value === "on" ? "" : el.value || "";
         if (el.placeholder) item.placeholder = el.placeholder;
       }
       if (el.tagName === "TEXTAREA") item.value = el.value || "";
@@ -1095,17 +1165,14 @@
         return "";
       };
 
+      const listedRefs = new Set();
       const formatDesc = (e) => {
+        listedRefs.add(e.ref);
         let desc = `[@${e.ref}] <${e.tag}>`;
         if (e.role && e.role !== "button" && e.role !== "link") desc += `[${e.role}]`;
         if (e.type) desc += `[type=${e.type}]`;
-        if (e.state) {
-          const on = Object.entries(e.state)
-            .filter(([, v]) => v === "true" || v === "false" || v === "page" || v === "mixed")
-            .map(([k, v]) => (v === "true" ? k : v === "false" ? "" : `${k}=${v}`))
-            .filter(Boolean);
-          if (on.length) desc += `[${on.join(",")}]`;
-        }
+        const tags = stateTags(e.state);
+        if (tags.length) desc += `[${tags.join(",")}]`;
         if (e.text) desc += ` "${e.text}"`;
         if (e.textTruncatedBy) desc += ` [+${e.textTruncatedBy} chars: get text @${e.ref}]`;
         if (e.viaLabel) desc += "[via label]";
@@ -1169,9 +1236,7 @@
         );
       }
 
-      const keyInputs = elements.filter(
-        (e) => e.tag === "input" || e.tag === "textarea" || e.tag === "select"
-      );
+      const { hoisted: keyInputs, listed } = splitHoistedInputs(elements);
       if (keyInputs.length > 0) {
         lines.push("[Key Inputs & Search Fields]");
         for (const inp of keyInputs) {
@@ -1185,8 +1250,8 @@
       const MAX_MAIN_LINKS = 12;
 
       let i = 0;
-      while (i < elements.length) {
-        const e = elements[i];
+      while (i < listed.length) {
+        const e = listed[i];
         if (e.landmark !== lastLandmark || e.region !== lastRegion) {
           lastLandmark = e.landmark;
           lastRegion = e.region;
@@ -1196,17 +1261,17 @@
           else if (e.landmark === "nav") lines.push(`[Navigation${named}]`);
         }
 
-        if (elements.length > 30 && e.landmark === "main" && e.tag === "a") {
+        if (listed.length > 30 && e.landmark === "main" && e.tag === "a") {
           mainLinksCount++;
           if (mainLinksCount > MAX_MAIN_LINKS) {
             let foldRunEnd = i;
             const foldedRefs = [];
             while (
-              foldRunEnd < elements.length &&
-              elements[foldRunEnd].landmark === "main" &&
-              elements[foldRunEnd].tag === "a"
+              foldRunEnd < listed.length &&
+              listed[foldRunEnd].landmark === "main" &&
+              listed[foldRunEnd].tag === "a"
             ) {
-              foldedRefs.push(`@${elements[foldRunEnd].ref}`);
+              foldedRefs.push(`@${listed[foldRunEnd].ref}`);
               foldRunEnd++;
             }
             if (foldedRefs.length > 0) {
@@ -1214,7 +1279,7 @@
               const sampleRefs =
                 foldedRefs.slice(0, 5).join(", ") +
                 (foldedRefs.length > 5 ? `, ... +${foldedRefs.length - 5} more` : "");
-              const foldedEls = elements
+              const foldedEls = listed
                 .slice(i, foldRunEnd)
                 .map((x) => indexedElements[x.index])
                 .filter(Boolean);
@@ -1231,8 +1296,8 @@
 
         const sig = `${e.tag}|${e.type || ""}|${e.text}|${e.placeholder || ""}`;
         let runEnd = i + 1;
-        while (runEnd < elements.length) {
-          const next = elements[runEnd];
+        while (runEnd < listed.length) {
+          const next = listed[runEnd];
           const nextSig = `${next.tag}|${next.type || ""}|${next.text}|${next.placeholder || ""}`;
           if (nextSig === sig && next.landmark === e.landmark) {
             runEnd++;
@@ -1243,11 +1308,11 @@
 
         const runLen = runEnd - i;
         if (runLen > 3) {
-          lines.push(`  ` + formatDesc(elements[i]));
-          lines.push(`  ` + formatDesc(elements[i + 1]));
+          lines.push(`  ` + formatDesc(listed[i]));
+          lines.push(`  ` + formatDesc(listed[i + 1]));
           const folded = runLen - 2;
           foldedCount += folded;
-          const foldedRefs = elements
+          const foldedRefs = listed
             .slice(i + 2, runEnd)
             .map((x) => `@${x.ref}`)
             .join(", ");
@@ -1267,6 +1332,12 @@
       }
 
       res.census = lines.join("\n");
+      // The controls the census names only inside a summary line (a folded run, a duplicate
+      // link), with what it takes to act on each one.
+      const folded = elements
+        .filter((e) => !listedRefs.has(e.ref))
+        .map((e) => ({ ref: e.ref, text: e.text, ...(e.href ? { href: e.href } : {}) }));
+      if (folded.length) res.folded = folded;
       res.foldedCount = foldedCount;
       res.duplicateCount = duplicateCount;
       if (structureSummary) res.structure = structureSummary;
@@ -1980,6 +2051,10 @@
     return TAG_ROLE[tag] || null;
   }
 
+  const FORM_FIELD_TAGS = new Set(["INPUT", "SELECT", "TEXTAREA"]);
+
+  // The name the resolver and find match against. A form field's <label> outranks its
+  // placeholder, as in the census.
   function accessibleName(el) {
     const pick = (s) => (s ? fromPage(String(s).trim().replace(/\s+/g, " ")).slice(0, 100) : "");
     let n = pick(el.getAttribute && el.getAttribute("aria-label"));
@@ -1992,19 +2067,19 @@
         if (n) return n;
       }
     }
+    if (FORM_FIELD_TAGS.has(el.tagName)) {
+      const lab = (el.id && labelForId(el)) || (el.closest && el.closest("label"));
+      if (lab) {
+        n = pick(labelOwnText(lab));
+        if (n) return n;
+      }
+    }
     n = pick(el.getAttribute && el.getAttribute("placeholder"));
     if (n) return n;
     n = pick(el.getAttribute && el.getAttribute("title"));
     if (n) return n;
     n = pick(el.getAttribute && el.getAttribute("alt"));
     if (n) return n;
-    if (el.id) {
-      const lab = labelForId(el);
-      if (lab) {
-        n = pick(lab.innerText);
-        if (n) return n;
-      }
-    }
     const txt = TEXT_IS_CONTENT.has(el.tagName) ? "" : pick(el.innerText || el.textContent);
     if (txt.length >= 3) return txt;
 
@@ -2073,9 +2148,7 @@
           let line = "  ".repeat(d) + (role || child.tagName.toLowerCase());
           if (name) line += ` "${name}"`;
           try {
-            const st = STATE_ATTRS.map((a) => [a.replace("aria-", ""), child.getAttribute(a)])
-              .filter(([, v]) => v === "true" || v === "mixed" || v === "page")
-              .map(([k, v]) => (v === "true" ? k : `${k}=${v}`));
+            const st = stateTags(controlState(child));
             if (st.length) line += ` [${st.join(",")}]`;
           } catch {}
           if (interactive) line += ` [${getOrAssignRef(child)}]`;
@@ -2292,11 +2365,16 @@
           : {}),
       };
     }
-    const hits = matchesByText(query, { max });
-    const out = hits.map(({ el, step }) => ({
+    // Gather beyond 'max' so that ranking can bring an exact match forward from late in the page.
+    const pool = matchesByText(query, { max: Math.max(max * 3, 60) }).map((h) => ({
+      ...h,
+      name: accessibleName(h.el),
+    }));
+    const hits = rankByMatch(pool, query, (h) => [h.name, elementText(h.el)]).slice(0, max);
+    const out = hits.map(({ el, step, name }) => ({
       ref: getOrAssignRef(el),
       role: roleOf(el) || el.tagName.toLowerCase(),
-      name: accessibleName(el),
+      name,
       tag: el.tagName.toLowerCase(),
       matchedBy: step,
       clickable: step !== "text-container",
@@ -2319,6 +2397,27 @@
       };
     }
     return { count: out.length, matches: out };
+  }
+
+  // Orders matches by how closely a name answers the query: an exact name first, then one that
+  // starts a word with it, then any other substring. Page order is kept within each tier.
+  function matchTier(names, query) {
+    const q = foldText(String(query).trim());
+    let best = 2;
+    for (const raw of names) {
+      const n = foldText(String(raw || "").trim());
+      if (!n) continue;
+      if (n === q) return 0;
+      if (n.startsWith(q) || n.includes(" " + q)) best = 1;
+    }
+    return best;
+  }
+
+  function rankByMatch(items, query, namesOf) {
+    return items
+      .map((item, i) => ({ item, i, tier: matchTier(namesOf(item), query) }))
+      .sort((a, b) => a.tier - b.tier || a.i - b.i)
+      .map((x) => x.item);
   }
 
   const BLOCK_TAGS = new Set([
@@ -2710,7 +2809,7 @@
     }
     el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContent" }));
     for (const ch of String(text)) {
-      const keyOpts = { key: ch, bubbles: true, cancelable: true };
+      const keyOpts = { ...keyDetails(ch), bubbles: true, cancelable: true };
       const proceed = el.dispatchEvent(new KeyboardEvent("keydown", keyOpts));
       el.dispatchEvent(new KeyboardEvent("keypress", keyOpts));
       if (proceed) {
@@ -2861,7 +2960,7 @@
       insertIntoEditable(el, text, { paste: method === "paste" });
     }
     if (submit) {
-      const opts = { bubbles: true, cancelable: true, key: "Enter", code: "Enter", keyCode: 13 };
+      const opts = { bubbles: true, cancelable: true, ...keyDetails("Enter") };
       const form = el.form;
       let submittedByKey = false;
       const noteSubmit = () => {
@@ -2920,7 +3019,7 @@
     const mutations = startMutationCounter();
     insertIntoEditable(el, text, { paste: true });
     if (submit) {
-      const opts = { bubbles: true, cancelable: true, key: "Enter", code: "Enter", keyCode: 13 };
+      const opts = { bubbles: true, cancelable: true, ...keyDetails("Enter") };
       const form = el.form;
       let submittedByKey = false;
       const noteSubmit = () => {
@@ -2996,7 +3095,16 @@
     return bestEl;
   }
 
-  function scroll({ direction = "down", amount = 400, target, ref, selector, index } = {}) {
+  // A hidden tab does not run the rendering step that fires 'scroll', so a page listening for
+  // it (infinite feeds, lazy images, sticky headers) never hears a scroll made in the
+  // background. The event is dispatched by hand there; a visible tab fires its own.
+  function announceScroll(node) {
+    if (document.visibilityState !== "hidden" || !node) return false;
+    node.dispatchEvent(new Event("scroll", { bubbles: node.nodeType === 9 }));
+    return true;
+  }
+
+  function scrollOnce({ direction = "down", amount = 400, target, ref, selector, index } = {}) {
     const isUp = direction === "up";
     const isLeft = direction === "left";
     const isRight = direction === "right";
@@ -3017,11 +3125,14 @@
               left: isLeft ? -amount : isRight ? amount : 0,
               behavior: "instant" in window ? "instant" : "auto",
             });
-            return {
-              scrolledY: el.contentWindow.scrollY,
-              target: target || ref || selector || index,
-              resolved: el._resolved,
-            };
+            return [
+              el.contentWindow.document,
+              {
+                scrolledY: el.contentWindow.scrollY,
+                target: target || ref || selector || index,
+                resolved: el._resolved,
+              },
+            ];
           } catch {}
         }
         if (el.scrollHeight <= el.clientHeight + 2 && el.scrollWidth <= el.clientWidth + 2) {
@@ -3049,14 +3160,17 @@
         } else {
           el.scrollBy({ top: delta, behavior: "instant" in window ? "instant" : "auto" });
         }
-        return {
-          scrolledY: el.scrollTop,
-          scrolledX: el.scrollLeft,
-          delta: isLeft || isRight ? el.scrollLeft - prevLeft : el.scrollTop - prevTop,
-          target: target || ref || selector || index,
-          container: el.tagName.toLowerCase() + (el.id ? `#${el.id}` : ""),
-          resolved: el._resolved,
-        };
+        return [
+          el,
+          {
+            scrolledY: el.scrollTop,
+            scrolledX: el.scrollLeft,
+            delta: isLeft || isRight ? el.scrollLeft - prevLeft : el.scrollTop - prevTop,
+            target: target || ref || selector || index,
+            container: el.tagName.toLowerCase() + (el.id ? `#${el.id}` : ""),
+            resolved: el._resolved,
+          },
+        ];
       }
     }
 
@@ -3069,13 +3183,13 @@
         left: isLeft ? -amount : amount,
         behavior: "instant" in window ? "instant" : "auto",
       });
-      return { scrolledX: window.scrollX, delta: window.scrollX - prevX };
+      return [document, { scrolledX: window.scrollX, delta: window.scrollX - prevX }];
     }
 
     if (rootScrollable) {
       window.scrollBy({ top: delta, behavior: "instant" in window ? "instant" : "auto" });
       if (window.scrollY !== prevY) {
-        return { scrolledY: window.scrollY, delta: window.scrollY - prevY };
+        return [document, { scrolledY: window.scrollY, delta: window.scrollY - prevY }];
       }
     }
 
@@ -3083,15 +3197,26 @@
     if (container) {
       const prevTop = container.scrollTop;
       container.scrollBy({ top: delta, behavior: "instant" in window ? "instant" : "auto" });
-      return {
-        scrolledY: container.scrollTop,
-        delta: container.scrollTop - prevTop,
-        container: container.tagName.toLowerCase() + (container.id ? `#${container.id}` : ""),
-      };
+      return [
+        container,
+        {
+          scrolledY: container.scrollTop,
+          delta: container.scrollTop - prevTop,
+          container: container.tagName.toLowerCase() + (container.id ? `#${container.id}` : ""),
+        },
+      ];
     }
 
     window.scrollBy({ top: delta, behavior: "instant" in window ? "instant" : "auto" });
-    return { scrolledY: window.scrollY, delta: window.scrollY - prevY };
+    return [document, { scrolledY: window.scrollY, delta: window.scrollY - prevY }];
+  }
+
+  // Every way of scrolling ends here, so the hidden-tab 'scroll' event is sent for whichever
+  // node actually moved.
+  function scroll(params = {}) {
+    const [moved, result] = scrollOnce(params);
+    announceScroll(moved);
+    return result;
   }
 
   async function dismiss_modal({ target, ref, selector } = {}) {
@@ -3154,14 +3279,7 @@
     }
 
     const escTarget = document.activeElement || active || document.body;
-    const evOpts = {
-      key: "Escape",
-      code: "Escape",
-      keyCode: 27,
-      which: 27,
-      bubbles: true,
-      cancelable: true,
-    };
+    const evOpts = { ...keyDetails("Escape"), bubbles: true, cancelable: true };
     for (const node of [escTarget, window]) {
       node.dispatchEvent(new KeyboardEvent("keydown", evOpts));
       node.dispatchEvent(new KeyboardEvent("keyup", evOpts));
@@ -3187,6 +3305,24 @@
     );
   }
 
+  // The events a pointer arriving over an element produces, pointer before mouse, at the
+  // element's centre: menus and tooltips built on pointer events (Radix, newer MUI) listen for
+  // the first, older code for the second. Enter events do not bubble. CSS :hover is not among
+  // what this can reach; only a real pointer sets it.
+  function dispatchHover(el) {
+    const r = el.getBoundingClientRect();
+    const at = { clientX: r.x + r.width / 2, clientY: r.y + r.height / 2, view: window };
+    const pointer = { ...at, pointerType: "mouse", isPrimary: true, pointerId: 1 };
+    const fire = (Ctor, type, bubbles, extra) =>
+      el.dispatchEvent(new Ctor(type, { bubbles, cancelable: bubbles, ...extra }));
+    fire(PointerEvent, "pointerover", true, pointer);
+    fire(PointerEvent, "pointerenter", false, pointer);
+    fire(MouseEvent, "mouseover", true, at);
+    fire(MouseEvent, "mouseenter", false, at);
+    fire(PointerEvent, "pointermove", true, pointer);
+    fire(MouseEvent, "mousemove", true, at);
+  }
+
   async function hover({
     target,
     index,
@@ -3199,10 +3335,7 @@
     const el = resolveTarget({ target, index, ref, selector, text });
     const warning = actionability(el);
     el.scrollIntoView({ block: "center", inline: "center" });
-    const opts = { bubbles: true, cancelable: true };
-    el.dispatchEvent(new MouseEvent("mouseover", opts));
-    el.dispatchEvent(new MouseEvent("mouseenter", opts));
-    el.dispatchEvent(new MouseEvent("mousemove", opts));
+    dispatchHover(el);
     if (autoSettle && settleMs > 0) {
       await wait_settle({ timeoutMs: settleMs });
     }
@@ -3292,6 +3425,42 @@
     return out;
   }
 
+  // The key, code and legacy keyCode a real keyboard puts on a KeyboardEvent. Pages still read
+  // keyCode / which (jQuery's event.which among them), so a synthetic event without them
+  // arrives as "no key".
+  const NAMED_KEYS = {
+    Enter: 13,
+    Tab: 9,
+    Escape: 27,
+    Backspace: 8,
+    Delete: 46,
+    ArrowLeft: 37,
+    ArrowUp: 38,
+    ArrowRight: 39,
+    ArrowDown: 40,
+    Home: 36,
+    End: 35,
+    PageUp: 33,
+    PageDown: 34,
+    Insert: 45,
+    Shift: 16,
+    Control: 17,
+    Alt: 18,
+    Meta: 91,
+    CapsLock: 20,
+  };
+  function keyDetails(key) {
+    const k = String(key);
+    const kd = (key, code, keyCode) => ({ key, code, keyCode, which: keyCode });
+    if (/^[a-z]$/i.test(k)) return kd(k, "Key" + k.toUpperCase(), k.toUpperCase().charCodeAt(0));
+    if (/^[0-9]$/.test(k)) return kd(k, "Digit" + k, k.charCodeAt(0));
+    const f = k.match(/^F([1-9]|1[0-2])$/);
+    if (f) return kd(k, k, 111 + Number(f[1]));
+    if (k === " " || k === "Space") return kd(" ", "Space", 32);
+    if (k in NAMED_KEYS) return kd(k, k, NAMED_KEYS[k]);
+    return kd(k, "", k.length === 1 ? k.toUpperCase().charCodeAt(0) : 0);
+  }
+
   function press_key({ key, target: targetInput, index, ref, modifiers }) {
     const named = targetInput !== undefined || index !== undefined || ref !== undefined;
     const target = named
@@ -3300,8 +3469,7 @@
     if (target.focus) target.focus();
     const set = new Set((modifiers || []).map((m) => String(m).toLowerCase()));
     const opts = {
-      key,
-      code: key,
+      ...keyDetails(key),
       bubbles: true,
       cancelable: true,
       altKey: set.has("alt"),
@@ -3531,7 +3699,15 @@
       x += fr.x + frame.clientLeft;
       y += fr.y + frame.clientTop;
     }
-    return { x, y, width: r.width, height: r.height };
+    // The top viewport's size, so a capture of the visible tab can be cropped to this box.
+    const top = window.top;
+    return {
+      x,
+      y,
+      width: r.width,
+      height: r.height,
+      viewport: { width: top.innerWidth, height: top.innerHeight },
+    };
   }
 
   function describe_element({ target, index, ref, selector, text, placeholder } = {}) {

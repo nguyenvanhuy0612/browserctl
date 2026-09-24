@@ -1,11 +1,18 @@
 # browserctl
 
-Universal Browser Control Protocol & MCP Server for AI Agents and Developers (v0.8.4).
+Universal Browser Control Protocol & MCP Server for AI Agents and Developers.
 
-browserctl provides 25 core tools (69 tools across all profiles) designed specifically for LLM agents to inspect, navigate, and drive real browser sessions with high token efficiency and deterministic execution.
+browserctl gives LLM agents a small core set of tools, with more loaded on demand, to inspect,
+navigate, and drive real browser sessions with high token efficiency and deterministic execution.
 
 **Setup:** see [docs/INSTALL.md](docs/INSTALL.md) — Node and browser prerequisites, installing or
 running via npx, loading the unpacked Chrome extension, and daemon configuration.
+
+**Is the extension safe to load?** It talks to one place only: the local bridge address you
+configure (default `127.0.0.1:8765`). It sends no analytics and contacts no other server, and it
+acts only on commands that arrive from that bridge. Its full source ships in the package, so you
+can read exactly what you load. It asks for broad permissions (all sites, `debugger`) because
+driving any page is its job.
 
 ## Architecture
 
@@ -32,6 +39,6 @@ running via npx, loading the unpacked Chrome extension, and daemon configuration
 ## Documentation
 
 - [docs/INSTALL.md](docs/INSTALL.md) — installation, Chrome extension loading, daemon configuration.
-- [docs/REFERENCE.md](docs/REFERENCE.md) — full parameter reference for the 25 core tools.
+- [docs/REFERENCE.md](docs/REFERENCE.md) — full parameter reference for the core tools.
 - [docs/TOOLS.md](docs/TOOLS.md) — generated catalogue of every tool in every profile.
 - [CHANGELOG.md](CHANGELOG.md) — release history.

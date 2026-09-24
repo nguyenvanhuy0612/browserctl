@@ -46,6 +46,9 @@ browserctl extension-path          # or: npx -y -p browserctl-mcp browserctl ext
 
 If you installed from source (Option C), it is the `extension/` directory in the clone.
 
+The extension connects only to the local bridge (default `127.0.0.1:8765`), sends no analytics,
+and contacts no other server; its source is the folder you are about to load.
+
 1. Open `chrome://extensions` (or `edge://extensions` in Edge).
 2. Enable **Developer mode** toggle in the top-right corner.
 3. Click **Load unpacked**.

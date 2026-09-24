@@ -1516,6 +1516,13 @@ test("MCP: browser_action with a tool's name behaves as that tool", async () => 
   assert.ok(stdout.includes("ACTION_AS_TOOL_OK"));
 });
 
+// A compact snapshot is the census and nothing that repeats it: 'elements' is dropped, and the
+// controls folded into a summary line keep their ref, text and href in 'folded'.
+test("MCP: a compact snapshot drops 'elements' and keeps the folded controls reachable", async () => {
+  const stdout = await runChild("compact-snapshot.mjs");
+  assert.ok(stdout.includes("COMPACT_SNAPSHOT_OK"), stdout);
+});
+
 // One tool with a parameter serves several intents. What each parameter value must do is
 // reach the protocol action that performs it — a tool that accepts a mode and then runs the
 // wrong action is worse than one that never offered it.
@@ -1788,12 +1795,13 @@ test("browser_navigate and browser_tabs dispatch properly (F98)", async () => {
 test("CLI: stop on Windows picks the listener out of netstat, not its clients", async () => {
   const { readFileSync } = await import("node:fs");
   const vm = await import("node:vm");
+  const { extractFunction } = await import("./source-slice.mjs");
   const src = readFileSync(cliPath, "utf8");
-  const start = src.indexOf("function listenerPidsFromNetstat(");
-  assert.ok(start >= 0, "listenerPidsFromNetstat not found in cli.js");
-  const end = src.indexOf("\n}\n", start) + 2;
   const ctx = vm.createContext({});
-  vm.runInContext(src.slice(start, end) + "\nglobalThis.__fn = listenerPidsFromNetstat;", ctx);
+  vm.runInContext(
+    extractFunction(src, "listenerPidsFromNetstat") + "\nglobalThis.__fn = listenerPidsFromNetstat;",
+    ctx
+  );
   const out = [
     "Active Connections",
     "  Proto  Local Address          Foreign Address        State           PID",
@@ -1811,4 +1819,18 @@ test("CLI: stop on Windows picks the listener out of netstat, not its clients", 
 test("MCP: browser_stop ends the running bridge, found by the pid it reports", async () => {
   const stdout = await runChild("stop-bridge.mjs");
   assert.ok(stdout.includes("STOP_BRIDGE_OK"));
+});
+
+// The extension returns an extract's refs with their '@' and a snapshot's without; the human
+// rendering writes each one once either way.
+test("MCP: the rendered extract names each ref with one '@'", async () => {
+  const { readFileSync } = await import("node:fs");
+  const vm = await import("node:vm");
+  const { extractFunction } = await import("./source-slice.mjs");
+  const src = readFileSync(join(__dirname, "..", "..", "mcp", "index.js"), "utf8");
+  const ctx = vm.createContext({});
+  vm.runInContext(extractFunction(src, "refTag") + "\nglobalThis.__fn = refTag;", ctx);
+  assert.equal(ctx.__fn("@ref_1"), "@ref_1");
+  assert.equal(ctx.__fn("ref_1"), "@ref_1");
+  assert.equal(ctx.__fn("f2:ref_9"), "@f2:ref_9");
 });

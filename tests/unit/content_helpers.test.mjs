@@ -14,6 +14,7 @@ import vm from "node:vm";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { extractFunction, extractConst } from "./source-slice.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -21,47 +22,6 @@ const contentJsPath = join(__dirname, "..", "..", "extension", "content.js");
 const SRC = readFileSync(contentJsPath, "utf8");
 
 // --- extraction helpers -----------------------------------------------------------
-
-// Pull `function <name>(...) { ... }` out of SRC by counting braces from the first `{`
-// to its match, so nested blocks inside the function don't truncate the slice early.
-function extractFunction(src, name) {
-  const startMatch = src.match(new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\(`));
-  if (!startMatch) throw new Error(`function ${name} not found in content.js`);
-  // Skip the parameter list before hunting for the body: a destructured parameter
-  // (`function find({ query, selector })`) opens a brace that is not the body, and
-  // counting from it stops at the end of the signature.
-  const parenStart = src.indexOf("(", startMatch.index);
-  let parenDepth = 0;
-  let afterParams = -1;
-  for (let i = parenStart; i < src.length; i++) {
-    if (src[i] === "(") parenDepth++;
-    else if (src[i] === ")") {
-      parenDepth--;
-      if (parenDepth === 0) { afterParams = i + 1; break; }
-    }
-  }
-  if (afterParams < 0) throw new Error(`unbalanced parameter list for function ${name}`);
-  const braceStart = src.indexOf("{", afterParams);
-  if (braceStart < 0) throw new Error(`no body found for function ${name}`);
-  let depth = 0;
-  for (let i = braceStart; i < src.length; i++) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") {
-      depth--;
-      if (depth === 0) return src.slice(startMatch.index, i + 1);
-    }
-  }
-  throw new Error(`unbalanced braces for function ${name}`);
-}
-
-// Pull `const <name> = ...;` (single statement, ends at the first top-level `;`).
-function extractConst(src, name) {
-  const startMatch = src.match(new RegExp(`const\\s+${name}\\s*=`));
-  if (!startMatch) throw new Error(`const ${name} not found in content.js`);
-  const semi = src.indexOf(";", startMatch.index);
-  if (semi < 0) throw new Error(`no terminating ';' found for const ${name}`);
-  return src.slice(startMatch.index, semi + 1);
-}
 
 // Evaluate a handful of extracted source slices together in a fresh vm context and
 // return the requested names off that context (functions and/or consts).
@@ -1263,4 +1223,192 @@ test("refs: the maps are swept, so a long-lived page does not keep every ref it 
   assert.ok(labels <= 250 + 100 + 1, `labels must be capped, ${labels} kept`);
   assert.ok(ctx.refLabels[keepRef], "a live ref keeps its label");
   assert.ok(ctx.refLabels.ref_1001, "the newest refs keep their labels for the stale-ref hint");
+});
+
+function loadNaming(labels = {}) {
+  const slices = [
+    extractFunction(SRC, "slotLabelOf"),
+    extractConst(SRC, "TEXT_IS_CONTENT"),
+    extractFunction(SRC, "elementByIdNear"),
+    extractFunction(SRC, "labelForId"),
+    extractFunction(SRC, "labelOwnText"),
+    extractFunction(SRC, "controlLabelOf"),
+    extractFunction(SRC, "fullElementText"),
+  ];
+  const document = {
+    getElementById: () => null,
+    querySelector: (sel) => {
+      const m = sel.match(/^label\[for="(.+)"\]$/);
+      return m && labels[m[1]] ? { innerText: labels[m[1]] } : null;
+    },
+  };
+  return loadFromContentJs(slices, ["fullElementText"], { document, CSS: { escape: (s) => s } });
+}
+
+function namedEl({ tag = "A", innerText = "", textContent = innerText, attrs = {}, id = "" } = {}) {
+  return {
+    tagName: tag,
+    id,
+    innerText,
+    textContent,
+    getAttribute: (n) => (Object.prototype.hasOwnProperty.call(attrs, n) ? attrs[n] : null),
+    hasAttribute: (n) => Object.prototype.hasOwnProperty.call(attrs, n),
+    querySelectorAll: () => [],
+    getRootNode: () => null,
+  };
+}
+
+test("naming: an icon link is named by its aria-label, not by the <title> inside its SVG", () => {
+  const { fullElementText } = loadNaming();
+  const logo = namedEl({ innerText: "", textContent: "MDN", attrs: { "aria-label": "MDN logo" } });
+  assert.equal(fullElementText(logo), "MDN logo");
+});
+
+test("naming: a field with a <label> and a placeholder is named by the label", () => {
+  const { fullElementText } = loadNaming({ em: "Email" });
+  const input = namedEl({ tag: "INPUT", id: "em", attrs: { placeholder: "you@company.com" } });
+  assert.equal(fullElementText(input), "Email");
+});
+
+test("naming: a field with only a placeholder is still named by it", () => {
+  const { fullElementText } = loadNaming();
+  const input = namedEl({ tag: "INPUT", attrs: { placeholder: "Search" } });
+  assert.equal(fullElementText(input), "Search");
+});
+
+test("naming: hidden text is the last resort, after every attribute", () => {
+  const { fullElementText } = loadNaming();
+  const el = namedEl({ tag: "SPAN", innerText: "", textContent: "only in the DOM" });
+  assert.equal(fullElementText(el), "only in the DOM");
+});
+
+test("census: hoisted inputs are listed once, not again in the body", () => {
+  const { splitHoistedInputs } = loadFromContentJs([extractFunction(SRC, "splitHoistedInputs")], ["splitHoistedInputs"]);
+  const els = [{ tag: "a" }, { tag: "input" }, { tag: "button" }, { tag: "select" }, { tag: "textarea" }];
+  const { hoisted, listed } = splitHoistedInputs(els);
+  assert.deepEqual(hoisted.map((e) => e.tag), ["input", "select", "textarea"]);
+  assert.deepEqual(listed.map((e) => e.tag), ["a", "button"]);
+});
+
+test("census state: on reads as its name, off only where it is an answer", () => {
+  const { stateTags } = loadFromContentJs(
+    [extractConst(SRC, "OFF_TAGS"), extractFunction(SRC, "stateTags")],
+    ["stateTags"]
+  );
+  assert.deepEqual([...stateTags({ checked: "true" })], ["checked"]);
+  assert.deepEqual([...stateTags({ checked: "false" })], ["unchecked"]);
+  assert.deepEqual([...stateTags({ expanded: "false" })], ["collapsed"]);
+  assert.deepEqual([...stateTags({ expanded: "true", selected: "false" })], ["expanded"]);
+  assert.deepEqual([...stateTags({ current: "page", checked: "mixed" })], ["current=page", "checked=mixed"]);
+  assert.deepEqual([...stateTags(undefined)], []);
+});
+
+test("census state: native checkboxes and radios report checked, controls report disabled", () => {
+  const { nativeState } = loadFromContentJs([extractFunction(SRC, "nativeState")], ["nativeState"]);
+  const plain = (o) => JSON.parse(JSON.stringify(o));
+  assert.deepEqual(plain(nativeState({ tagName: "INPUT", type: "checkbox", checked: true })), { checked: "true" });
+  assert.deepEqual(plain(nativeState({ tagName: "INPUT", type: "radio", checked: false })), { checked: "false" });
+  assert.deepEqual(plain(nativeState({ tagName: "BUTTON", disabled: true })), { disabled: "true" });
+  assert.deepEqual(plain(nativeState({ tagName: "INPUT", type: "text", disabled: false })), {});
+  assert.deepEqual(plain(nativeState({ tagName: "A" })), {});
+});
+
+test("census: a disabled control that is on screen is listed; a hidden one is not", () => {
+  const style = { display: "block", visibility: "visible", opacity: "1" };
+  const { isShownDisabled } = loadFromContentJs(
+    [extractFunction(SRC, "visibilityReason"), extractFunction(SRC, "isShownDisabled")],
+    ["isShownDisabled"],
+    {
+      getComputedStyle: (el) => el.__style || style,
+    }
+  );
+  const box = { getBoundingClientRect: () => ({ width: 80, height: 30 }) };
+  assert.equal(isShownDisabled({ ...box, disabled: true }), true);
+  assert.equal(isShownDisabled({ ...box, disabled: false }), false);
+  assert.equal(isShownDisabled({ ...box, disabled: true, __style: { ...style, display: "none" } }), false);
+  assert.equal(
+    isShownDisabled({ disabled: true, getBoundingClientRect: () => ({ width: 0, height: 0 }) }),
+    false
+  );
+});
+
+test("find ranks an exact name before a word start, and a word start before a substring", () => {
+  const { rankByMatch } = loadFromContentJs(
+    [extractFunction(SRC, "foldText"), extractFunction(SRC, "matchTier"), extractFunction(SRC, "rankByMatch")],
+    ["rankByMatch"]
+  );
+  const items = ["apnews.com", "Hacker News", "new", "New comments", "renew"].map((n) => ({ n }));
+  const ranked = rankByMatch(items, "new", (x) => [x.n]).map((x) => x.n);
+  // "Hacker News" and "New comments" both start a word with "new", so they share a tier.
+  assert.deepEqual([...ranked], ["new", "Hacker News", "New comments", "apnews.com", "renew"]);
+  const same = rankByMatch([{ n: "b new" }, { n: "a new" }], "new", (x) => [x.n]).map((x) => x.n);
+  assert.deepEqual([...same], ["b new", "a new"], "page order is kept within a tier");
+});
+
+test("keys carry the code and keyCode a real keyboard sends", () => {
+  const { keyDetails } = loadFromContentJs(
+    [extractConst(SRC, "NAMED_KEYS"), extractFunction(SRC, "keyDetails")],
+    ["keyDetails"]
+  );
+  const kd = (k) => JSON.parse(JSON.stringify(keyDetails(k)));
+  assert.deepEqual(kd("A"), { key: "A", code: "KeyA", keyCode: 65, which: 65 });
+  assert.deepEqual(kd("a"), { key: "a", code: "KeyA", keyCode: 65, which: 65 });
+  assert.deepEqual(kd("7"), { key: "7", code: "Digit7", keyCode: 55, which: 55 });
+  assert.deepEqual(kd("Enter"), { key: "Enter", code: "Enter", keyCode: 13, which: 13 });
+  assert.deepEqual(kd("Tab"), { key: "Tab", code: "Tab", keyCode: 9, which: 9 });
+  assert.deepEqual(kd("ArrowDown"), { key: "ArrowDown", code: "ArrowDown", keyCode: 40, which: 40 });
+  assert.deepEqual(kd("F5"), { key: "F5", code: "F5", keyCode: 116, which: 116 });
+  assert.deepEqual(kd(" "), { key: " ", code: "Space", keyCode: 32, which: 32 });
+});
+
+test("a label that wraps its control is named by its own words, not the control's", () => {
+  const { labelOwnText } = loadFromContentJs([extractFunction(SRC, "labelOwnText")], ["labelOwnText"]);
+  const removed = [];
+  const option = { remove: () => removed.push("select") };
+  const label = {
+    innerText: "Dropdown (select) One Two Three",
+    querySelector: () => ({}),
+    cloneNode: () => ({
+      textContent: "Dropdown (select) ",
+      querySelectorAll: () => [option],
+    }),
+  };
+  assert.equal(labelOwnText(label).trim(), "Dropdown (select)");
+  assert.deepEqual(removed, ["select"]);
+  assert.equal(labelOwnText({ innerText: "Email", querySelector: () => null }), "Email");
+});
+
+test("scroll: a hidden tab gets the 'scroll' event it would not fire itself; a visible one does not", () => {
+  const fired = [];
+  const node = (nodeType) => ({ nodeType, dispatchEvent: (e) => fired.push([nodeType, e.type, e.bubbles]) });
+  const load = (visibilityState) =>
+    loadFromContentJs([extractFunction(SRC, "announceScroll")], ["announceScroll"], {
+      document: { visibilityState },
+      Event,
+    }).announceScroll;
+  assert.equal(load("hidden")(node(9)), true);
+  assert.equal(load("hidden")(node(1)), true);
+  assert.deepEqual(fired, [[9, "scroll", true], [1, "scroll", false]], "the document's bubbles to window; an element's does not");
+  fired.length = 0;
+  assert.equal(load("visible")(node(9)), false);
+  assert.deepEqual(fired, []);
+});
+
+test("hover sends pointer events before mouse events, at the element's centre", () => {
+  const got = [];
+  class Ev { constructor(type, init) { this.type = type; Object.assign(this, init); } }
+  const { dispatchHover } = loadFromContentJs([extractFunction(SRC, "dispatchHover")], ["dispatchHover"], {
+    PointerEvent: class extends Ev {},
+    MouseEvent: class extends Ev {},
+    window: {},
+  });
+  const el = {
+    getBoundingClientRect: () => ({ x: 10, y: 20, width: 100, height: 40 }),
+    dispatchEvent: (e) => got.push(e),
+  };
+  dispatchHover(el);
+  assert.deepEqual(got.map((e) => e.type), ["pointerover", "pointerenter", "mouseover", "mouseenter", "pointermove", "mousemove"]);
+  assert.ok(got.every((e) => e.clientX === 60 && e.clientY === 40), "every event lands on the centre");
+  assert.equal(got.find((e) => e.type === "pointerenter").bubbles, false, "enter events do not bubble");
+  assert.equal(got.find((e) => e.type === "mouseover").bubbles, true);
 });

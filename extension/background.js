@@ -333,11 +333,15 @@ async function dispatch({ action, params = {} }) {
       frameId
     );
     if (!rectReply.ok) return rectReply;
-    return await handleCdp(
-      "element_screenshot",
-      { rect: rectReply.result, format: params.format },
-      tab.id
-    );
+    const rect = rectReply.result;
+    // Same routes as a viewport screenshot: a visible tab is captured and cropped without the
+    // debugger; an attached tab, a background tab, or an element that does not fit in the
+    // viewport goes through CDP, attaching on the way.
+    if (!isAttached(tab.id) && tab.active && fitsViewport(rect)) {
+      return { ok: true, result: await cropVisibleTab(tab, rect, params.format) };
+    }
+    await ensureAttached(tab.id);
+    return await handleCdp("element_screenshot", { rect, format: params.format }, tab.id);
   }
 
   if (
@@ -476,13 +480,16 @@ async function dispatch({ action, params = {} }) {
   }
 }
 
+const AX_CENSUS_LIMIT = 100000;
+
 async function enrichAxWithRefs(axResult, tabId) {
   const nodes = (axResult && axResult.nodes) || [];
   let census = [];
   try {
+    // Coverage is measured against every control, so the census is requested unpaged.
     const snap = await toContent(
       "snapshot",
-      { scope: "all", compact: false, maxText: 0, tabId },
+      { scope: "all", compact: false, maxText: 0, limit: AX_CENSUS_LIMIT, tabId },
       0
     );
     census = (snap && snap.ok && snap.result && snap.result.elements) || [];
@@ -797,19 +804,71 @@ async function currentTab(params) {
   };
 }
 
+// How long a navigation may take to commit: long enough for a slow VPN, short enough to answer
+// inside the bridge's own command timeout.
+const NAV_COMMIT_MS = 20_000;
+
 async function navigate(params = {}) {
   const { url } = params;
   if (!url) throw new Error("navigate requires 'url'");
   const tab = await targetTab(params);
   if (params.tabId == null) pinTarget(tab.id);
+  const committed = waitForCommit(tab.id, NAV_COMMIT_MS);
   const done = waitForComplete(tab.id);
   await chrome.tabs.update(tab.id, { url });
+  const commit = await committed;
+  if (commit.error) throw navigationFailed(url, commit.error);
+  if (commit.timedOut) {
+    const now = await chrome.tabs.get(tab.id);
+    throw new Error(
+      `navigation to ${url} had not started loading after ${NAV_COMMIT_MS / 1000} s; the tab is still on ${now.url}. ` +
+        `A slow network or VPN can take this long and the tab keeps trying: check browser_tabs({action: "list"}) before navigating again.`
+    );
+  }
   await done;
+  const frame = await chrome.webNavigation
+    .getFrame({ tabId: tab.id, frameId: 0 })
+    .catch(() => null);
+  if (frame && frame.errorOccurred) throw navigationFailed(url);
   try {
     await toContent("wait_settle", { timeoutMs: 600, tabId: tab.id });
   } catch {}
   const updated = await chrome.tabs.get(tab.id);
   return { url: updated.url };
+}
+
+// Chrome reports a failed load either as a network error before the commit or, when its error
+// page commits instead, as errorOccurred on the frame afterwards; both read the same.
+function navigationFailed(url, netError) {
+  return new Error(
+    `navigation to ${url} failed${netError ? `: ${netError}` : ""} — the tab shows Chrome's error page`
+  );
+}
+
+// Resolves when the tab's top frame commits a document (or changes in place, for a fragment or
+// history.pushState), reports Chrome's network error if the load fails, and gives up after
+// timeoutMs. A navigation that was aborted and replaced by another one is not an error.
+function waitForCommit(tabId, timeoutMs) {
+  const nav = chrome.webNavigation;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => finish({ timedOut: true }), timeoutMs);
+    const onCommit = (d) => {
+      if (d.tabId === tabId && d.frameId === 0) finish({ committed: true });
+    };
+    const onError = (d) => {
+      if (d.tabId !== tabId || d.frameId !== 0 || d.error === "net::ERR_ABORTED") return;
+      finish({ error: d.error });
+    };
+    const events = [nav.onCommitted, nav.onReferenceFragmentUpdated, nav.onHistoryStateUpdated];
+    function finish(result) {
+      clearTimeout(timer);
+      for (const e of events) e.removeListener(onCommit);
+      nav.onErrorOccurred.removeListener(onError);
+      resolve(result);
+    }
+    for (const e of events) e.addListener(onCommit);
+    nav.onErrorOccurred.addListener(onError);
+  });
 }
 
 function waitForComplete(tabId) {
@@ -832,6 +891,37 @@ function waitForComplete(tabId) {
     }
     chrome.tabs.onUpdated.addListener(listener);
   });
+}
+
+function fitsViewport(r) {
+  const vp = r && r.viewport;
+  if (!vp || !vp.width || !vp.height) return false;
+  return r.x >= 0 && r.y >= 0 && r.x + r.width <= vp.width && r.y + r.height <= vp.height;
+}
+
+// Captures the visible tab and cuts out the element's box. The capture is in device pixels,
+// so the CSS box is scaled by the ratio between the image and the reported viewport.
+async function cropVisibleTab(tab, rect, format = "png") {
+  const fmt = format === "jpeg" ? "jpeg" : "png";
+  const shot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+  const bitmap = await createImageBitmap(await (await fetch(shot)).blob());
+  const scale = bitmap.width / rect.viewport.width;
+  const sx = Math.round(rect.x * scale);
+  const sy = Math.round(rect.y * scale);
+  const sw = Math.max(1, Math.min(bitmap.width - sx, Math.round(rect.width * scale)));
+  const sh = Math.max(1, Math.min(bitmap.height - sy, Math.round(rect.height * scale)));
+  const canvas = new OffscreenCanvas(sw, sh);
+  canvas.getContext("2d").drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
+  bitmap.close();
+  const blob = await canvas.convertToBlob(
+    fmt === "jpeg" ? { type: "image/jpeg", quality: 0.8 } : { type: "image/png" }
+  );
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return { dataUrl: `data:image/${fmt};base64,${btoa(bin)}` };
 }
 
 async function getDevicePixelRatio(tabId) {
@@ -1150,6 +1240,17 @@ async function toContent(action, params, frameId = 0) {
   }
 }
 
+// Which frame an element came from, as origin and path: an iframe's query string (an ad or
+// sign-in widget's runs to kilobytes) repeated on every element it holds adds nothing.
+function frameLabel(url) {
+  try {
+    const u = new URL(url);
+    return u.origin === "null" ? url.split(/[?#]/)[0] : u.origin + u.pathname;
+  } catch {
+    return String(url || "").split(/[?#]/)[0];
+  }
+}
+
 // A frame-qualified ref ('@f3:ref_5') routes to that frame with the bare ref. On 'target' only a
 // ref-shaped inner part counts, so visible text such as 'f2: Settings' stays in the top frame.
 function frameRoute(params = {}) {
@@ -1214,14 +1315,14 @@ function mergeFrameResults(action, parts, params = {}, errors = []) {
   const top = parts.find((p) => p.fr.frameId === 0) || parts[0];
   if (action === "snapshot") {
     const elements = [];
+    const folded = [];
     for (const { fr, result } of parts) {
+      const frame = fr.frameId === 0 ? null : frameLabel(fr.url);
+      const inFrame = (el) => (frame ? { ...el, ref: qualifyRef(fr.frameId, el.ref), frame } : el);
       for (const el of result.elements || []) {
-        elements.push(
-          fr.frameId === 0
-            ? el
-            : { ...el, index: undefined, ref: qualifyRef(fr.frameId, el.ref), frame: fr.url }
-        );
+        elements.push(frame ? { ...inFrame(el), index: undefined } : el);
       }
+      for (const el of result.folded || []) folded.push(inFrame(el));
     }
     const totalElementsCount = parts.reduce(
       (sum, p) => sum + (p.result.totalElementsCount || p.result.elements?.length || 0),
@@ -1236,6 +1337,7 @@ function mergeFrameResults(action, parts, params = {}, errors = []) {
       offscreenCount,
       foldedCount: top.result.foldedCount || 0,
       elements,
+      ...(folded.length ? { folded } : {}),
     };
     const topView = top.result.compactView || top.result.census;
     if (topView) {
@@ -1257,9 +1359,7 @@ function mergeFrameResults(action, parts, params = {}, errors = []) {
           /\[@(ref_\d+)\]/g,
           (_m, r) => `[@${qualifyRef(fr.frameId, r)}]`
         );
-        const shortUrl = String(fr.url || "")
-          .split("?")[0]
-          .slice(0, 90);
+        const shortUrl = frameLabel(fr.url).slice(0, 90);
         extraFrames++;
         sections.push(
           `\n[iframe f${fr.frameId} ${shortUrl}] — refs below are frame-qualified, pass them back verbatim\n${qualified}`
@@ -1282,7 +1382,9 @@ function mergeFrameResults(action, parts, params = {}, errors = []) {
     for (const { fr, result } of parts)
       for (const m of result.matches || [])
         matches.push(
-          fr.frameId === 0 ? m : { ...m, ref: qualifyRef(fr.frameId, m.ref), frame: fr.url }
+          fr.frameId === 0
+            ? m
+            : { ...m, ref: qualifyRef(fr.frameId, m.ref), frame: frameLabel(fr.url) }
         );
     if (matches.length > 0)
       return { ok: true, result: { ...(top.result || {}), count: matches.length, matches } };
@@ -1293,7 +1395,9 @@ function mergeFrameResults(action, parts, params = {}, errors = []) {
     for (const { fr, result } of parts) {
       for (const n of result.nearest || []) {
         nearest.push(
-          fr.frameId === 0 ? n : { ...n, ref: qualifyRef(fr.frameId, n.ref), frame: fr.url }
+          fr.frameId === 0
+            ? n
+            : { ...n, ref: qualifyRef(fr.frameId, n.ref), frame: frameLabel(fr.url) }
         );
       }
       if (!note && result.note) note = result.note;

@@ -27,11 +27,35 @@ const PAGE_RAW = readFileSync(join(HERE, "testpage.html"), "utf8");
 
 let PORT;
 
-// A labelled search region around an input that carries the same text as its placeholder,
-// and a number field, which sanitizes a partial value while it is being typed.
+// Controls whose name, state or input handling the census and the action tools must get right:
+// a search box inside a labelled region, a number field (it sanitizes a partial value), an icon
+// link, a labelled field with a placeholder, a checkbox, a disabled button, a <select> wrapped
+// in its label, two links for find's ranking, and a field that echoes the key it hears.
 const SEARCH_FORM_PAGE = `<!doctype html><title>search form</title>
 <form role="search" aria-label="Search"><input id="q" placeholder="Search"></form>
-<input id="qty" type="number" aria-label="Quantity">`;
+<input id="qty" type="number" aria-label="Quantity">
+<a href="/" aria-label="Home logo"><svg width="20" height="20" role="img"><title>Home</title><rect width="20" height="20"/></svg></a>
+<label for="em2">Work email</label><input id="em2" placeholder="you@company.com">
+<input type="checkbox" id="agree"><label for="agree">I agree</label>
+<button disabled>Pay now</button>
+<label>Fruit <select id="fruit"><option>Apple</option><option>Pear</option></select></label>
+<a href="/hn">Hacker News</a> <a href="/new">new</a>
+<input id="keys" aria-label="Key sink"><span id="keyout"></span>
+<script>document.getElementById("keys").addEventListener("keydown", (e) => {
+  document.getElementById("keyout").textContent = e.code + ":" + e.which; });</script>`;
+
+// A long page that counts the scroll events it hears, and a menu opened by pointerenter.
+const TALL_PAGE = `<!doctype html><title>tall</title>
+<button id="menu">Menu</button><span id="opened">closed</span>
+<div id="links">${Array.from({ length: 40 }, (_, i) => `<a href="/story/${i}">Story ${i}</a>`).join(" ")}</div>
+<div style="height:5000px"></div>
+<script>
+  window.__scrolls = 0;
+  addEventListener("scroll", () => window.__scrolls++);
+  document.getElementById("menu").addEventListener("pointerenter", () => {
+    document.getElementById("opened").textContent = "open";
+  });
+</script>`;
 
 // A form control whose label lives in the same shadow root, as web components ship them.
 const SHADOW_LABEL_PAGE = `<!doctype html><title>shadow label</title>
@@ -63,6 +87,9 @@ async function main() {
     if (req.url === "/" || req.url.startsWith("/index")) {
       res.writeHead(200, { "content-type": "text/html" });
       res.end(PAGE_RAW.replace("__IFRAME_SRC__", "about:blank"));
+    } else if (req.url.startsWith("/tall")) {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(TALL_PAGE);
     } else if (req.url.startsWith("/search-form")) {
       res.writeHead(200, { "content-type": "text/html" });
       res.end(SEARCH_FORM_PAGE);
@@ -83,6 +110,22 @@ async function main() {
   const base = `http://127.0.0.1:${PORT}`;
 
   console.log(`extended test page served at ${base}`);
+
+  // Runs fn on one of the fixture pages and returns the tab to the main page, pass or fail, so
+  // a failed assertion does not leave the tests after it on the wrong page.
+  const withPage = async (path, fn) => {
+    await cmd("navigate", { url: base + path });
+    try {
+      await fn();
+    } finally {
+      await cmd("navigate", { url: base + "/" });
+    }
+  };
+  const censusOf = async () => {
+    const { census } = await cmd("snapshot", { compact: true });
+    const lines = census.split("\n").filter((l) => /\[@/.test(l));
+    return { census, lines, has: (re) => lines.some((l) => re.test(l)) };
+  };
 
   try {
     await openMainTab(base + "/");
@@ -127,6 +170,14 @@ async function main() {
     // ==========================================
     // 2. CDP & COOKIES PROFILE
     // ==========================================
+    // The suite's tab runs in the background, so this goes through the attach-on-demand route.
+    await test("element_screenshot works without a prior cdp_attach", async () => {
+      await cmd("cdp_detach", {}).catch(() => {});
+      const shot = await cmd("element_screenshot", { target: "css=#btn", format: "png" });
+      assert(/^data:image\/png;base64,/.test(shot.dataUrl || ""), "no image without an attach");
+      await cmd("cdp_detach", {});
+    });
+
     await test("cdp: attach debugger", async () => {
       const r = await cmd("cdp_attach", {});
       assert(r.attached === true, "cdp_attach failed");
@@ -402,8 +453,7 @@ async function main() {
     });
 
     // The tab is attached here, so the click goes through the dialog watcher. A waitFor that
-    // never appears keeps the click pending past the watcher's own polling, which is exactly
-    // when a second send used to happen.
+    // never appears keeps the click pending past the watcher's own polling.
     await test("dialog guard: a slow click on an attached tab runs once", async () => {
       await cmd("eval_js", { expression: "window.__clicked = 0; 1" });
       await cmd("click", { target: "css=#btn", waitFor: "#never-appears" });
@@ -411,27 +461,81 @@ async function main() {
       assert(n.value === 1, `the click ran ${n.value} times`);
     });
 
-    await test("shadow DOM: a control is named by the label in its own shadow root", async () => {
-      await cmd("navigate", { url: base + "/shadow-label" });
-      await cmd("type", { target: "Work email", text: "a@b.test" });
-      await cmd("type", { target: "Passcode", text: "1234" });
-      const v = await cmd("eval_js", {
-        expression:
-          "(() => { const r = document.querySelector('login-box').shadowRoot; return r.getElementById('em').value + '|' + r.querySelectorAll('input')[1].value; })()",
-      });
-      assert(v.value === "a@b.test|1234", `shadow inputs got: ${v.value}`);
-      await cmd("navigate", { url: base + "/" });
-    });
+    await test("shadow DOM: a control is named by the label in its own shadow root", () =>
+      withPage("/shadow-label", async () => {
+        await cmd("wait_for", { selector: "login-box", timeoutMs: 3000 });
+        await cmd("type", { target: "Work email", text: "a@b.test" });
+        await cmd("type", { target: "Passcode", text: "1234" });
+        const v = await cmd("eval_js", {
+          expression:
+            "(() => { const r = document.querySelector('login-box').shadowRoot; return r.getElementById('em').value + '|' + r.querySelectorAll('input')[1].value; })()",
+        });
+        assert(v.value === "a@b.test|1234", `shadow inputs got: ${v.value}`);
+      }));
 
-    await test("placeholder= names the input, not the labelled region around it", async () => {
-      await cmd("navigate", { url: base + "/search-form" });
-      await cmd("type", { target: "placeholder=Search", text: "docs" });
-      const q = await cmd("get_property", { target: "css=#q", property: "value" });
-      assert(q.value === "docs", `search input got: ${q.value}`);
-      await cmd("type", { target: "css=#qty", text: "1.5", method: "type" });
-      const qty = await cmd("get_property", { target: "css=#qty", property: "value" });
-      assert(qty.value === "1.5", `number input got: ${qty.value}`);
-      await cmd("navigate", { url: base + "/" });
+    await test("placeholder= names the input, not the labelled region around it", () =>
+      withPage("/search-form", async () => {
+        await cmd("type", { target: "placeholder=Search", text: "docs" });
+        const q = await cmd("get_property", { target: "css=#q", property: "value" });
+        assert(q.value === "docs", `search input got: ${q.value}`);
+        await cmd("type", { target: "css=#qty", text: "1.5", method: "type" });
+        const qty = await cmd("get_property", { target: "css=#qty", property: "value" });
+        assert(qty.value === "1.5", `number input got: ${qty.value}`);
+      }));
+
+    await test("census: names, state, and each control listed once", () =>
+      withPage("/search-form", async () => {
+        const { census, lines, has } = await censusOf();
+        const refs = lines.map((l) => l.match(/\[@([^\]]+)\]/)[1]);
+        assert(refs.length === new Set(refs).size, `a ref is listed twice:\n${census}`);
+        assert(has(/<a> "Home logo"/), `icon link not named by aria-label:\n${census}`);
+        assert(has(/"Work email"/), `field not named by its label:\n${census}`);
+        assert(has(/<select> "Fruit"/), `select named with its options:\n${census}`);
+        await cmd("select_option", { target: "Fruit", option: "Pear" });
+        const fruit = await cmd("get_property", { target: "css=#fruit", property: "value" });
+        assert(fruit.value === "Pear", `the census name did not reach the select: ${fruit.value}`);
+        assert(has(/\[unchecked\] "I agree"/), `an unticked box must say so:\n${census}`);
+        assert(!/value: "on"/.test(census), `a checkbox's default value is noise:\n${census}`);
+        assert(has(/\[disabled\] "Pay now"/), `a disabled button must say so:\n${census}`);
+        await cmd("check", { target: "css=#agree" });
+        const after = await censusOf();
+        assert(after.has(/\[checked\] "I agree"/), `a ticked box must say so:\n${after.census}`);
+      }));
+
+    await test("find ranks the exact name first; press_key carries code and keyCode", () =>
+      withPage("/search-form", async () => {
+        const f = await cmd("find", { query: "new" });
+        const names = f.matches.map((m) => m.name);
+        assert(names[0] === "new", `exact match not first: ${JSON.stringify(names)}`);
+        await cmd("press_key", { key: "A", target: "css=#keys" });
+        const out = await cmd("get_property", { target: "css=#keyout", property: "text" });
+        assert(out.value === "KeyA:65", `the page read the key as ${out.value}`);
+      }));
+
+    // The suite's tab is in the background, which is where a page would miss the scroll event.
+    await test("background tab: scroll reaches the page's listener, hover reaches pointerenter, folded links resolve", () =>
+      withPage("/tall", async () => {
+        await cmd("scroll", { direction: "down", amount: 800 });
+        const heard = await cmd("eval_js", { expression: "window.__scrolls" });
+        assert(heard.value >= 1, `the page heard ${heard.value} scroll events`);
+        await cmd("hover", { target: "css=#menu" });
+        const open = await cmd("get_property", { target: "css=#opened", property: "text" });
+        assert(open.value === "open", `pointerenter did not fire: ${open.value}`);
+        const snap = await cmd("snapshot", { compact: true, scope: "all" });
+        const last = (snap.folded || []).find((f) => f.text === "Story 39");
+        assert(
+          last && last.href === "/story/39",
+          `a folded link is missing: ${JSON.stringify(snap.folded)}`
+        );
+        const got = await cmd("get_property", { target: "@" + last.ref, property: "text" });
+        assert(got.value === "Story 39", `the folded ref resolved to ${got.value}`);
+      }));
+
+    await test("navigate: a page that cannot load is an error, and the tab still works", async () => {
+      const msg = await cmdFail("navigate", { url: "http://127.0.0.1:9/" });
+      assert(/ERR_|failed|had not started/.test(msg), `navigate to a closed port: ${msg}`);
+      const r = await cmd("navigate", { url: base + "/" });
+      assert(r.url.startsWith(base), `the tab did not recover: ${JSON.stringify(r)}`);
     });
 
     // localhost and 127.0.0.1 are different origins, which the Navigation API does not list.

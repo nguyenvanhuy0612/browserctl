@@ -237,6 +237,20 @@ function text(obj, format) {
   return format === "json" || format === "pretty" ? res : withMcpHints(res);
 }
 
+// A compact snapshot answers with the census alone: the structured 'elements' repeat what the
+// census lines already say. The controls the census folds into a summary line arrive from the
+// extension in 'folded', each with its ref, text and href.
+function compactSnapshot(res) {
+  if (!res || typeof res.census !== "string" || !Array.isArray(res.elements)) return res;
+  const { elements: _elements, ...rest } = res;
+  return rest;
+}
+
+// A ref as the census writes it, whether the reader returned it with its '@' or without.
+function refTag(ref) {
+  return "@" + String(ref).replace(/^@/, "");
+}
+
 function textRaw(obj, format = "json") {
   if (typeof obj === "string") {
     return { content: [{ type: "text", text: obj }] };
@@ -313,11 +327,11 @@ function textRaw(obj, format = "json") {
     );
     for (const m of obj.matches) {
       if (obj.fields) {
-        lines.push(`  @${m.ref}  ` + obj.fields.map((f) => `${f}=${fmt(m[f])}`).join("  "));
+        lines.push(`  ${refTag(m.ref)}  ` + obj.fields.map((f) => `${f}=${fmt(m[f])}`).join("  "));
       } else {
         const v =
           m.resolved !== undefined ? m.resolved : m.present === false ? "(not present)" : m.value;
-        lines.push(`  @${m.ref}  ${fmt(v)}`);
+        lines.push(`  ${refTag(m.ref)}  ${fmt(v)}`);
       }
     }
     for (const n of [].concat(obj.note || [])) lines.push(`Note: ${n}`);
@@ -1211,7 +1225,7 @@ server.registerTool(
     description:
       "A text census of the page's controls: one line per element with a stable 'ref' to act on, in reading order. Start here to see what is on a page.\n" +
       "scope: 'viewport' (default) or 'all' \u2014 every element currently in the DOM, worth it whenever a COUNT or a COMPLETE list is the answer. 'all' is not everything the page can show: feeds and virtualised lists keep most rows out of the DOM until something is clicked, and 'hiddenContent' names the control that loads them.\n" +
-      "In compact mode key inputs and search fields are hoisted to the top, and dense repetitive runs are folded with their refs still listed. What it withheld comes back as data: window/next (paging), offscreenCount, foldedCount, duplicateCount, structure (a ref per region), pageState.openDialogs, hiddenContent.\n" +
+      "In compact mode key inputs and search fields are hoisted to the top, and dense repetitive runs are folded; each folded control comes back in 'folded' as {ref, text, href}. What it withheld comes back as data: window/next (paging), offscreenCount, foldedCount, duplicateCount, structure (a ref per region), pageState.openDialogs, hiddenContent.\n" +
       "It does NOT carry pixel geometry, class names or attributes: browser_extract({selector, fields}) returns those for every match.",
     inputSchema: {
       scope: z
@@ -1224,7 +1238,7 @@ server.registerTool(
         .boolean()
         .optional()
         .describe(
-          "Compact indented view (default true). Passing false returns the same elements as structured JSON — it is not a larger census."
+          "Compact census (default true). Passing false returns every element as structured JSON in 'elements' instead — it is not a larger census."
         ),
       format: z
         .enum(["smart", "compact", "json", "pretty", "raw"])
@@ -1259,7 +1273,7 @@ server.registerTool(
       limit,
       cursor,
     });
-    return text(res, format);
+    return text(isCompact ? compactSnapshot(res) : res, format);
   })
 );
 
@@ -1840,7 +1854,8 @@ server.registerTool(
   "browser_hover",
   {
     title: "Hover element",
-    description: "Move the pointer onto an element, to open a flyout menu or raise a tooltip.",
+    description:
+      "Send the pointer and mouse events of hovering an element, to open a flyout menu or raise a tooltip. A menu shown by CSS :hover alone does not open this way; its items are usually already in browser_snapshot, tagged [hidden until hover/focus].",
     inputSchema: z.object({
       target: TARGET_FIELD.describe(
         "Target element: ref '@ref_1', CSS selector, visible text, or index"
@@ -2216,7 +2231,7 @@ server.registerTool(
   {
     title: "Screenshot one element",
     description:
-      "Capture just one element as an image, named by 'target' (ref '@ref_1', CSS selector, visible text, or snapshot index). Same capture as browser_take_screenshot with a target. Requires browser_cdp_attach.",
+      "Capture just one element as an image, named by 'target' (ref '@ref_1', CSS selector, visible text, or snapshot index). Same capture as browser_take_screenshot with a target: a visible tab is cropped without the debugger, a background tab attaches it.",
     inputSchema: {
       target: z
         .union([z.string(), z.number().int()])

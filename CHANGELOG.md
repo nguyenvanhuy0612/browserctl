@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.9.0
+
+**BREAKING, for anyone parsing a snapshot:** a compact `browser_snapshot` no longer carries
+`elements`. The folded controls come back in `folded`; `compact: false` still returns `elements`.
+Everything else here is fixes, found by running each tool against real pages — Google, GitHub,
+Amazon, Hacker News, Wikipedia, MDN, internal GitLab and Jira — and against automation practice
+sites.
+
+### Changed
+- **A compact `browser_snapshot` answers with the census alone.** It also carried every element
+  again as structured JSON in `elements`, the larger half of the answer: measured on fourteen
+  real pages, 410 KB of snapshots came down to 141 KB (Google search 152 KB to 23 KB, Hacker News
+  43 KB to 19 KB). The controls the census folds into a summary line — which it names only a few
+  of — come back in `folded` as `{ref, text, href}`, so every one is still reachable by ref.
+  `compact: false` returns `elements` as before.
+- **The census shows state it used to leave out.** A native checkbox or radio reads `[checked]`
+  or `[unchecked]` (it read `(value: "on")`, which is what it submits, not whether it is ticked);
+  a closed menu or combobox reads `[collapsed]`; a disabled control is listed as `[disabled]`
+  instead of being left out, since a disabled "Pay" button says the form is not complete.
+
+### Fixed
+- **Scrolling a background tab reaches the page.** A hidden tab does not run the rendering step
+  that fires `scroll`, so infinite feeds, lazy images and anything else listening for it never
+  heard a scroll made in the background: the-internet's infinite scroll stayed at its first rows.
+  `browser_scroll` now dispatches the event itself when the tab is hidden.
+- **`browser_hover` sends pointer events as well as mouse events,** at the element's centre, so
+  menus and tooltips built on `pointerenter` / `pointerover` (Radix, newer MUI) open. Its
+  description no longer says it moves the pointer, and says that a menu shown by CSS `:hover`
+  alone does not open this way.
+- **`browser_find` lists the closest match first.** An exact name comes before a name that
+  starts a word with the query, and that before any other substring; `find "new"` on Hacker News
+  put "Hacker News" ahead of the "new" link. Matches are gathered past `max` before ranking, so an
+  exact match late in the page is not cut off.
+- **`browser_press_key` sends the key a page can read.** Synthetic keys carried no `keyCode` /
+  `which` and a `code` equal to the key ("A" instead of "KeyA"), so pages that read `event.which`
+  — jQuery handlers among them — saw no key at all. Typing with `method: "type"` and the Enter of
+  `submit` carry them too.
+- **The rendered `browser_extract` writes each ref with one `@`** (it printed `@@ref_1`).
+- **An element inside an iframe no longer carries the iframe's full URL.** `frame` is its origin
+  and path; an ad or sign-in frame's query string ran to kilobytes on every element it held.
+- **Capturing one element no longer needs `browser_cdp_attach` first.** `browser_take_screenshot`
+  with a `target` and `browser_element_screenshot` failed with "not attached" unless the debugger
+  had been attached by hand, while a viewport screenshot never asked for it. They now take the
+  same routes as the viewport capture: a visible tab is captured and cropped to the element with
+  no debugger; a background tab, or an element larger than the viewport, attaches on its own.
+- **`browser_navigate` waits for the page to commit, and says when it does not.** It used to
+  return after 1.5 s if Chrome had not started loading, reporting the page the tab was still on
+  as if the navigation had happened — the next read then described the old page. It now waits up
+  to 20 s for the navigation to commit (a slow VPN can take that long), fails with Chrome's
+  network error when the load fails, and says when it is still waiting.
+- **Each control appears once in the census.** Inputs hoisted under "Key Inputs & Search Fields"
+  were listed again in the body; on a page with a search box every input cost two lines.
+- **Controls are named the way the page names them.** An icon link carrying `aria-label` was
+  named by the `<title>` inside its SVG; a field with both a `<label>` and a placeholder was
+  named by the placeholder; a `<select>` wrapped in its `<label>` was named by the label followed
+  by every option. The census, `browser_find` and target resolution now read names the same way,
+  so a control is reachable by the name the census shows.
+- **`browser_a11y_snapshot`'s coverage counts the whole census.** It compared Chrome's controls
+  against the first 200 census entries only, so on a long page every control past that point
+  was reported missing.
+
 ## 0.8.4
 
 A fix release. Most of it closes gaps where a tool reported success for something that did not
