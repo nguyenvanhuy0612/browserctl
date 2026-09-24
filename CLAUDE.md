@@ -1,4 +1,4 @@
-# Claude Code Instructions — browserctl
+# browserctl
 
 Fast, ergonomic browser automation for AI agents and developers, driving the user's real
 Chrome profile in the background.
