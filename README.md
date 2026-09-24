@@ -41,4 +41,4 @@ driving any page is its job.
 - [docs/INSTALL.md](docs/INSTALL.md) — installation, Chrome extension loading, daemon configuration.
 - [docs/REFERENCE.md](docs/REFERENCE.md) — full parameter reference for the core tools.
 - [docs/TOOLS.md](docs/TOOLS.md) — generated catalogue of every tool in every profile.
-- [CHANGELOG.md](CHANGELOG.md) — release history.
+- [CHANGELOG.md](https://github.com/nguyenvanhuy0612/browserctl/blob/main/CHANGELOG.md) — release history; each version also has a [GitHub release](https://github.com/nguyenvanhuy0612/browserctl/releases).
