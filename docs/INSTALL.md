@@ -1,33 +1,42 @@
 # Installation & Setup Guide
 
-This guide covers setup, installation, Chrome extension loading, and daemon configuration for browserctl.
+browserctl has three parts, and all three have to be running for a tool call to reach a page:
+
+1. **MCP server** (`browserctl-mcp`) — started by your MCP client over stdio.
+2. **Bridge daemon** (`127.0.0.1:8765`) — started automatically on first use; shared by every
+   client and the CLI.
+3. **Browser extension** — loaded unpacked into Chrome/Edge/Brave; connects to the bridge.
+
+This guide sets up all three, then checks the chain end to end.
 
 ## Prerequisites
 
-- Node.js >= 18.0.0
+- Node.js >= 18
 - A Chromium-based browser (Google Chrome, Microsoft Edge, Brave, Chromium)
 
 ## Step 1: Install browserctl
 
-### Option A: Direct Execution (Zero-Install via NPX)
-
-Run browserctl without cloning or global installation:
-
-```bash
-npx -y -p browserctl-mcp browserctl status
-```
-
-### Option B: Global CLI Installation
-
-Install globally via npm to access `browserctl` and `bctl` commands:
+### Option A: Global install (recommended)
 
 ```bash
 npm install -g browserctl-mcp
 ```
 
-### Option C: From Source
+This gives you `browserctl-mcp` (the MCP server), `browserctl` and `bctl` (the CLI), and an
+extension folder at a fixed path. The server, the CLI and the extension then come from one copy
+of the package, so they are always the same version.
 
-Clone the repository and install dependencies:
+### Option B: npx (to try it without installing)
+
+```bash
+npx -y -p browserctl-mcp browserctl status
+```
+
+npx runs the package from its cache (`~/.npm/_npx/<hash>/` on macOS/Linux,
+`%LOCALAPPDATA%\npm-cache\_npx\<hash>\` on Windows). That is fine for a trial, but a poor home for
+the extension — see Step 2. npx does not use a global install even when one exists.
+
+### Option C: From source
 
 ```bash
 git clone https://github.com/nguyenvanhuy0612/browserctl.git
@@ -35,41 +44,54 @@ cd browserctl
 npm install
 ```
 
-## Step 2: Load the Chrome Extension
+## Step 2: Load the browser extension
 
-First, find the folder to load. It ships inside the package, so it is not where you installed
-from — ask the CLI:
+Find the folder to load. It ships inside the package, so ask the CLI:
 
 ```bash
-browserctl extension-path          # or: npx -y -p browserctl-mcp browserctl extension-path
+browserctl extension-path                              # Option A
+npx -y -p browserctl-mcp browserctl extension-path     # Option B
 ```
 
-If you installed from source (Option C), it is the `extension/` directory in the clone.
+From source (Option C), it is the `extension/` directory in the clone.
 
-The extension connects only to the local bridge (default `127.0.0.1:8765`), sends no analytics,
-and contacts no other server; its source is the folder you are about to load.
+**With Option B, copy the folder somewhere permanent first** and load the copy. The printed path
+is inside the npx cache: `npm cache clean` deletes it, and a new version lands in a different
+hash directory, which leaves Chrome running an old extension against a new server.
 
-1. Open `chrome://extensions` (or `edge://extensions` in Edge).
-2. Enable **Developer mode** toggle in the top-right corner.
-3. Click **Load unpacked**.
-4. Select the folder printed above.
-5. Click the browserctl extension icon in your browser toolbar and click **Connect**.
+```bash
+# macOS / Linux
+cp -R "$(npx -y -p browserctl-mcp browserctl extension-path | head -1)" ~/browserctl-extension
+```
 
-Once connected, the extension automatically maintains connection and reconnects on browser startup.
+```powershell
+# Windows (PowerShell)
+$src = (npx -y -p browserctl-mcp browserctl extension-path | Select-Object -First 1)
+Copy-Item -Recurse $src "$HOME\browserctl-extension"
+```
 
-## Step 3: MCP Configuration
+Then load it:
 
-### For Claude Desktop, Antigravity, Cursor, Windsurf (JSON config)
+1. Open `chrome://extensions` (`edge://extensions` in Edge, `brave://extensions` in Brave).
+2. Turn on **Developer mode** (top-right).
+3. Click **Load unpacked** and select the folder.
+4. Click the browserctl icon in the toolbar and press **Connect**.
 
-The same `mcpServers` block goes in each client's own file — for Claude Desktop that is
-`claude_desktop_config.json` (Settings > Developer > Edit Config), not `.mcp.json`.
+The extension connects only to the bridge address set in its options (default
+`127.0.0.1:8765`), sends no analytics, and contacts no other server; its source is the folder you
+just loaded. Once connected it reconnects by itself, including after a browser restart.
+
+## Step 3: Add the MCP server to your client
+
+The server entry is the same for every client; only where it goes differs.
+
+**Standard entry, global install (Option A):**
 
 ```json
 {
   "mcpServers": {
     "browserctl": {
-      "command": "npx",
-      "args": ["-y", "browserctl-mcp"],
+      "command": "browserctl-mcp",
       "env": {
         "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765",
         "BROWSERCTL_MCP_PROFILE": "core"
@@ -79,38 +101,63 @@ The same `mcpServers` block goes in each client's own file — for Claude Deskto
 }
 ```
 
-### For Claude Code CLI
+**Standard entry, npx (Option B):** replace the command with
+
+```json
+"command": "npx",
+"args": ["-y", "browserctl-mcp"]
+```
+
+**Standard entry, source (Option C):**
+
+```json
+"command": "node",
+"args": ["/absolute/path/to/browserctl/mcp/index.js"]
+```
+
+**On Windows**, a client that starts the server directly (not through a shell) cannot run the
+`.cmd` shims npm installs, so wrap the command in `cmd /c`:
+
+```json
+"command": "cmd",
+"args": ["/c", "browserctl-mcp"]
+```
+
+(or `["/c", "npx", "-y", "browserctl-mcp"]`). The `node` form needs no wrapper.
+
+The `env` block is optional: both values shown are the defaults. See
+[Environment variables](#environment-variables) for the rest.
+
+<details>
+<summary>Claude Code</summary>
 
 Put the server name first, then the options: `-e` takes several values and will swallow a name
 placed after it.
 
 ```bash
 # macOS / Linux
-claude mcp add browserctl -s user \
-  -e BROWSERCTL_BRIDGE_URL=http://127.0.0.1:8765 \
-  -e BROWSERCTL_MCP_PROFILE=core \
-  -- npx -y browserctl-mcp
+claude mcp add browserctl -s user -- browserctl-mcp               # Option A
+claude mcp add browserctl -s user -- npx -y browserctl-mcp        # Option B
+claude mcp add browserctl -s user -- node /absolute/path/to/browserctl/mcp/index.js   # Option C
 ```
 
 ```powershell
-# Windows (native, not WSL): npx must be wrapped in cmd /c
-claude mcp add browserctl -s user `
-  -e BROWSERCTL_BRIDGE_URL=http://127.0.0.1:8765 `
-  -e BROWSERCTL_MCP_PROFILE=core `
-  -- cmd /c npx -y browserctl-mcp
+# Windows (native, not WSL)
+claude mcp add browserctl -s user -- cmd /c browserctl-mcp          # Option A
+claude mcp add browserctl -s user -- cmd /c npx -y browserctl-mcp   # Option B
 ```
 
-From a source clone (Option C), run the server directly:
+With environment variables:
 
 ```bash
-claude mcp add browserctl -s user -e BROWSERCTL_BRIDGE_URL=http://127.0.0.1:8765 \
-  -- node /absolute/path/to/browserctl/mcp/index.js
+claude mcp add browserctl -s user \
+  -e BROWSERCTL_BRIDGE_URL=http://127.0.0.1:8765 \
+  -e BROWSERCTL_MCP_PROFILE=core \
+  -- browserctl-mcp
 ```
 
 `-s` picks the scope: `local` (default, this project only, not shared), `user` (every project
 on this machine), or `project` (written to `.mcp.json` in the repo and shared with the team).
-
-Check it, and restart any open Claude Code session so it picks the server up:
 
 ```bash
 claude mcp list                  # browserctl should show Connected
@@ -118,41 +165,182 @@ claude mcp get browserctl        # scope, command, env
 claude mcp remove browserctl -s user
 ```
 
-Inside a session, `/mcp` shows the server status and its tools.
+Restart any open Claude Code session to pick the server up. Inside a session, `/mcp` shows its
+status and tools.
 
-### Local Path Setup
+</details>
+
+<details>
+<summary>Claude Desktop</summary>
+
+Settings > Developer > Edit Config opens `claude_desktop_config.json`:
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+Add the standard entry and restart Claude Desktop. Claude Desktop does not read `.mcp.json`.
+
+</details>
+
+<details>
+<summary>Codex</summary>
+
+```bash
+codex mcp add browserctl -- browserctl-mcp
+```
+
+Or edit `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.browserctl]
+command = "browserctl-mcp"
+env = { BROWSERCTL_BRIDGE_URL = "http://127.0.0.1:8765" }
+```
+
+</details>
+
+<details>
+<summary>VS Code (Copilot)</summary>
+
+VS Code uses a `servers` key, not `mcpServers`. In `.vscode/mcp.json` (workspace) or via
+**MCP: Open User Configuration** (all workspaces):
 
 ```json
 {
-  "mcpServers": {
+  "servers": {
     "browserctl": {
-      "command": "node",
-      "args": ["/absolute/path/to/browserctl/mcp/index.js"],
-      "env": {
-        "BROWSERCTL_BRIDGE_URL": "http://127.0.0.1:8765",
-        "BROWSERCTL_MCP_PROFILE": "core"
-      }
+      "type": "stdio",
+      "command": "browserctl-mcp"
     }
   }
 }
 ```
 
-## Step 4: Bridge Daemon Management
+</details>
 
-The bridge daemon (`127.0.0.1:8765`) auto-starts on demand when any CLI or MCP tool is invoked. You can also control it manually:
+<details>
+<summary>Cursor</summary>
 
-- Check status: `browserctl status`
-- Start daemon: `browserctl start`
-- Stop daemon: `browserctl stop`
-- Restart daemon: `browserctl restart`
+`~/.cursor/mcp.json` (all projects) or `.cursor/mcp.json` (one project). Add the standard entry.
 
-### Environment Variables
+</details>
 
-- `BROWSERCTL_BRIDGE_URL`: Bridge server URL (default: `http://127.0.0.1:8765`).
-- `BROWSERCTL_MCP_PROFILE`: Tool profile to expose (`core` for 25 tools, `all` for all 69 tools).
-- `BROWSERCTL_AUTO_START`: Daemon auto-start policy (`auto` or `manual`).
+<details>
+<summary>Windsurf</summary>
+
+`~/.codeium/windsurf/mcp_config.json`. Add the standard entry.
+
+</details>
+
+<details>
+<summary>Antigravity</summary>
+
+Agent panel > ... > MCP Servers > Manage MCP Servers > View raw config. Add the standard entry.
+
+</details>
+
+## Step 4: Verify
+
+Check the bridge and the extension:
+
+```bash
+browserctl status
+```
+
+Expected:
+
+```
+Bridge: RUNNING (http://127.0.0.1:8765)
+Extension: CONNECTED
+```
+
+Then check the MCP side from your client with a first prompt:
+
+```
+Open https://example.com with browserctl and take a snapshot.
+```
+
+The agent should call `browser_navigate` and `browser_snapshot` and report a page titled
+"Example Domain" with one link. If the tools are missing, the client has not loaded the server —
+restart it and check its MCP status view (`/mcp` in Claude Code).
+
+## Updating
+
+The server, the bridge and the extension are three processes, and each keeps running the code it
+started with. After an update, refresh all three.
+
+1. Update the package:
+   ```bash
+   npm install -g browserctl-mcp@latest    # Option A
+   ```
+   Option B: run `npx -y -p browserctl-mcp@latest browserctl extension-path`, copy the new
+   folder over the old one (Step 2), and use `browserctl-mcp@latest` in the npx command once so
+   the cache moves to the new version.
+2. Restart the bridge: `browserctl restart`.
+3. Reload the extension: `chrome://extensions` > browserctl > reload icon. Chrome keeps serving
+   the old files until you do, even to new tabs. The version shown there should match
+   `npm ls -g browserctl-mcp`.
+4. Restart your MCP client session so it starts the new server.
+
+## Uninstalling
+
+```bash
+claude mcp remove browserctl -s user     # or remove the entry from your client's config
+browserctl stop
+npm uninstall -g browserctl-mcp
+```
+
+Then remove the extension in `chrome://extensions`, and delete the copied folder if you made one.
+
+## Bridge daemon
+
+The bridge auto-starts the first time the CLI or an MCP tool needs it. Manual control:
+
+- `browserctl status` — bridge health, daemon state, extension connection
+- `browserctl start` — start the daemon
+- `browserctl restart` — restart it (after an update, or to pick up new environment variables)
+- `browserctl stop` — stop it
+
+`browserctl stop` records a stopped state, and auto-start stays off until `browserctl start`
+(or the CLI flag `--auto-daemon`). The daemon is shared by every agent and the CLI, so do not
+stop it just to clean up after a task.
+
+The bridge listens on all interfaces (`HOST=0.0.0.0`) by default. To keep it local-only, set
+`HOST=127.0.0.1` in the environment that starts it.
+
+## Environment variables
+
+Set these in the MCP entry's `env` (or `claude mcp add -e`) and, for the CLI, in your shell. The
+daemon is started by whichever of them runs first and keeps that environment until restarted.
+
+| Variable | Default | Used by | Meaning |
+|---|---|---|---|
+| `BROWSERCTL_BRIDGE_URL` | `http://127.0.0.1:8765` | MCP, CLI | Where to reach the bridge. An auto-started bridge listens on this URL's port. |
+| `BROWSERCTL_MCP_PROFILE` | `core` | MCP | `core` exposes 25 tools and loads the rest on demand; `all` (or `full`) exposes all 69. |
+| `BROWSERCTL_AUTO_START` | `auto` | MCP, CLI | `manual` (or `false`) never starts the bridge; start it with `browserctl start`. |
+| `BROWSERCTL_CALL_LOG` | off | bridge | `1`/`true` logs every call to `bridge/calls.jsonl` inside the package; a path logs there instead. The log holds page content — keep it off unless debugging. |
+| `BROWSERCTL_CALL_LOG_MAX_MB` | `8` | bridge | Size at which the call log rotates to `.1`. |
+| `HOST` | `0.0.0.0` | bridge | Interface the bridge listens on. |
+| `PORT` | `8765` | bridge | Port, when the bridge is started directly (`npm start` from source). An auto-started bridge takes its port from `BROWSERCTL_BRIDGE_URL`. |
 
 ## Troubleshooting
 
-- **Extension Disconnected**: Ensure the bridge server is running (`browserctl status`). In Chrome, click the extension icon and confirm it shows "Connected".
-- **Port Conflict**: If port `8765` is in use, start the bridge on another port via `PORT=8766 npm start` and set `BROWSERCTL_BRIDGE_URL=http://127.0.0.1:8766`.
+- **`Extension: DISCONNECTED`** — Click the extension icon and press **Connect**. If it still
+  fails, check that the host/port in the extension's settings (icon > Open settings) match
+  `BROWSERCTL_BRIDGE_URL`.
+- **Port 8765 already in use** — Pick another port and change it in both places:
+  1. `BROWSERCTL_BRIDGE_URL=http://127.0.0.1:8766` in the MCP entry and your shell, then
+     `browserctl restart`.
+  2. The extension's settings (icon > Open settings): port `8766`, **Save & reconnect**.
+- **Client says the server failed to start or `command not found`** — GUI clients (Claude Desktop,
+  Cursor) often do not see the PATH of your shell, especially with nvm/fnm/volta. Use the full path
+  from `which browserctl-mcp` (macOS/Linux) or `where browserctl-mcp` (Windows) as the command.
+- **Windows: `Connection closed` right after start** — the command is `npx` or `browserctl-mcp`
+  without `cmd /c`. See Step 3.
+- **`Bridge daemon is not running` and it does not start** — the daemon was stopped with
+  `browserctl stop`, or `BROWSERCTL_AUTO_START=manual`. Run `browserctl start`.
+- **Behaviour looks like an old version after an update** — one of the three processes is still
+  on old code. Do all of [Updating](#updating) steps 2–4.
+- **A tool you expect is missing** — the `core` profile shows 25 tools. Ask the agent to load a
+  profile (`browser_load_tools`), call it through `browser_action`, or set
+  `BROWSERCTL_MCP_PROFILE=all`.
