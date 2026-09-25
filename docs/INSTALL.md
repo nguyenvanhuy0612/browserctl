@@ -59,7 +59,10 @@ Once connected, the extension automatically maintains connection and reconnects 
 
 ## Step 3: MCP Configuration
 
-### For Claude Desktop, Antigravity, Cursor, Windsurf (`.mcp.json`)
+### For Claude Desktop, Antigravity, Cursor, Windsurf (JSON config)
+
+The same `mcpServers` block goes in each client's own file — for Claude Desktop that is
+`claude_desktop_config.json` (Settings > Developer > Edit Config), not `.mcp.json`.
 
 ```json
 {
@@ -78,9 +81,44 @@ Once connected, the extension automatically maintains connection and reconnects 
 
 ### For Claude Code CLI
 
+Put the server name first, then the options: `-e` takes several values and will swallow a name
+placed after it.
+
 ```bash
-claude mcp add browserctl -- npx -y browserctl-mcp
+# macOS / Linux
+claude mcp add browserctl -s user \
+  -e BROWSERCTL_BRIDGE_URL=http://127.0.0.1:8765 \
+  -e BROWSERCTL_MCP_PROFILE=core \
+  -- npx -y browserctl-mcp
 ```
+
+```powershell
+# Windows (native, not WSL): npx must be wrapped in cmd /c
+claude mcp add browserctl -s user `
+  -e BROWSERCTL_BRIDGE_URL=http://127.0.0.1:8765 `
+  -e BROWSERCTL_MCP_PROFILE=core `
+  -- cmd /c npx -y browserctl-mcp
+```
+
+From a source clone (Option C), run the server directly:
+
+```bash
+claude mcp add browserctl -s user -e BROWSERCTL_BRIDGE_URL=http://127.0.0.1:8765 \
+  -- node /absolute/path/to/browserctl/mcp/index.js
+```
+
+`-s` picks the scope: `local` (default, this project only, not shared), `user` (every project
+on this machine), or `project` (written to `.mcp.json` in the repo and shared with the team).
+
+Check it, and restart any open Claude Code session so it picks the server up:
+
+```bash
+claude mcp list                  # browserctl should show Connected
+claude mcp get browserctl        # scope, command, env
+claude mcp remove browserctl -s user
+```
+
+Inside a session, `/mcp` shows the server status and its tools.
 
 ### Local Path Setup
 
