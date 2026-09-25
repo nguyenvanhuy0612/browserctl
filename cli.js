@@ -4,6 +4,7 @@ import { spawn, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import fs from "node:fs";
+import { homedir } from "node:os";
 import {
   getDaemonState,
   markDaemonRunning,
@@ -47,6 +48,9 @@ Usage:
                                         and it records a stopped state that blocks restart.
   browserctl restart                    Restart bridge daemon
   browserctl extension-path             Print the folder to load in chrome://extensions
+  browserctl extension-path --copy [dir]
+                                        Copy it to a fixed folder (default ~/.browserctl/extension)
+                                        and print that; rerun after an update to refresh it
 
 You do not need to start anything before your first command, and you do not need to leave a
 terminal open. Every MCP tool has a CLI equivalent: browser_snapshot -> snapshot,
@@ -367,6 +371,59 @@ function formatTabsTable(tabs = []) {
   return [header, separator, ...rows].join("\n");
 }
 
+function readManifest(dir) {
+  try {
+    return JSON.parse(fs.readFileSync(join(dir, "manifest.json"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+// Copies the packaged extension to a fixed folder (default ~/.browserctl/extension) and exits.
+// Under npx the package lives in a cache directory that `npm cache clean` deletes and that moves
+// with every version, so an extension loaded from there disappears or goes stale. Running this
+// again after an update refreshes the same folder; Chrome then needs only a reload.
+function copyExtension(src, target, { jsonOutput, prettyOutput }) {
+  const dest = resolvePath(target || join(homedir(), ".browserctl", "extension"));
+  const fail = (error) => {
+    const out = { ok: false, error };
+    if (prettyOutput || jsonOutput) console.error(JSON.stringify(out, null, prettyOutput ? 2 : 0));
+    else console.error(`browserctl: ${error}`);
+    process.exit(1);
+  };
+  if (dest === resolvePath(src)) fail(`${dest} is the packaged extension itself`);
+
+  // The destination is replaced, not merged into, so files an older version had do not linger.
+  // That makes it destructive, so only an empty folder or an earlier copy may be replaced.
+  let previousVersion = null;
+  if (fs.existsSync(dest)) {
+    const old = readManifest(dest);
+    const empty = !old && fs.statSync(dest).isDirectory() && fs.readdirSync(dest).length === 0;
+    if (!empty && old?.name !== "browserctl") {
+      fail(`${dest} is not a browserctl extension folder; refusing to replace it`);
+    }
+    previousVersion = old?.version ?? null;
+    fs.rmSync(dest, { recursive: true, force: true });
+  }
+  fs.mkdirSync(dirname(dest), { recursive: true });
+  fs.cpSync(src, dest, { recursive: true });
+
+  const version = readManifest(dest)?.version ?? null;
+  if (prettyOutput || jsonOutput) {
+    const out = { ok: true, path: dest, source: src, version, previousVersion };
+    console.log(JSON.stringify(out, null, prettyOutput ? 2 : 0));
+  } else {
+    console.log(dest);
+    console.log("");
+    console.log(
+      previousVersion
+        ? `Replaced ${previousVersion} with ${version}. In chrome://extensions, press reload on browserctl.`
+        : `Copied ${version}. Load it: chrome://extensions -> Developer mode -> Load unpacked -> the path above.`
+    );
+  }
+  process.exit(0);
+}
+
 async function main() {
   const rawArgs = process.argv.slice(2);
   if (rawArgs.length === 0 || rawArgs.includes("-h") || rawArgs.includes("--help")) {
@@ -474,6 +531,9 @@ async function main() {
   if (action === "extension-path" || action === "extension") {
     const dir = join(__dirname, "extension");
     const ok = fs.existsSync(join(dir, "manifest.json"));
+    if (ok && args[0] === "--copy") {
+      copyExtension(dir, args[1], { jsonOutput, prettyOutput });
+    }
     if (prettyOutput || jsonOutput) {
       const out = { ok, path: dir };
       console.log(prettyOutput ? JSON.stringify(out, null, 2) : JSON.stringify(out));

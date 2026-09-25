@@ -136,6 +136,68 @@ test("State Manager: transitions between running, stopped, and uninitialized cor
   assert.ok(getDaemonState().pid === 54321, "the scratch record is the one written");
 });
 
+// The npx cache is a poor home for an unpacked extension: `npm cache clean` deletes it and each
+// version lands in a new hash directory. --copy gives it a fixed one, and refreshing that copy
+// is the update path, so a second run must replace the old files, not merge into them.
+test("CLI: extension-path --copy puts the extension at a fixed path and refreshes it", async () => {
+  const { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const scratch = mkdtempSync(join(tmpdir(), "bctl-ext-"));
+  const dest = join(scratch, "extension");
+  const version = JSON.parse(
+    readFileSync(join(__dirname, "..", "..", "extension", "manifest.json"), "utf8")
+  ).version;
+  try {
+    const first = JSON.parse(
+      (await execFileAsync(process.execPath, [cliPath, "extension-path", "--copy", dest, "--json"]))
+        .stdout
+    );
+    assert.equal(first.ok, true);
+    assert.equal(first.path, dest);
+    assert.equal(first.version, version);
+    assert.equal(first.previousVersion, null);
+    assert.ok(existsSync(join(dest, "manifest.json")));
+    assert.ok(existsSync(join(dest, "background.js")));
+
+    // A file the old version had and the new one does not must not survive the refresh.
+    writeFileSync(join(dest, "stale.js"), "// from an older version");
+    const { stdout: human } = await execFileAsync(process.execPath, [
+      cliPath,
+      "extension-path",
+      "--copy",
+      dest,
+    ]);
+    assert.ok(human.startsWith(dest), human);
+    assert.ok(human.includes("reload"), human);
+    assert.ok(!existsSync(join(dest, "stale.js")));
+    assert.ok(existsSync(join(dest, "manifest.json")));
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+// --copy replaces its destination, so it must refuse one that is not an earlier copy: a typo
+// in the path must never wipe an unrelated folder.
+test("CLI: extension-path --copy refuses a folder that is not a browserctl extension", async () => {
+  const { mkdtempSync, rmSync, writeFileSync, existsSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const scratch = mkdtempSync(join(tmpdir(), "bctl-ext-"));
+  writeFileSync(join(scratch, "notes.txt"), "keep me");
+  try {
+    await assert.rejects(
+      execFileAsync(process.execPath, [cliPath, "extension-path", "--copy", scratch]),
+      (err) => {
+        assert.equal(err.code, 1);
+        assert.match(String(err.stderr), /not a browserctl extension/);
+        return true;
+      }
+    );
+    assert.ok(existsSync(join(scratch, "notes.txt")));
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
 test("CLI: prints full subcommands in help output", async () => {
   const { stdout } = await execFileAsync(process.execPath, [cliPath, "--help"]);
   assert.ok(stdout.includes("browserctl get"));

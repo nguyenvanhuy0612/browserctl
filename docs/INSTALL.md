@@ -55,19 +55,34 @@ npx -y -p browserctl-mcp browserctl extension-path     # Option B
 
 From source (Option C), it is the `extension/` directory in the clone.
 
-**With Option B, copy the folder somewhere permanent first** and load the copy. The printed path
-is inside the npx cache: `npm cache clean` deletes it, and a new version lands in a different
-hash directory, which leaves Chrome running an old extension against a new server.
+**With Option B, copy the folder to a fixed place first** and load the copy. The path above is
+inside the npx cache: `npm cache clean` deletes it, and a new version lands in a different hash
+directory, which leaves Chrome running an old extension against a new server.
+
+```bash
+npx -y -p browserctl-mcp browserctl extension-path --copy
+```
+
+This copies the extension to `~/.browserctl/extension` (`%USERPROFILE%\.browserctl\extension` on
+Windows, next to the daemon's state file) and prints that path. Pass a folder to copy elsewhere:
+`--copy <dir>`. Running it again replaces the copy, which is how you update it; it refuses to
+replace a folder that is not an earlier copy.
+
+Option A does not need this: the global install already sits at a fixed path, and an update
+replaces it in place.
+
+`--copy` is newer than 0.9.0. On 0.9.0 it is ignored, and the command only prints the cache path;
+copy that folder by hand instead:
 
 ```bash
 # macOS / Linux
-cp -R "$(npx -y -p browserctl-mcp browserctl extension-path | head -1)" ~/browserctl-extension
+cp -R "$(npx -y -p browserctl-mcp browserctl extension-path | head -1)" ~/.browserctl/extension
 ```
 
 ```powershell
 # Windows (PowerShell)
 $src = (npx -y -p browserctl-mcp browserctl extension-path | Select-Object -First 1)
-Copy-Item -Recurse $src "$HOME\browserctl-extension"
+Copy-Item -Recurse $src "$HOME\.browserctl\extension"
 ```
 
 Then load it:
@@ -115,8 +130,10 @@ The server entry is the same for every client; only where it goes differs.
 "args": ["/absolute/path/to/browserctl/mcp/index.js"]
 ```
 
-**On Windows**, a client that starts the server directly (not through a shell) cannot run the
-`.cmd` shims npm installs, so wrap the command in `cmd /c`:
+**On Windows**, `browserctl-mcp` and `npx` are `.cmd` shims. A client that starts the server
+without a shell cannot run them and fails with `ENOENT` or "Connection closed". Claude Code
+(2.1.282) and opencode (1.18.32) handle shims themselves and need nothing extra. For any other
+client that fails to start the server, wrap the command in `cmd /c`, which works in every client:
 
 ```json
 "command": "cmd",
@@ -141,11 +158,7 @@ claude mcp add browserctl -s user -- npx -y browserctl-mcp        # Option B
 claude mcp add browserctl -s user -- node /absolute/path/to/browserctl/mcp/index.js   # Option C
 ```
 
-```powershell
-# Windows (native, not WSL)
-claude mcp add browserctl -s user -- cmd /c browserctl-mcp          # Option A
-claude mcp add browserctl -s user -- cmd /c npx -y browserctl-mcp   # Option B
-```
+On Windows the same commands work as written; Claude Code runs the `.cmd` shims itself.
 
 With environment variables:
 
@@ -196,6 +209,31 @@ Or edit `~/.codex/config.toml`:
 command = "browserctl-mcp"
 env = { BROWSERCTL_BRIDGE_URL = "http://127.0.0.1:8765" }
 ```
+
+</details>
+
+<details>
+<summary>opencode</summary>
+
+opencode uses an `mcp` key and a command array. In `~/.config/opencode/opencode.json`
+(`%USERPROFILE%\.config\opencode\opencode.json` on Windows) or `opencode.json` in a project:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "browserctl": {
+      "type": "local",
+      "command": ["browserctl-mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+`opencode mcp list` should show browserctl as connected. Its free models
+(`opencode models | grep free`) can drive browserctl, e.g.
+`opencode run -m opencode/nemotron-3-ultra-free "Open https://example.com with browserctl and take a snapshot."`
 
 </details>
 
@@ -254,6 +292,11 @@ Bridge: RUNNING (http://127.0.0.1:8765)
 Extension: CONNECTED
 ```
 
+`status` only reports; it does not start anything. On a fresh install it prints
+`Bridge: OFFLINE` until the bridge has been started, so run `browserctl start` once (any other
+CLI command or the first MCP tool call also starts it). Within a few seconds the extension
+reconnects and `status` shows `CONNECTED`.
+
 Then check the MCP side from your client with a first prompt:
 
 ```
@@ -273,9 +316,8 @@ started with. After an update, refresh all three.
    ```bash
    npm install -g browserctl-mcp@latest    # Option A
    ```
-   Option B: run `npx -y -p browserctl-mcp@latest browserctl extension-path`, copy the new
-   folder over the old one (Step 2), and use `browserctl-mcp@latest` in the npx command once so
-   the cache moves to the new version.
+   Option B: `npx -y -p browserctl-mcp@latest browserctl extension-path --copy` moves the npx
+   cache to the new version and refreshes `~/.browserctl/extension` in one step.
 2. Restart the bridge: `browserctl restart`.
 3. Reload the extension: `chrome://extensions` > browserctl > reload icon. Chrome keeps serving
    the old files until you do, even to new tabs. The version shown there should match
@@ -290,7 +332,7 @@ browserctl stop
 npm uninstall -g browserctl-mcp
 ```
 
-Then remove the extension in `chrome://extensions`, and delete the copied folder if you made one.
+Then remove the extension in `chrome://extensions`, and delete `~/.browserctl` (the daemon state, and the extension copy if you made one).
 
 ## Bridge daemon
 
@@ -335,8 +377,8 @@ daemon is started by whichever of them runs first and keeps that environment unt
 - **Client says the server failed to start or `command not found`** — GUI clients (Claude Desktop,
   Cursor) often do not see the PATH of your shell, especially with nvm/fnm/volta. Use the full path
   from `which browserctl-mcp` (macOS/Linux) or `where browserctl-mcp` (Windows) as the command.
-- **Windows: `Connection closed` right after start** — the command is `npx` or `browserctl-mcp`
-  without `cmd /c`. See Step 3.
+- **Windows: `ENOENT` or `Connection closed` right after start** — the client cannot run the
+  `.cmd` shim. Wrap the command in `cmd /c` (see Step 3) or use the `node` form.
 - **`Bridge daemon is not running` and it does not start** — the daemon was stopped with
   `browserctl stop`, or `BROWSERCTL_AUTO_START=manual`. Run `browserctl start`.
 - **Behaviour looks like an old version after an update** — one of the three processes is still
