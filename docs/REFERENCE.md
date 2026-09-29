@@ -1,4 +1,4 @@
-# browserctl Core Tool Reference — v0.9.1
+# browserctl Core Tool Reference — v0.9.2
 
 browserctl provides 25 core tools (69 tools across all profiles) for web automation and agent inspection.
 
@@ -104,6 +104,11 @@ reconnects), `UNKNOWN_BROWSER` (a
 - query: For 'list', keep only tabs whose title or URL contains this text (case-insensitive).
 - activate: For 'select' and 'new', make the tab the visible tab of its window (default false).
 
+In a `list` result, a tab the browser has frozen in the background carries `frozen: true`, and one it
+has discarded to save memory carries `discarded: true`. A command on a frozen tab wakes it first. A
+command on a discarded tab fails with a hint to reload it (`browser_navigate({reload: true})`),
+because a reload loses any unsaved input on that page.
+
 ## Inspection & Extraction
 
 ### browser_snapshot
@@ -142,7 +147,7 @@ reconnects), `UNKNOWN_BROWSER` (a
 
 ### browser_get_property
 - target: Target element (@ref, CSS selector, visible text, or index).
-- property: Property name to read ('text', 'value', 'html', 'box', 'attr', 'count').
+- property: Property name to read ('text', 'value', 'html', 'box', 'attr', 'count', 'checked'). 'checked' is true or false for a checkbox or radio and an error for any other element; for a custom control, read its aria-checked attribute with 'attr'.
 - attr: HTML attribute name when property is 'attr'.
 - format: Output format.
 
@@ -243,8 +248,11 @@ in `browser_snapshot` under `pageState.openDialogs` and close with a `browser_cl
 - format: Image format ('jpeg', 'png').
 - quality: JPEG image quality (0-100).
 
-A tab that is not in front is captured through CDP. Chrome answers that; Edge does not paint a
-background tab, so the capture fails after 5 s with a hint to select the tab with
+The visible tab of its window is captured directly. Any other tab, and any tab the debugger is
+already attached to that is not the active tab of a focused window, is captured through CDP with
+focus emulation on for the moment of the capture, so Chrome, Brave and Edge all return it without
+the tab coming to the front. The page sees `visibilitychange` to visible and back. A browser that
+still paints nothing fails the capture after 5 s with a hint to select the tab with
 `activate: true` first.
 
 ### browser_evaluate

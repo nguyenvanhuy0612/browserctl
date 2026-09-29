@@ -2344,7 +2344,7 @@ server.registerTool(
             z.string(),
             z.object({
               selector: z.string().optional(),
-              property: z.enum(["text", "value", "html", "box", "attr"]).optional(),
+              property: z.enum(["text", "value", "html", "box", "attr", "checked"]).optional(),
               attr: z.string().optional(),
             }),
           ])
@@ -2372,7 +2372,7 @@ server.registerTool(
     description:
       "Read an element's text, value, HTML, box, an attribute, or how many match.\n" +
       "Target it with 'target' (ref '@ref_1', CSS selector, visible text, or snapshot index). For property: 'count' it is the CSS selector to count, so it may match many; zero is an answer, not an error.\n" +
-      "property: 'text' (default) | 'value' | 'html' | 'box' | 'attr' (with attr: 'href') | 'count'.\n" +
+      "property: 'text' (default) | 'value' | 'html' | 'box' | 'attr' (with attr: 'href') | 'count' | 'checked'.\n" +
       "For structured extraction across multiple rows, use browser_extract.",
     inputSchema: z
       .object({
@@ -2381,7 +2381,7 @@ server.registerTool(
           .optional()
           .describe("Target element: ref '@ref_1', CSS selector, visible text, or index"),
         property: z
-          .enum(["text", "value", "html", "box", "attr", "count"])
+          .enum(["text", "value", "html", "box", "attr", "count", "checked"])
           .optional()
           .describe("What to read. Default 'text'."),
         attr: z

@@ -30,8 +30,16 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import {
-  BRIDGE, cmd, assert, test, pollFind,
-  openMainTab, teardown, verifyClean, installReaper, report,
+  BRIDGE,
+  cmd,
+  assert,
+  test,
+  pollFind,
+  openMainTab,
+  teardown,
+  verifyClean,
+  installReaper,
+  report,
 } from "./harness.mjs";
 
 installReaper();
@@ -47,18 +55,29 @@ async function main() {
     const r = await fetch(`${BRIDGE}/status`);
     status = await r.json();
   } catch (e) {
-    console.log(`SKIP: bridge not reachable at ${BRIDGE} (${e.message}). Start it with 'browserctl start' or 'npm start', load the extension in Chrome, then re-run.`);
+    console.log(
+      `SKIP: bridge not reachable at ${BRIDGE} (${e.message}). Start it with 'browserctl start' or 'npm start', load the extension in Chrome, then re-run.`
+    );
     process.exit(0);
   }
   if (!status || !status.extensionConnected) {
-    console.log(`SKIP: bridge is up at ${BRIDGE} but the Chrome extension is not connected. Load the unpacked extension (extension/) in Chrome and re-run.`);
+    console.log(
+      `SKIP: bridge is up at ${BRIDGE} but the Chrome extension is not connected. Load the unpacked extension (extension/) in Chrome and re-run.`
+    );
     process.exit(0);
   }
 
   const server = http.createServer((req, res) => {
-    if (req.url === "/" || req.url.startsWith("/index")) { res.writeHead(200, { "content-type": "text/html" }); res.end(TOP_PAGE); }
-    else if (req.url.startsWith("/child.html")) { res.writeHead(200, { "content-type": "text/html" }); res.end(CHILD_PAGE); }
-    else { res.writeHead(404); res.end("no"); }
+    if (req.url === "/" || req.url.startsWith("/index")) {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(TOP_PAGE);
+    } else if (req.url.startsWith("/child.html")) {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(CHILD_PAGE);
+    } else {
+      res.writeHead(404);
+      res.end("no");
+    }
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const PORT = server.address().port;
@@ -83,29 +102,47 @@ async function main() {
     let snap;
     await test("snapshot(compact, scope=all) succeeds on a multi-frame page", async () => {
       snap = await cmd("snapshot", { compact: true, scope: "all" });
-      assert(typeof snap.compactView === "string" && snap.compactView.length > 0, "no compactView returned");
+      assert(
+        typeof snap.compactView === "string" && snap.compactView.length > 0,
+        "no compactView returned"
+      );
     });
 
     await test("compact view keeps landmark grouping (not rebuilt flat)", async () => {
-      assert(/\[Header \/ Banner\]/.test(snap.compactView), "missing [Header / Banner] landmark header");
+      assert(
+        /\[Header \/ Banner\]/.test(snap.compactView),
+        "missing [Header / Banner] landmark header"
+      );
       assert(/\[Navigation\]/.test(snap.compactView), "missing [Navigation] landmark header");
     });
 
     await test("compact view keeps hoisted key-inputs block", async () => {
-      assert(/\[Key Inputs & Search Fields\]/.test(snap.compactView), "missing [Key Inputs & Search Fields] block");
+      assert(
+        /\[Key Inputs & Search Fields\]/.test(snap.compactView),
+        "missing [Key Inputs & Search Fields] block"
+      );
       const idx = snap.compactView.indexOf("[Key Inputs & Search Fields]");
-      assert(idx >= 0 && /Search site/.test(snap.compactView.slice(idx, idx + 300)), "key-inputs block missing the hoisted search field");
+      assert(
+        idx >= 0 && /Search site/.test(snap.compactView.slice(idx, idx + 300)),
+        "key-inputs block missing the hoisted search field"
+      );
     });
 
     await test("compact view keeps repetitive-run folding (5 identical Remove buttons)", async () => {
-      assert(/folded 3 repetitive <button> "Remove"/.test(snap.compactView), `no folded-run line found:\n${snap.compactView}`);
+      assert(
+        /folded 3 repetitive <button> "Remove"/.test(snap.compactView),
+        `no folded-run line found:\n${snap.compactView}`
+      );
     });
 
     await test("the merge keeps duplicate-link suppression, and counts it", async () => {
       // The notice line became a field when results stopped carrying prose (0.7.1). The
       // behaviour under test is the same: one row printed, and the page says how many it
       // collapsed — the count is what tells a reader the census is not the whole DOM.
-      assert(snap.duplicateCount >= 1, `expected a duplicate to be counted, got ${snap.duplicateCount}`);
+      assert(
+        snap.duplicateCount >= 1,
+        `expected a duplicate to be counted, got ${snap.duplicateCount}`
+      );
       // Only ONE "View Details" *anchor row* should be printed, not two. (Matched on the
       // `<a> "View Details"` listing form specifically — not on the substring anywhere in
       // the page, which would also catch the unrelated "(row: ...)" context annotations
@@ -117,27 +154,55 @@ async function main() {
     await test("scope=all still folds repetitive runs, and says how many", async () => {
       // scope:"all" is what an agent escalates to for completeness, so it folding silently
       // was the worst case of a census not admitting what it withheld.
-      assert(snap.foldedCount >= 3, `expected folding to be reported at full scope, got ${snap.foldedCount}`);
+      assert(
+        snap.foldedCount >= 3,
+        `expected folding to be reported at full scope, got ${snap.foldedCount}`
+      );
     });
 
     await test("compact view keeps the truncation hint for a 200+ char label", async () => {
       const el = (snap.elements || []).find((e) => (e.href || "").includes("/product/999"));
       assert(el, "long-label anchor not found in elements");
-      assert(el.textTruncatedBy > 0, `expected textTruncatedBy > 0, got ${JSON.stringify(el.textTruncatedBy)}`);
-      assert(new RegExp(`\\[\\+${el.textTruncatedBy} chars: get text @${el.ref}\\]`).test(snap.compactView),
-        "compact view missing the truncation-hint annotation for the long label");
+      assert(
+        el.textTruncatedBy > 0,
+        `expected textTruncatedBy > 0, got ${JSON.stringify(el.textTruncatedBy)}`
+      );
+      assert(
+        new RegExp(`\\[\\+${el.textTruncatedBy} chars: get text @${el.ref}\\]`).test(
+          snap.compactView
+        ),
+        "compact view missing the truncation-hint annotation for the long label"
+      );
     });
 
     await test("compact view reports the open, non-blocking dialog", async () => {
-      assert(snap.pageState && snap.pageState.hasActiveModal === false, `dialog wrongly reported as blocking: ${JSON.stringify(snap.pageState)}`);
-      assert(snap.pageState.openDialogs.some((d) => d.label === "Notifications"), `open dialog not reported: ${JSON.stringify(snap.pageState && snap.pageState.openDialogs)}`);
-      assert(/\[Open dialog: "Notifications"/.test(snap.compactView), "compact view missing the open-dialog line");
-      assert(!/\[Active Modal\/Drawer:/.test(snap.compactView), "non-blocking dialog was reported as a blocking Active Modal/Drawer");
+      assert(
+        snap.pageState && snap.pageState.hasActiveModal === false,
+        `dialog wrongly reported as blocking: ${JSON.stringify(snap.pageState)}`
+      );
+      assert(
+        snap.pageState.openDialogs.some((d) => d.label === "Notifications"),
+        `open dialog not reported: ${JSON.stringify(snap.pageState && snap.pageState.openDialogs)}`
+      );
+      assert(
+        /\[Open dialog: "Notifications"/.test(snap.compactView),
+        "compact view missing the open-dialog line"
+      );
+      assert(
+        !/\[Active Modal\/Drawer:/.test(snap.compactView),
+        "non-blocking dialog was reported as a blocking Active Modal/Drawer"
+      );
     });
 
     await test("sub-frame content is appended under an [iframe f<id> ...] header, not merged flat", async () => {
-      assert(/\[iframe f\d+ /.test(snap.compactView), `missing [iframe f<id> ...] section header:\n${snap.compactView}`);
-      assert(/f\d+:ref_\d+/.test(snap.compactView), "no frame-qualified ref (f<id>:ref_N) found in compact view");
+      assert(
+        /\[iframe f\d+ /.test(snap.compactView),
+        `missing [iframe f<id> ...] section header:\n${snap.compactView}`
+      );
+      assert(
+        /f\d+:ref_\d+/.test(snap.compactView),
+        "no frame-qualified ref (f<id>:ref_N) found in compact view"
+      );
     });
 
     await test("the merged census carries no server prose at all", async () => {
@@ -155,16 +220,28 @@ async function main() {
       assert(items.length === 3, `expected 3 menuitemradio items, found ${items.length}`);
       const relevance = items.find((e) => e.text === "Relevance");
       const newest = items.find((e) => e.text === "Newest");
-      assert(relevance && relevance.state && relevance.state.checked === "true", `expected Relevance checked=true, got ${JSON.stringify(relevance)}`);
-      assert(newest && newest.state && newest.state.checked === "false", `expected Newest checked=false, got ${JSON.stringify(newest)}`);
+      assert(
+        relevance && relevance.state && relevance.state.checked === "true",
+        `expected Relevance checked=true, got ${JSON.stringify(relevance)}`
+      );
+      assert(
+        newest && newest.state && newest.state.checked === "false",
+        `expected Newest checked=false, got ${JSON.stringify(newest)}`
+      );
       sortNewestRef = newest.ref;
       sortRelevanceRef = relevance.ref;
     });
 
     await test("read_page tree also carries the menuitemradio items with state", async () => {
       const r = await cmd("read_page", { mode: "interactive" });
-      assert(/menuitemradio "Newest"/.test(r.tree), `read_page tree missing Newest menuitemradio:\n${r.tree}`);
-      assert(/menuitemradio "Relevance" \[checked\]/.test(r.tree), `read_page tree missing checked Relevance menuitemradio:\n${r.tree}`);
+      assert(
+        /menuitemradio "Newest"/.test(r.tree),
+        `read_page tree missing Newest menuitemradio:\n${r.tree}`
+      );
+      assert(
+        /menuitemradio "Relevance" \[checked\]/.test(r.tree),
+        `read_page tree missing checked Relevance menuitemradio:\n${r.tree}`
+      );
     });
 
     await test("menuitemradio item is clickable by ref and its ARIA state moves", async () => {
@@ -172,14 +249,23 @@ async function main() {
       const after = await cmd("snapshot", { compact: false, scope: "all" });
       const newest = after.elements.find((e) => e.ref === sortNewestRef);
       const relevance = after.elements.find((e) => e.ref === sortRelevanceRef);
-      assert(newest.state && newest.state.checked === "true", `click did not check Newest: ${JSON.stringify(newest)}`);
-      assert(relevance.state && relevance.state.checked === "false", `click did not uncheck Relevance: ${JSON.stringify(relevance)}`);
+      assert(
+        newest.state && newest.state.checked === "true",
+        `click did not check Newest: ${JSON.stringify(newest)}`
+      );
+      assert(
+        relevance.state && relevance.state.checked === "false",
+        `click did not uncheck Relevance: ${JSON.stringify(relevance)}`
+      );
     });
 
     // --- read_page: portal-rendered panel behind a zero-size wrapper must NOT be pruned ---
     await test("read_page returns the portal-rendered panel's contents (through the merge)", async () => {
       const r = await cmd("read_page", { mode: "interactive" });
-      assert(/heading "Portal Panel"/.test(r.tree), `portal panel heading missing from read_page tree:\n${r.tree}`);
+      assert(
+        /heading "Portal Panel"/.test(r.tree),
+        `portal panel heading missing from read_page tree:\n${r.tree}`
+      );
       const m = r.tree.match(/button "Portal Action" \[(f\d+:ref_\d+)\]/);
       assert(m, `portal panel button missing / not frame-qualified in read_page tree:\n${r.tree}`);
     });
@@ -188,7 +274,10 @@ async function main() {
     let iframeBtnRef;
     await test("snapshot finds the same-origin iframe button with a frame-qualified ref", async () => {
       const el = (snap.elements || []).find((e) => (e.text || "").includes("Iframe Action"));
-      assert(el && /^f\d+:/.test(el.ref), `iframe button missing / not frame-qualified (ref=${el && el.ref})`);
+      assert(
+        el && /^f\d+:/.test(el.ref),
+        `iframe button missing / not frame-qualified (ref=${el && el.ref})`
+      );
       iframeBtnRef = el.ref;
     });
     await test("frame-qualified ref clicks the right element in the right frame", async () => {
@@ -196,7 +285,10 @@ async function main() {
     });
     await test("frame-qualified ref reads text (get_text) from the right frame after the click", async () => {
       const r = await cmd("get_property", { property: "text", ref: iframeBtnRef });
-      assert(/Iframe Clicked/.test(r.value || r.text || JSON.stringify(r)), `expected "Iframe Clicked", got ${JSON.stringify(r)}`);
+      assert(
+        /Iframe Clicked/.test(r.value || r.text || JSON.stringify(r)),
+        `expected "Iframe Clicked", got ${JSON.stringify(r)}`
+      );
     });
     // The MCP surface passes the same ref as 'target', so the frame has to be read from there too.
     await test("frame-qualified ref passed as target reaches the right frame", async () => {
@@ -225,4 +317,7 @@ async function main() {
   process.exit(report() ? 1 : 0);
 }
 
-main().catch((e) => { console.error("runner crashed:", e); process.exit(2); });
+main().catch((e) => {
+  console.error("runner crashed:", e);
+  process.exit(2);
+});

@@ -53,7 +53,14 @@ const tabRec = (id, url, title, extra = {}) => ({ id, url, title, active: false,
 // A stand-in extension: its tab table is the truth it answers list_tabs/current_tab/switch_tab
 // /new_tab/close_tab from; every other action answers generically with the tab the params or
 // the pin resolve to, which is all browser_snapshot and browser_click need from a fake.
-function fake({ type = "chrome", label, focused = false, tabs = [], failCloseTab = false }) {
+function fake({
+  type = "chrome",
+  label,
+  focused = false,
+  tabs = [],
+  failCloseTab = false,
+  failNewTab = false,
+}) {
   const f = {
     instanceId: `inst-${++nextInstance}`,
     type,
@@ -62,6 +69,7 @@ function fake({ type = "chrome", label, focused = false, tabs = [], failCloseTab
     received: [],
     ws: null,
     failCloseTab,
+    failNewTab,
   };
   for (const t of tabs) f.tabs.set(t.id, { ...t });
   if (![...f.tabs.values()].some((t) => t.active) && f.tabs.size) {
@@ -96,6 +104,7 @@ function fake({ type = "chrome", label, focused = false, tabs = [], failCloseTab
         return { ...view(t), pinned: true };
       }
       case "new_tab": {
+        if (f.failNewTab) throw new Error("new_tab failed (simulated)");
         const t = tabRec(++nextTabId, params.url || "about:blank", "");
         f.tabs.set(t.id, t);
         if (params.activate) {
@@ -114,6 +123,13 @@ function fake({ type = "chrome", label, focused = false, tabs = [], failCloseTab
         }
         f.pin = t.id;
         return { id: t.id, url: t.url, title: t.title };
+      }
+      case "screenshot": {
+        // A distinct image per tab, so the script can tell whose page a screenshot shows
+        const t = resolveTab(params);
+        return {
+          dataUrl: `data:image/jpeg;base64,${Buffer.from(`tab-${t.id}`).toString("base64")}`,
+        };
       }
       case "close_tab":
         if (f.failCloseTab) throw new Error(`close_tab failed (simulated) for tab ${params.id}`);
@@ -160,6 +176,7 @@ async function browsers(...specs) {
   const out = [];
   for (const spec of specs) {
     const f = fake(spec);
+    f.initialIds = [...f.tabs.keys()];
     const before = (await status()).browsers.length;
     await f.connect();
     await waitFor(
@@ -182,9 +199,8 @@ async function runScript(extraArgs = []) {
     "FANOUT_TIMEOUT_MS",
     "COMMAND_TIMEOUT_MS",
     "BROWSERCTL_CALL_LOG",
-    "BROWSERCTL_FB_QUERY",
-    "BROWSERCTL_EDGE_QUERY",
     "BROWSERCTL_E2E_BROWSER",
+    "BROWSERCTL_CAPTURE_BROWSER",
     "BRIDGE_URL",
   ]) {
     delete env[k];
@@ -201,10 +217,10 @@ async function runScript(extraArgs = []) {
 // ---------------------------------------------------------------- the cases
 
 const CASES = {
-  // Every non-interactive check has what it needs: two Chrome profiles (one with the only
-  // facebook.com tab), one Edge profile with the only example.com tab (the script's defaults).
+  // Every non-interactive check has what it needs: two Chrome profiles and one Edge profile. The
+  // checks open and close their own tabs; the tabs already open are never used.
   async "case-pass"() {
-    await browsers(
+    const fakes = await browsers(
       { type: "chrome", tabs: [tabRec(11, "https://mail.google.com/", "Gmail")] },
       { type: "chrome", tabs: [tabRec(31, "https://www.facebook.com/", "Facebook")] },
       { type: "edge", tabs: [tabRec(41, "https://example.com/", "Example Domain")] }
@@ -212,30 +228,36 @@ const CASES = {
     const { code, stdout } = await runScript();
     assert.equal(code, 0, stdout);
     assert.match(stdout, /\[PASS\] 1\.1 /);
-    assert.match(stdout, /\[PASS\] 1\.2 /);
-    assert.match(stdout, /\[PASS\] 1\.3 /);
+    assert.match(stdout, /\[PASS\] 1\.2 .*matched chrome-1 tab \d+ only/);
+    assert.match(stdout, /\[PASS\] 1\.3 .*served by edge-1/);
     assert.match(stdout, /\[SKIP\] 1\.4 /);
     assert.match(stdout, /\[SKIP\] 1\.5 /);
     assert.match(stdout, /\[PASS\] 1\.6 /);
-    assert.match(stdout, /RESULT: 4\/6 checks passed, 2 skipped, 0 failed/);
+    assert.match(stdout, /RESULT: 5\/7 checks passed, 2 skipped, 0 failed/);
+    assert.match(stdout, /\[PASS\] 1\.7 .*6 concurrent screenshots on chrome-1, none refused/);
+    // The owner's tabs were neither driven nor closed, and every opened tab is gone again
+    for (const f of fakes) {
+      assert.deepEqual([...f.tabs.keys()].sort(), f.initialIds.sort(), `${f.alias} tabs changed`);
+    }
   },
 
-  // The facebook query matches two Chrome profiles: 1.2 must FAIL and the script must exit
-  // non-zero, even though every other non-interactive check still has what it needs.
-  async "case-fail-fb-two-profiles"() {
+  // A probe tab cannot be opened in the first Chrome: 1.2 must FAIL and the script must exit
+  // non-zero, while every other non-interactive check still runs.
+  async "case-fail-probe-not-opened"() {
     await browsers(
-      { type: "chrome", tabs: [tabRec(51, "https://www.facebook.com/", "Facebook")] },
-      { type: "chrome", tabs: [tabRec(52, "https://www.facebook.com/groups", "Facebook Groups")] },
+      { type: "chrome", failNewTab: true, tabs: [tabRec(51, "https://a.example/", "A")] },
+      { type: "chrome", tabs: [tabRec(52, "https://b.example/", "B")] },
       { type: "edge", tabs: [tabRec(61, "https://example.com/", "Example Domain")] }
     );
     const { code, stdout } = await runScript();
     assert.notEqual(code, 0, stdout);
     assert.match(stdout, /\[FAIL\] 1\.2 /);
+    assert.match(stdout, /\[PASS\] 1\.3 /);
   },
 
-  // Edge has only one tab, so check 1.6 opens a scratch tab; closing it back fails. The check's
-  // own PASS still prints, every remaining check still runs, and the close failure is reported
-  // as its own FAIL naming the tab id rather than aborting the script with an uncaught error.
+  // Edge refuses every close. The checks that opened tabs there (1.3's probe tab and 1.6's two
+  // scratch tabs) still print their own PASS, every remaining check still runs, and each tab that
+  // could not be closed is its own FAIL naming the tab id, not an uncaught error.
   async "case-close-tab-fails"() {
     await browsers(
       { type: "chrome", tabs: [tabRec(81, "https://mail.google.com/", "Gmail")] },
@@ -253,7 +275,7 @@ const CASES = {
       stdout,
       /\[FAIL\] 1\.6 .*could not close the scratch tab.*tabId \d+.*close it by hand/
     );
-    assert.match(stdout, /RESULT: \d+\/7 checks passed, 2 skipped, 1 failed/);
+    assert.match(stdout, /RESULT: 5\/10 checks passed, 2 skipped, 3 failed/);
   },
 
   // Only one browser connected: the whole script reports the top-level skip and exits clean,

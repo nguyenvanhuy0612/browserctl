@@ -13,21 +13,34 @@ function call(action, params = {}, timeoutMs = 30000) {
   return new Promise((resolve) => {
     const body = JSON.stringify({ action, params, client: CLIENT });
     const started = Date.now();
-    const req = http.request(`${BRIDGE}/command`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) },
-      timeout: timeoutMs,
-    }, (res) => {
-      let raw = "";
-      res.on("data", (c) => (raw += c));
-      res.on("end", () => {
-        let parsed;
-        try { parsed = JSON.parse(raw); } catch { parsed = { ok: false, error: "unparseable", raw: raw.slice(0, 200) }; }
-        resolve({ action, ms: Date.now() - started, status: res.statusCode, ...parsed });
-      });
+    const req = http.request(
+      `${BRIDGE}/command`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) },
+        timeout: timeoutMs,
+      },
+      (res) => {
+        let raw = "";
+        res.on("data", (c) => (raw += c));
+        res.on("end", () => {
+          let parsed;
+          try {
+            parsed = JSON.parse(raw);
+          } catch {
+            parsed = { ok: false, error: "unparseable", raw: raw.slice(0, 200) };
+          }
+          resolve({ action, ms: Date.now() - started, status: res.statusCode, ...parsed });
+        });
+      }
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      resolve({ action, ms: Date.now() - started, ok: false, error: "TIMEOUT" });
     });
-    req.on("timeout", () => { req.destroy(); resolve({ action, ms: Date.now() - started, ok: false, error: "TIMEOUT" }); });
-    req.on("error", (e) => resolve({ action, ms: Date.now() - started, ok: false, error: e.message }));
+    req.on("error", (e) =>
+      resolve({ action, ms: Date.now() - started, ok: false, error: e.message })
+    );
     req.end(body);
   });
 }
@@ -49,13 +62,15 @@ async function main() {
   // Ground truth: the full-DOM census.
   const truth = await call("snapshot", { scope: "all", compact: false, maxText: 200000 });
   const els = truth.result?.elements || [];
-  const truthText = (truth.result?.text || "");
+  const truthText = truth.result?.text || "";
 
   const results = [];
   const rec = async (name, params, note, expectFail) => {
     const r = await call(name, params);
     results.push({
-      name, params, note,
+      name,
+      params,
+      note,
       // Some failures are the tool doing its job: waiting for text that is not there
       // must time out, and reading a capture that was never started must say so. Those
       // are graded on the QUALITY of the error, not on it being absent.
@@ -84,13 +99,21 @@ async function main() {
     ["find", { query: "zzz-definitely-absent-zzz" }, "find a label known to be absent"],
     ["get_attribute", { selector: "body", attr: "class" }, "read a present attribute"],
     ["get_text", { selector: "title", property: "text" }, "get_text alias with explicit property"],
-    ["find_text", { query: (truthText.split(/\s+/)[3] || "the") }, "find_text on real page text"],
+    ["find_text", { query: truthText.split(/\s+/)[3] || "the" }, "find_text on real page text"],
     ["get_page_content", { maxChars: 5000 }, "page text"],
     ["get_text", firstRef ? { ref: firstRef } : { selector: "body" }, "read first element"],
-    ["get_attribute", anyLink ? { ref: anyLink.ref, attr: "href" } : { selector: "a", attr: "href" }, "read an href"],
+    [
+      "get_attribute",
+      anyLink ? { ref: anyLink.ref, attr: "href" } : { selector: "a", attr: "href" },
+      "read an href",
+    ],
     ["get_attribute", { selector: "body", attr: "data-absolutely-not-here" }, "absent attribute"],
     ["get_count", { selector: "a" }, "count links"],
-    ["describe_element", firstRef ? { ref: firstRef } : { selector: "body" }, "describe first element"],
+    [
+      "describe_element",
+      firstRef ? { ref: firstRef } : { selector: "body" },
+      "describe first element",
+    ],
     ["current_tab", {}, "which tab"],
     ["list_tabs", {}, "tabs"],
     ["list_windows", {}, "windows"],
@@ -101,7 +124,12 @@ async function main() {
     ["hover", firstRef ? { ref: firstRef } : {}, "hover first element"],
     ["wait_settle", { timeoutMs: 2000 }, "settle"],
     ["wait_for", { text: firstText, timeoutMs: 4000 }, "wait for text that exists"],
-    ["wait_for", { text: "zzz-absent-zzz", timeoutMs: 2500 }, "wait for text that does not exist", true],
+    [
+      "wait_for",
+      { text: "zzz-absent-zzz", timeoutMs: 2500 },
+      "wait for text that does not exist",
+      true,
+    ],
     ["eval_js", { expression: "document.title" }, "eval"],
     ["get_console_logs", { limit: 20 }, "console"],
     ["get_cookies", { limit: 20 }, "cookies for this page"],
@@ -124,16 +152,29 @@ async function main() {
   for (const [n, p, note, xf] of CASES) await rec(n, p, note, xf);
   await call("cdp_detach", {});
 
-  writeFileSync(`${LABEL}.json`, JSON.stringify({
-    site: SITE_URL,
-    truth: { elements: els.length, textChars: truthText.length, censusBytes: size(truth.result) },
-    results,
-  }, null, 1));
+  writeFileSync(
+    `${LABEL}.json`,
+    JSON.stringify(
+      {
+        site: SITE_URL,
+        truth: {
+          elements: els.length,
+          textChars: truthText.length,
+          censusBytes: size(truth.result),
+        },
+        results,
+      },
+      null,
+      1
+    )
+  );
 
   const unexpected = results.filter((r) => !r.ok && !r.expectFail);
   const expected = results.filter((r) => !r.ok && r.expectFail);
   if (ownTabId != null) await call("close_tab", { id: ownTabId });
-  console.log(`${LABEL}: ${results.length} calls | ${unexpected.length} UNEXPECTED failures | ${expected.length} expected failures`);
+  console.log(
+    `${LABEL}: ${results.length} calls | ${unexpected.length} UNEXPECTED failures | ${expected.length} expected failures`
+  );
   for (const r of unexpected) console.log(`   x ${r.name}: ${String(r.error).slice(0, 90)}`);
 }
 main();

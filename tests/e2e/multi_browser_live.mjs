@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Live acceptance checks for RFC section 14 ("One Bridge, Many Browsers"), Task 8 step 1.
+// Live acceptance checks for several browsers on one bridge (docs/internal/tool-surface.md §3.9).
 // Drives the bridge named by --bridge-url / BROWSERCTL_BRIDGE_URL / BRIDGE_URL (default
 // http://127.0.0.1:8765) through real MCP sessions (mcp/index.js over stdio), the way an agent
 // does. Every check here is scripted; two checks need a person at the keyboard and run only
@@ -10,8 +10,8 @@
 // skip), 1 when any check fails, 2 when the bridge itself cannot be reached.
 //
 // Usage:
-//   node tests/e2e/multi_browser_live.mjs [--fb-query <text>] [--edge-query <text>]
-//     [--interactive] [--bridge-url <url>]
+//   node tests/e2e/multi_browser_live.mjs [--interactive] [--bridge-url <url>]
+// Every tab it uses is one it opens itself and closes again; the owner's tabs are never touched.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createInterface } from "node:readline/promises";
@@ -25,16 +25,12 @@ const MCP_PATH = join(HERE, "..", "..", "mcp", "index.js");
 
 function parseArgs(argv) {
   const out = {
-    fbQuery: undefined,
-    edgeQuery: undefined,
     interactive: false,
     bridgeUrl: undefined,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--fb-query") out.fbQuery = argv[++i];
-    else if (a === "--edge-query") out.edgeQuery = argv[++i];
-    else if (a === "--interactive") out.interactive = true;
+    if (a === "--interactive") out.interactive = true;
     else if (a === "--bridge-url") out.bridgeUrl = argv[++i];
   }
   return out;
@@ -53,8 +49,6 @@ const BRIDGE_URL = resolveOption(
   "BROWSERCTL_BRIDGE_URL",
   resolveOption(undefined, "BRIDGE_URL", "http://127.0.0.1:8765")
 );
-const FB_QUERY = resolveOption(ARGS.fbQuery, "BROWSERCTL_FB_QUERY", "facebook");
-const EDGE_QUERY = resolveOption(ARGS.edgeQuery, "BROWSERCTL_EDGE_QUERY", "example.com");
 const INTERACTIVE = ARGS.interactive;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -135,7 +129,8 @@ async function session() {
       } catch {
         // non-JSON tool replies are reported through .text
       }
-      return { isError: res.isError === true, text: t, json };
+      const images = (res.content || []).filter((c) => c.type === "image").map((c) => c.data);
+      return { isError: res.isError === true, text: t, json, images };
     },
     async close() {
       await client.close();
@@ -180,72 +175,109 @@ async function check1_1(status) {
   );
 }
 
-// 1.2: tabs list query:"facebook" (default) returns exactly the one profile's tab.
-async function check1_2() {
-  const A = await session();
+// A page every browser can open, used for the tabs this script opens itself. The query string makes
+// each opened tab unique, so a tabs-list query matches that one tab and none of the owner's.
+const PROBE_PAGE = "https://example.com/";
+const probeId = () => `bctl-probe-${Math.random().toString(36).slice(2, 10)}`;
+
+// Opens a probe tab in BROWSER through session S and returns { id, marker }, or records a FAIL
+async function openProbeTab(check, name, s, browser) {
+  const marker = probeId();
+  const created = await s.call("browser_tabs", {
+    action: "new",
+    url: `${PROBE_PAGE}?${marker}`,
+    browser,
+  });
+  if (created.isError || created.json?.id == null) {
+    record(check, name, "FAIL", created.text || "new tab returned no id");
+    return null;
+  }
+  return { id: created.json.id, marker };
+}
+
+async function closeProbeTab(check, name, s, tab) {
+  if (!tab) return;
   try {
-    const res = await A.call("browser_tabs", { action: "list", query: FB_QUERY });
-    if (res.isError) {
-      record("1.2", `tabs list query:${JSON.stringify(FB_QUERY)}`, "FAIL", res.text);
-      return;
-    }
-    const tabs = res.json?.tabs || [];
-    if (tabs.length !== 1) {
+    const closed = await s.call("browser_tabs", { action: "close", tabId: tab.id });
+    if (closed.isError) {
       record(
-        "1.2",
-        `tabs list query:${JSON.stringify(FB_QUERY)}`,
+        check,
+        name,
         "FAIL",
-        `matched ${tabs.length} tabs (${tabs.map((t) => t.browser).join(", ") || "none"}), expected exactly 1`
+        `could not close the tab it opened (tabId ${tab.id}): ${closed.text} — close it by hand`
       );
-      return;
     }
+  } catch (err) {
     record(
-      "1.2",
-      `tabs list query:${JSON.stringify(FB_QUERY)}`,
-      "PASS",
-      `matched ${tabs[0].browser} tab ${tabs[0].id}`
+      check,
+      name,
+      "FAIL",
+      `could not close the tab it opened (tabId ${tab.id}): ${err.message} — close it by hand`
     );
-  } finally {
-    await A.close();
   }
 }
 
-// 1.3: the browser holding the page found by --edge-query answers a snapshot, and the
-// call log line the bridge wrote for it carries that browser's instanceId.
-async function check1_3(status, logPath) {
-  const A = await session();
+// 1.2: a tab this script opens in one browser is found by a tabs-list query across every browser,
+// exactly once, tagged with that browser.
+async function check1_2(status) {
+  const name = "tabs list query finds the one tab opened in one browser";
+  const browsers = status.browsers || [];
+  const target = (browsers.find((b) => b.browserType !== "edge") || browsers[0])?.alias;
+  let A = null;
+  let tab = null;
   try {
-    const list = await A.call("browser_tabs", { action: "list", query: EDGE_QUERY });
-    const tabs = list.json?.tabs || [];
-    if (list.isError || tabs.length !== 1) {
+    A = await session();
+    tab = await openProbeTab("1.2", name, A, target);
+    if (!tab) return;
+    const res = await A.call("browser_tabs", { action: "list", query: tab.marker });
+    const tabs = res.json?.tabs || [];
+    if (res.isError || tabs.length !== 1 || tabs[0].browser !== target || tabs[0].id !== tab.id) {
       record(
-        "1.3",
-        `snapshot the browser holding query:${JSON.stringify(EDGE_QUERY)}`,
+        "1.2",
+        name,
         "FAIL",
-        list.isError ? list.text : `matched ${tabs.length} tabs, expected exactly 1`
+        res.isError
+          ? res.text
+          : `matched ${tabs.map((t) => `${t.browser}:${t.id}`).join(", ") || "nothing"}, expected ${target}:${tab.id}`
       );
       return;
     }
-    const owner = tabs[0].browser;
-    const expectedInstanceId = (status.browsers || []).find((b) => b.alias === owner)?.instanceId;
+    record("1.2", name, "PASS", `matched ${target} tab ${tab.id} only`);
+  } catch (err) {
+    record("1.2", name, "FAIL", err.message);
+  } finally {
+    if (A) await closeProbeTab("1.2", name, A, tab);
+    if (A) await A.close().catch(() => {});
+  }
+}
+
+// 1.3: a tab this script opens in Edge (or the second browser) is selected and snapshotted, and the
+// call-log line the bridge wrote for the snapshot carries that browser's instanceId.
+async function check1_3(status, logPath) {
+  const name = "snapshot of a tab opened in Edge is served by Edge";
+  const browsers = status.browsers || [];
+  const target = (browsers.find((b) => b.browserType === "edge") || browsers[1] || browsers[0])
+    ?.alias;
+  const expectedInstanceId = browsers.find((b) => b.alias === target)?.instanceId;
+  let A = null;
+  let tab = null;
+  try {
+    A = await session();
+    tab = await openProbeTab("1.3", name, A, target);
+    if (!tab) return;
     const before = callLogSize(logPath);
-    await A.call("browser_tabs", { action: "select", tabId: tabs[0].id });
-    const snap = await A.call("browser_snapshot", {});
+    const selected = await A.call("browser_tabs", { action: "select", tabId: tab.id });
+    const snap = selected.isError ? selected : await A.call("browser_snapshot", {});
     if (snap.isError) {
-      record(
-        "1.3",
-        `snapshot the browser holding query:${JSON.stringify(EDGE_QUERY)}`,
-        "FAIL",
-        snap.text
-      );
+      record("1.3", name, "FAIL", snap.text);
       return;
     }
     if (!logPath) {
       record(
         "1.3",
-        `snapshot the browser holding query:${JSON.stringify(EDGE_QUERY)}`,
+        name,
         "PASS",
-        `served by ${owner} (call log not configured — instanceId not cross-checked)`
+        `served by ${target} (call log not configured — instanceId not cross-checked)`
       );
       return;
     }
@@ -253,20 +285,18 @@ async function check1_3(status, logPath) {
     if (!snapEntry || snapEntry.instanceId !== expectedInstanceId) {
       record(
         "1.3",
-        `snapshot the browser holding query:${JSON.stringify(EDGE_QUERY)}`,
+        name,
         "FAIL",
         `call log line was ${JSON.stringify(snapEntry)}, expected instanceId ${expectedInstanceId}`
       );
       return;
     }
-    record(
-      "1.3",
-      `snapshot the browser holding query:${JSON.stringify(EDGE_QUERY)}`,
-      "PASS",
-      `served by ${owner}, call log instanceId matches`
-    );
+    record("1.3", name, "PASS", `served by ${target}, call log instanceId matches`);
+  } catch (err) {
+    record("1.3", name, "FAIL", err.message);
   } finally {
-    await A.close();
+    if (A) await closeProbeTab("1.3", name, A, tab);
+    if (A) await A.close().catch(() => {});
   }
 }
 
@@ -352,15 +382,124 @@ async function check1_5(before) {
   );
 }
 
-// 1.6: two MCP processes drive two Edge tabs concurrently — 20 snapshots each — and every
-// call-log line pairs the calling session with the right tabId. Opens a second Edge tab if
-// only one is open, and closes it again afterward.
+// 1.7: two sessions on one browser take screenshots at the same moment, one tab in front and one
+// behind it. None may be refused, and each image must show its own session's page.
+async function check1_7(status) {
+  const name = "two sessions capture screenshots on one browser at the same time";
+  const browsers = status.browsers || [];
+  // BROWSERCTL_CAPTURE_BROWSER names the browser to run it on; otherwise the first Chrome
+  const alias =
+    process.env.BROWSERCTL_CAPTURE_BROWSER ||
+    (browsers.find((b) => b.browserType === "chrome") || browsers[0])?.alias;
+  if (!alias) {
+    record("1.7", name, "FAIL", "no browser connected");
+    return;
+  }
+  const opened = [];
+  let scratchServer = null;
+  let A = null;
+  let B = null;
+  try {
+    A = await session();
+    B = await session();
+    scratchServer = await startScratchServer();
+    for (const [s, i] of [
+      [A, 1],
+      [B, 2],
+    ]) {
+      const created = await s.call("browser_tabs", {
+        action: "new",
+        url: `${scratchServer.base}/shot-${i}`,
+        browser: alias,
+        activate: true,
+      });
+      if (created.isError) {
+        record("1.7", name, "FAIL", created.text);
+        return;
+      }
+      opened.push(created.json?.id);
+    }
+    // One session's tab is in front and one is behind it: both capture paths run at once
+    const jobs = [];
+    for (let i = 0; i < 3; i++) {
+      jobs.push(A.call("browser_take_screenshot", {}).then((r) => ["A", r]));
+      jobs.push(B.call("browser_take_screenshot", {}).then((r) => ["B", r]));
+    }
+    const settled = await Promise.allSettled(jobs);
+    const failures = settled.filter((x) => x.status === "rejected" || x.value[1].isError);
+    if (failures.length) {
+      const f = failures[0];
+      const why = f.status === "rejected" ? f.reason.message : f.value[1].text;
+      record(
+        "1.7",
+        name,
+        "FAIL",
+        `${failures.length}/6 refused on ${alias}: ${String(why).slice(0, 200)}`
+      );
+      return;
+    }
+    // Each session's images must show its own page: no image may appear in both sessions' sets
+    const bySession = { A: new Set(), B: new Set() };
+    for (const x of settled) bySession[x.value[0]].add((x.value[1].images || [])[0] || "");
+    const crossed = [...bySession.A].some((img) => img && bySession.B.has(img));
+    const missing = [...bySession.A, ...bySession.B].some((img) => !img);
+    if (crossed || missing) {
+      record(
+        "1.7",
+        name,
+        "FAIL",
+        crossed
+          ? "a session received the other session's page in its screenshot"
+          : "a screenshot returned no image"
+      );
+      return;
+    }
+    record(
+      "1.7",
+      name,
+      "PASS",
+      `6 concurrent screenshots on ${alias}, none refused, each of its own page`
+    );
+  } catch (err) {
+    record("1.7", name, "FAIL", err.message);
+  } finally {
+    for (const tabId of opened) {
+      try {
+        const closed = await A.call("browser_tabs", { action: "close", tabId });
+        if (closed.isError) {
+          record(
+            "1.7",
+            name,
+            "FAIL",
+            `could not close the scratch tab it opened (tabId ${tabId}): ${closed.text} — close it by hand`
+          );
+        }
+      } catch (err) {
+        record(
+          "1.7",
+          name,
+          "FAIL",
+          `could not close the scratch tab it opened (tabId ${tabId}): ${err.message} — close it by hand`
+        );
+      }
+    }
+    if (scratchServer) await scratchServer.close();
+    if (A) await A.close().catch(() => {});
+    if (B) await B.close().catch(() => {});
+  }
+}
+
 // A local page for scratch tabs, so the concurrency check never depends on which pages the owner
 // has open.
 async function startScratchServer() {
   const server = http.createServer((req, res) => {
+    // Each scratch page has its own background colour, so a screenshot shows which page it is
+    const colour = { "/shot-1": "#c0392b", "/shot-2": "#2471a3" }[req.url] || "#ffffff";
     res.writeHead(200, { "content-type": "text/html" });
-    res.end(`<!doctype html><title>browserctl scratch ${req.url}</title><button>ok</button>`);
+    res.end(
+      `<!doctype html><title>browserctl scratch ${req.url}</title>` +
+        `<body style="background:${colour};margin:0;height:100vh"><button>ok</button></body>`
+    );
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   return {
@@ -374,6 +513,9 @@ async function startScratchServer() {
   };
 }
 
+// 1.6: two MCP processes drive two readable Edge tabs concurrently — 20 snapshots each — and every
+// call-log line pairs the calling session with the right tabId. It opens its two scratch tabs on a
+// local page and closes them again afterward.
 async function check1_6(status, logPath) {
   const edgeAlias = (status.browsers || []).find((b) => b.browserType === "edge")?.alias;
   if (!edgeAlias) {
@@ -385,16 +527,15 @@ async function check1_6(status, logPath) {
     );
     return;
   }
-  const A = await session();
-  const B = await session();
   const openedTabs = [];
   let scratchServer = null;
+  let A = null;
+  let B = null;
   try {
-    const listed = await A.call("browser_tabs", { action: "list", browser: edgeAlias });
-    // Only a web page can be read; edge:// and about: pages refuse the content script
-    let edgeTabs = (listed.json?.tabs || []).filter(
-      (t) => t.browser === edgeAlias && /^https?:/i.test(t.url || "")
-    );
+    A = await session();
+    B = await session();
+    // Only tabs this check opens itself, so the owner's tabs are never driven
+    let edgeTabs = [];
     while (edgeTabs.length < 2) {
       scratchServer ||= await startScratchServer();
       const created = await A.call("browser_tabs", {
@@ -491,8 +632,8 @@ async function check1_6(status, logPath) {
       }
     }
     if (scratchServer) await scratchServer.close();
-    await A.close().catch(() => {});
-    await B.close().catch(() => {});
+    if (A) await A.close().catch(() => {});
+    if (B) await B.close().catch(() => {});
   }
 }
 
@@ -521,11 +662,12 @@ async function main() {
   );
 
   await check1_1(status);
-  await check1_2();
+  await check1_2(status);
   await check1_3(status, status.callLog);
   await check1_4();
   await check1_5(status);
   await check1_6(status, status.callLog);
+  await check1_7(status);
 
   await Promise.all(sessions.map((c) => c.close().catch(() => {})));
 

@@ -948,6 +948,54 @@ gate("multi-browser live acceptance", () => {
   return `${m[1]}/${m[2]} passed, ${m[3]} skipped`;
 });
 
+// ------------------------------------------------------ 12. multi-browser parallel run
+// One MCP session per connected browser (up to three), all started together, each running the
+// full core-action scenario on the script's own fixture site with a read-back after every action.
+gate("multi-browser parallel run", () => {
+  if (!RUN_E2E) return "SKIPPED — rerun with --e2e once the bridge and extension are up";
+
+  let status = null;
+  try {
+    status = JSON.parse(
+      execFileSync("sh", ["-c", "curl -s -m 3 http://127.0.0.1:8765/status"], { encoding: "utf8" })
+    );
+  } catch {}
+  if (!status || !status.extensionConnected) {
+    throw new Error(
+      "bridge unreachable or extension not connected — start it (npm start) and load the extension"
+    );
+  }
+  if (!Array.isArray(status.browsers) || status.browsers.length < 2) {
+    return "SKIPPED (one browser)";
+  }
+
+  let out;
+  try {
+    out = execFileSync("node", ["tests/e2e/multi_browser_parallel.mjs"], {
+      cwd: ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    out = String(err.stdout || "");
+    const fails = out
+      .split("\n")
+      .filter((l) => l.startsWith("[FAIL]"))
+      .slice(0, 8);
+    throw new Error(
+      fails.length
+        ? fails.join("\n      ")
+        : out.slice(-500) || "multi_browser_parallel.mjs failed with no output"
+    );
+  }
+  const m = out.match(/RESULT: (\d+)\/(\d+) checks passed, (\d+) skipped, (\d+) failed/);
+  const summary = out.match(/^SUMMARY: (.*)$/m);
+  if (!m) {
+    throw new Error(`multi_browser_parallel.mjs did not report a result:\n${out.slice(-500)}`);
+  }
+  return `${m[1]}/${m[2]} passed, ${m[3]} skipped${summary ? ` — ${summary[1]}` : ""}`;
+});
+
 // ----------------------------------------------------------------------- report
 let failed = 0;
 console.log("");

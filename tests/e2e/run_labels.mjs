@@ -3,32 +3,78 @@
 // about the same elements.
 import http from "node:http";
 import { readFileSync } from "node:fs";
-import { openMainTab, teardown, verifyClean, installReaper, e2eBrowser } from "./harness.mjs";
+import {
+  openMainTab,
+  teardown,
+  verifyClean,
+  installReaper,
+  e2eBrowser,
+  BRIDGE,
+} from "./harness.mjs";
 
 const CLIENT = { session: `e2e-${process.pid}`, source: "e2e" };
 
 installReaper();
 
-const BRIDGE = "http://127.0.0.1:8765";
 const call = async (action, params = {}) => {
   const browser = await e2eBrowser();
   return callOn(browser, action, params);
 };
-const callOn = (browser, action, params) => new Promise((resolve) => {
-  const body = JSON.stringify({ action, params, client: CLIENT, ...(browser ? { browser } : {}) });
-  const req = http.request(`${BRIDGE}/command`, { method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) }, timeout: 20000 },
-    (res) => { let r = ""; res.on("data", (c) => (r += c)); res.on("end", () => { try { resolve(JSON.parse(r)); } catch { resolve({ ok: false, error: "bad json" }); } }); });
-  req.on("timeout", () => { req.destroy(); resolve({ ok: false, error: "TIMEOUT" }); });
-  req.on("error", (e) => resolve({ ok: false, error: e.message }));
-  req.end(body);
-});
+const callOn = (browser, action, params) =>
+  new Promise((resolve) => {
+    const body = JSON.stringify({
+      action,
+      params,
+      client: CLIENT,
+      ...(browser ? { browser } : {}),
+    });
+    const req = http.request(
+      `${BRIDGE}/command`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) },
+        timeout: 20000,
+      },
+      (res) => {
+        let r = "";
+        res.on("data", (c) => (r += c));
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(r));
+          } catch {
+            resolve({ ok: false, error: "bad json" });
+          }
+        });
+      }
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      resolve({ ok: false, error: "TIMEOUT" });
+    });
+    req.on("error", (e) => resolve({ ok: false, error: e.message }));
+    req.end(body);
+  });
 
 const FIXTURE = process.argv[2] || new URL("./labels.html", import.meta.url).pathname;
-const srv = http.createServer((_q, s) => { s.writeHead(200, { "content-type": "text/html" }); s.end(readFileSync(FIXTURE)); }).listen(0);
+const srv = http
+  .createServer((_q, s) => {
+    s.writeHead(200, { "content-type": "text/html" });
+    s.end(readFileSync(FIXTURE));
+  })
+  .listen(0);
 const port = srv.address().port;
 
-const EXPECT = ["Only me", "Public", "Accept terms", "Subscribe to updates", "Quantity in cart",
-                "Shipping country", "Dark mode", "Delete item", "Search products"];
+const EXPECT = [
+  "Only me",
+  "Public",
+  "Accept terms",
+  "Subscribe to updates",
+  "Quantity in cart",
+  "Shipping country",
+  "Dark mode",
+  "Delete item",
+  "Search products",
+];
 
 const main = async () => {
   await openMainTab(`http://127.0.0.1:${port}/`);
@@ -38,9 +84,17 @@ const main = async () => {
   // page that had not painted. A suite that fails spuriously teaches people to ignore it.
   await call("wait_settle", { timeoutMs: 1200 });
   for (let i = 0; i < 25; i++) {
-    const probe = await call("get_property", { property: "count", selector: "#plain, #smart, input[type=radio]" });
+    const probe = await call("get_property", {
+      property: "count",
+      selector: "#plain, #smart, input[type=radio]",
+    });
     if (probe.ok && probe.result && probe.result.value > 0) break;
-    if (i === 24) { console.log("SKIP: fixture never rendered"); await teardown(); srv.close(); process.exit(0); }
+    if (i === 24) {
+      console.log("SKIP: fixture never rendered");
+      await teardown();
+      srv.close();
+      process.exit(0);
+    }
     await new Promise((r) => setTimeout(r, 200));
   }
 
@@ -49,7 +103,9 @@ const main = async () => {
   const cv = snap.compactView || snap.census || "";
   const tree = ((await call("read_page", { mode: "interactive" })).result || {}).tree || "";
 
-  console.log(`${"label expected".padEnd(24)} ${"snapshot".padEnd(9)} ${"read_page".padEnd(10)} ${"find".padEnd(6)} click(text)`);
+  console.log(
+    `${"label expected".padEnd(24)} ${"snapshot".padEnd(9)} ${"read_page".padEnd(10)} ${"find".padEnd(6)} click(text)`
+  );
   console.log("-".repeat(64));
   let fails = 0;
   for (const want of EXPECT) {
@@ -60,10 +116,16 @@ const main = async () => {
     const clickable = findable && (f.matches || []).some((m) => m.clickable);
     const bad = !inSnap || !inTree || !findable || !clickable;
     if (bad) fails++;
-    console.log(`${want.padEnd(24)} ${(inSnap ? "yes" : "NO").padEnd(9)} ${(inTree ? "yes" : "NO").padEnd(10)} ${(findable ? "yes" : "NO").padEnd(6)} ${clickable ? "yes" : "NO"}`);
+    console.log(
+      `${want.padEnd(24)} ${(inSnap ? "yes" : "NO").padEnd(9)} ${(inTree ? "yes" : "NO").padEnd(10)} ${(findable ? "yes" : "NO").padEnd(6)} ${clickable ? "yes" : "NO"}`
+    );
   }
   console.log("-".repeat(64));
-  console.log(fails === 0 ? "all label paths agree" : `${fails}/${EXPECT.length} labels are missing from at least one tool`);
+  console.log(
+    fails === 0
+      ? "all label paths agree"
+      : `${fails}/${EXPECT.length} labels are missing from at least one tool`
+  );
   await teardown();
   try {
     await verifyClean(`127.0.0.1:${port}`);

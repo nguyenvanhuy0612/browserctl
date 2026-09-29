@@ -1003,7 +1003,7 @@ test("A click on a stateful control proves the state moved (F60)", async () => {
   // "The DOM mutated" is not evidence the intended thing happened. A Facebook audience
   // radio produced 34 then 320 mutations across eight attempts while the selection never
   // committed — and every one of those clicks reported success.
-  assert.ok(/const STATEFUL = \["aria-checked", "aria-selected", "aria-pressed", "aria-expanded"\]/.test(content),
+  assert.ok(/const CLICK_STATE_ATTRS = \["aria-checked", "aria-selected", "aria-pressed", "aria-expanded"\]/.test(content),
     "the control's own state attributes must be sampled");
   assert.ok(/controlState/.test(content), "the effect block must carry the before/after state");
   assert.ok(/the selection did not take/.test(content),

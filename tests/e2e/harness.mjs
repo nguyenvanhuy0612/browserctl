@@ -35,6 +35,7 @@ const CLIENT = { session: `e2e-${process.pid}`, source: "e2e" };
 // bridge selector); otherwise the first Chrome, the browser the suites are written against.
 let e2eBrowserChoice = null;
 export function e2eBrowser() {
+  // Only a real pick is kept: a failed /status, or a single browser, is asked again next time
   e2eBrowserChoice ||= (async () => {
     if (process.env.BROWSERCTL_E2E_BROWSER) return process.env.BROWSERCTL_E2E_BROWSER;
     try {
@@ -45,7 +46,10 @@ export function e2eBrowser() {
     } catch {
       return null;
     }
-  })();
+  })().then((choice) => {
+    if (choice == null) e2eBrowserChoice = null;
+    return choice;
+  });
   return e2eBrowserChoice;
 }
 

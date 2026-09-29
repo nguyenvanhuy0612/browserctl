@@ -6,6 +6,7 @@ import {
   setLastCaptureScale,
   dropTab as cdpDropTab,
   ensureAttached,
+  wakeFrozenTab,
   armDialog,
   takeDialogRecord,
   pendingDialog,
@@ -408,10 +409,21 @@ async function dispatch({ action, params = {} }) {
     // debugger; an attached tab, a background tab, or an element that does not fit in the
     // viewport goes through CDP, attaching on the way.
     if (!isAttached(tab.id) && tab.active && fitsViewport(rect)) {
-      return { ok: true, result: await cropVisibleTab(tab, rect, params.format) };
+      try {
+        return { ok: true, result: await cropVisibleTab(tab, rect, params.format) };
+      } catch (err) {
+        if (err.code !== "TAB_LEFT_FRONT") throw err;
+      }
     }
     await ensureAttached(tab.id);
-    return await handleCdp("element_screenshot", { rect, format: params.format }, tab.id);
+    // The tab as it is now: it may have left the front since the command started
+    const current = await chrome.tabs.get(tab.id).catch(() => tab);
+    const emulateFocus = !(await inFront(current));
+    return await handleCdp(
+      "element_screenshot",
+      { rect, format: params.format, emulateFocus },
+      tab.id
+    );
   }
 
   if (
@@ -434,7 +446,9 @@ async function dispatch({ action, params = {} }) {
 
   if (CDP_ACTIONS.includes(action)) {
     const tab = await targetTab(params);
-    const reply = await handleCdp(action, params, tab.id);
+    const cdpParams =
+      action === "capture_screenshot" ? { ...params, emulateFocus: !(await inFront(tab)) } : params;
+    const reply = await handleCdp(action, cdpParams, tab.id);
     if (action === "a11y_snapshot" && reply && reply.ok) {
       return { ok: true, result: await enrichAxWithRefs(reply.result, tab.id) };
     }
@@ -478,8 +492,10 @@ async function dispatch({ action, params = {} }) {
     case "screenshot":
       if (params.fullPage) {
         const tab = await targetTab(params);
+        await wakeIfAsleep(tab);
         await ensureAttached(tab.id);
-        return await handleCdp("capture_screenshot", params, tab.id);
+        const emulateFocus = !(await inFront(tab));
+        return await handleCdp("capture_screenshot", { ...params, emulateFocus }, tab.id);
       }
       return { ok: true, result: await screenshot(params) };
     case "list_tabs":
@@ -973,7 +989,7 @@ function fitsViewport(r) {
 // so the CSS box is scaled by the ratio between the image and the reported viewport.
 async function cropVisibleTab(tab, rect, format = "png") {
   const fmt = format === "jpeg" ? "jpeg" : "png";
-  const shot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+  const shot = await captureVisible(tab.id, tab.windowId, { format: "png" });
   const bitmap = await createImageBitmap(await (await fetch(shot)).blob());
   const scale = bitmap.width / rect.viewport.width;
   const sx = Math.round(rect.x * scale);
@@ -1006,18 +1022,82 @@ async function getDevicePixelRatio(tabId) {
   }
 }
 
+// Chrome allows captureVisibleTab only twice a second per extension, and every session on this
+// browser shares that budget. Calls are queued and spaced so concurrent sessions wait their turn
+// instead of failing with the quota error.
+const CAPTURE_VISIBLE_SPACING_MS = 550;
+let captureVisibleQueue = Promise.resolve();
+let lastCaptureVisibleAt = 0;
+
+// A queued capture checks, when its turn comes, that the tab is still the active tab of its window:
+// captureVisibleTab captures whatever is active then, and another session may have switched tabs
+// while this one waited. A tab that left the front rejects with code TAB_LEFT_FRONT, so the caller
+// can capture it as a background tab instead. Each capture is bounded, so one that never settles
+// cannot hold the queue for every other session on this browser.
+const CAPTURE_VISIBLE_MS = 5000;
+
+function captureVisible(tabId, windowId, opts) {
+  const run = async () => {
+    const wait = lastCaptureVisibleAt + CAPTURE_VISIBLE_SPACING_MS - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    const now = await chrome.tabs.get(tabId).catch(() => null);
+    if (!now || !now.active || now.windowId !== windowId) {
+      const err = new Error(`tab ${tabId} is no longer the visible tab of its window`);
+      err.code = "TAB_LEFT_FRONT";
+      throw err;
+    }
+    lastCaptureVisibleAt = Date.now();
+    let timer;
+    const bound = new Promise((_, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(new Error(`the visible-tab capture of tab ${tabId} did not answer within 5 s`)),
+        CAPTURE_VISIBLE_MS
+      );
+    });
+    const shot = await Promise.race([chrome.tabs.captureVisibleTab(windowId, opts), bound]).finally(
+      () => clearTimeout(timer)
+    );
+    // A switch between the check above and the capture would return another tab's pixels
+    const after = await chrome.tabs.get(tabId).catch(() => null);
+    if (!after || !after.active || after.windowId !== windowId) {
+      const err = new Error(`tab ${tabId} left the front during its capture`);
+      err.code = "TAB_LEFT_FRONT";
+      throw err;
+    }
+    return shot;
+  };
+  const next = captureVisibleQueue.then(run, run);
+  captureVisibleQueue = next.catch(() => {});
+  return next;
+}
+
 // A browser may not paint a tab that is not in front (Edge does not), and CDP then never answers
-// Page.captureScreenshot. A background capture is bounded so the caller gets a hint, not a hang.
+// Page.captureScreenshot. A background capture runs under focus emulation, which makes such a
+// browser paint the tab, and is bounded so the caller gets a hint, not a hang, if it still does not.
 const BACKGROUND_CAPTURE_MS = 5000;
 
-function captureBackground(tab, opts) {
+// A tab is in front when it is the active tab of a focused window.
+async function inFront(tab) {
+  if (!tab.active) return false;
+  try {
+    return (await chrome.windows.get(tab.windowId)).focused === true;
+  } catch {
+    return false;
+  }
+}
+
+// The debugger is attached before the bound starts, so a slow first attach never counts as a
+// capture that did not answer.
+async function captureBackground(tab, opts) {
+  await ensureAttached(tab.id);
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(
       () =>
         reject(
           new Error(
-            `tab ${tab.id} is not in front and this browser did not paint it for a capture. ` +
+            `tab ${tab.id} is in the background and its capture did not answer within 5 s. ` +
               `Bring it to the front with browser_tabs({action: "select", tabId: ${tab.id}, activate: true}), ` +
               `then take the screenshot again.`
           )
@@ -1025,24 +1105,31 @@ function captureBackground(tab, opts) {
       BACKGROUND_CAPTURE_MS
     );
   });
-  return Promise.race([captureViewport(tab.id, opts), timeout]).finally(() => clearTimeout(timer));
+  timeout.catch(() => {});
+  const capture = captureViewport(tab.id, { ...opts, emulateFocus: true, deadline: timeout });
+  return Promise.race([capture, timeout]).finally(() => clearTimeout(timer));
 }
 
 async function screenshot(params = {}) {
   const { format = "jpeg", quality = 55 } = params;
   const tab = await targetTab(params);
+  await wakeIfAsleep(tab);
   if (isAttached(tab.id)) {
-    if (!tab.active) return await captureBackground(tab, { format, quality });
+    if (!(await inFront(tab))) return await captureBackground(tab, { format, quality });
     return await captureViewport(tab.id, { format, quality });
   }
   if (tab.active) {
     const opts = format === "png" ? { format: "png" } : { format: "jpeg", quality };
-    let dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, opts);
-    if (format !== "png" && dataUrl.length > 500000) {
-      dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 30 });
+    try {
+      let dataUrl = await captureVisible(tab.id, tab.windowId, opts);
+      if (format !== "png" && dataUrl.length > 500000) {
+        dataUrl = await captureVisible(tab.id, tab.windowId, { format: "jpeg", quality: 30 });
+      }
+      setLastCaptureScale(tab.id, await getDevicePixelRatio(tab.id));
+      return { dataUrl };
+    } catch (err) {
+      if (err.code !== "TAB_LEFT_FRONT") throw err;
     }
-    setLastCaptureScale(tab.id, await getDevicePixelRatio(tab.id));
-    return { dataUrl };
   }
   return await captureBackground(tab, { format, quality });
 }
@@ -1069,6 +1156,8 @@ async function listTabs() {
       ...(t.incognito ? { incognito: true } : {}),
       focusedWindow: !!(t.active && lastFocused && t.windowId === lastFocused.id),
       ...(t.groupId != null && t.groupId !== -1 ? { groupId: t.groupId } : {}),
+      ...(t.frozen ? { frozen: true } : {}),
+      ...(t.discarded ? { discarded: true } : {}),
       ...(t.id === targetTabId ? { pinned: true } : {}),
     })),
     ...(targetTabId == null ? { pinned: null } : { pinned: targetTabId }),
@@ -1291,8 +1380,72 @@ async function withDialogGuard(action, params, frameId, tabId) {
   }
 }
 
+// A browser freezes a tab left in the background (Edge sleeping tabs, Chrome's memory and energy
+// savers): its page stops handling messages, so a command would wait for the bridge timeout. A
+// frozen tab is woken first. A discarded tab has no page left, and is reported rather than
+// reloaded, because a reload loses whatever the user typed there.
+// Not every browser reports the frozen flag (Edge does not), so a background page that does not
+// answer within ASLEEP_PING_MS is treated as frozen too. A page whose content script is live
+// answers any message at once, even one it has no handler for. A page with no content script (an
+// extension reload orphans them) refuses the message at once, so it is probed with an empty script
+// instead, which a frozen page does not run.
+const ASLEEP_PING_MS = 800;
+
+function answersWithin(promise, ms) {
+  let timer;
+  return Promise.race([
+    promise.then(
+      () => true,
+      () => true
+    ),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+async function wakeIfAsleep(tab) {
+  if (tab.discarded) {
+    throw new Error(
+      `tab ${tab.id} was discarded by the browser to save memory, so it has no page to act on. ` +
+        `Reload it with browser_navigate({reload: true}) (unsaved input on it is lost), or use another tab.`
+    );
+  }
+  if (tab.frozen) return await wakeFrozenTab(tab.id);
+  // A loading page has no content script yet and a slow load looks like no answer, so only a
+  // settled background page is checked
+  if (tab.active || tab.status === "loading") return;
+  let listening = true;
+  const pinged = await answersWithin(
+    chrome.tabs.sendMessage(tab.id, { action: "__bctl_ping" }, { frameId: 0 }).catch((err) => {
+      listening = false;
+      throw err;
+    }),
+    ASLEEP_PING_MS
+  );
+  let awake = pinged && listening;
+  if (pinged && !listening) {
+    awake = await answersWithin(
+      chrome.scripting.executeScript({
+        target: { tabId: tab.id, frameIds: [0] },
+        func: () => 1,
+        injectImmediately: true,
+      }),
+      ASLEEP_PING_MS
+    );
+  }
+  // This wake rests on a guess (a page that did not answer in time), so a failed wake, such as
+  // DevTools holding the tab, lets the command go ahead as it would have without the check
+  if (!awake) {
+    try {
+      await wakeFrozenTab(tab.id);
+    } catch {}
+  }
+}
+
 async function toContent(action, params, frameId = 0) {
   const tab = await targetTab(params);
+  await wakeIfAsleep(tab);
   const urlBefore = tab.url;
   const opts = { frameId };
   try {

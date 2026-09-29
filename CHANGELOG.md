@@ -3,6 +3,27 @@
 One entry per published version. The reasoning and measurements behind each change are in the
 commit history and on the GitHub release.
 
+## 0.9.2
+
+Several agents can now work on the same browser at the same time, and long-open background tabs
+no longer stall.
+
+- Two sessions taking screenshots on one browser no longer refuse each other. Chrome allows two
+  visible-tab captures a second per extension; captures are queued. A tab that another session
+  moves out of view while a capture waits is captured as a background tab, never as the other
+  tab's pixels.
+- Commands on one tab from several sessions share a single debugger attach, so none fails with
+  "another debugger is already attached".
+- Edge now captures background tabs without bringing them to the front, as Chrome and Brave do.
+  Focus emulation is on only for the moment of the capture.
+- A tab the browser froze in the background (Edge sleeping tabs, Chrome and Brave memory and
+  energy savers) is woken before a command, instead of every command waiting 30 s. A discarded tab
+  is reported with a reload hint, and `browser_tabs list` marks `frozen` and `discarded` tabs.
+- `browser_get_property` reads `checked` on a checkbox or radio. A click that checks one, or its
+  label, is confirmed instead of warned about as "the page did not change".
+- New release gate: one session per connected browser (up to three) runs every core action at the
+  same time, and each session's commands must stay on its own browser and tab.
+
 ## 0.9.1
 
 One bridge serves every browser and profile on the machine. Install the extension in each profile

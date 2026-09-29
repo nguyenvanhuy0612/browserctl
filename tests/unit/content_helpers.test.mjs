@@ -151,7 +151,11 @@ test("shortHref: keeps at most KEPT_PARAMS non-dropped params", () => {
   const out = shortHref(href);
   const kept = consts.KEPT_PARAMS;
   const keptParamCount = (out.match(/[?&][a-z]=\d/g) || []).length;
-  assert.equal(keptParamCount, kept, `expected exactly KEPT_PARAMS=${kept} kept params, got: ${out}`);
+  assert.equal(
+    keptParamCount,
+    kept,
+    `expected exactly KEPT_PARAMS=${kept} kept params, got: ${out}`
+  );
   assert.ok(new RegExp(`\\[\\+${4 - kept} params\\]$`).test(out), out);
 });
 
@@ -161,7 +165,10 @@ test("shortHref: caps total length at HREF_CAP and appends an ellipsis", () => {
   const href = `https://example.com/${longPath}`;
   const out = shortHref(href);
   const withoutTag = out.replace(/ \[\+\d+ params\]$/, "");
-  assert.ok(withoutTag.length <= consts.HREF_CAP + 1, `expected capped length, got ${withoutTag.length}`);
+  assert.ok(
+    withoutTag.length <= consts.HREF_CAP + 1,
+    `expected capped length, got ${withoutTag.length}`
+  );
   assert.ok(withoutTag.endsWith("…"));
 });
 
@@ -299,8 +306,13 @@ test("hiddenContentHints: does NOT flag a plain 'All' filter", () => {
   // load-more vocabulary (regression: substring matching on /all/ used to flag this).
   const parent = runParent(5);
   const el = fakeEl({ text: "All", parent });
-  const siblings = [el, fakeEl({ text: "Open", parent }), fakeEl({ text: "Closed", parent }),
-    fakeEl({ text: "Draft", parent }), fakeEl({ text: "Archived", parent })];
+  const siblings = [
+    el,
+    fakeEl({ text: "Open", parent }),
+    fakeEl({ text: "Closed", parent }),
+    fakeEl({ text: "Draft", parent }),
+    fakeEl({ text: "Archived", parent }),
+  ];
   const { more } = hiddenContentHints(siblings);
   assert.equal(more.length, 0);
 });
@@ -420,7 +432,7 @@ const composer = {
   __role: "textbox",
   __name: "Message Body",
   tagName: "DIV",
-  matches: (sel) => sel === "div[role=\"textbox\"][contenteditable]",
+  matches: (sel) => sel === 'div[role="textbox"][contenteditable]',
 };
 
 test("find: a CSS selector returns the same ref shape as a text match", () => {
@@ -522,7 +534,10 @@ test("get_property: all=true returns one row per match, each with its own ref", 
   const res = get_property({ property: "attr", attr: "href", selector: "a", all: true });
   assert.equal(res.all, true);
   assert.equal(res.count, 2);
-  assert.deepEqual(res.matches.map((m) => m.ref), ["ref_1", "ref_2"]);
+  assert.deepEqual(
+    res.matches.map((m) => m.ref),
+    ["ref_1", "ref_2"]
+  );
   // A relative href is resolved, which is the whole reason the read was re-derived in JS.
   assert.equal(res.matches[0].resolved, "https://site.test/go/1");
   assert.equal(res.matches[1].value, "https://wd.example/job/R7940");
@@ -536,7 +551,10 @@ test("get_property: all=true reads text as happily as attributes", () => {
 
 test("get_property: all=true without a selector says why, instead of reading one element", () => {
   const get_property = loadGetProperty([]);
-  assert.throws(() => get_property({ property: "text", ref: "ref_1", all: true }), /'all' reads every match/);
+  assert.throws(
+    () => get_property({ property: "text", ref: "ref_1", all: true }),
+    /'all' reads every match/
+  );
 });
 
 test("get_property: all=true on zero matches is an answer, not a failure", () => {
@@ -578,9 +596,17 @@ function loadSelectOption(options) {
   const stubs = {
     resolveTarget: () => el,
     actionability: () => null,
-    Event: class { constructor(type) { this.type = type; } },
+    Event: class {
+      constructor(type) {
+        this.type = type;
+      }
+    },
   };
-  const { select_option } = loadFromContentJs([extractFunction(SRC, "select_option")], ["select_option"], stubs);
+  const { select_option } = loadFromContentJs(
+    [extractFunction(SRC, "select_option")],
+    ["select_option"],
+    stubs
+  );
   return { select_option, el };
 }
 
@@ -676,8 +702,14 @@ const leaf = (text, attrs = {}) => ({
 
 test("get_property: fields reads several values from each row in one call", () => {
   const rows = [
-    mkRow("li.result", "ref_1", { h3: leaf("First post"), a: leaf("First post", { href: "/one" }) }),
-    mkRow("li.result", "ref_2", { h3: leaf("Second post"), a: leaf("Second post", { href: "https://x.test/two" }) }),
+    mkRow("li.result", "ref_1", {
+      h3: leaf("First post"),
+      a: leaf("First post", { href: "/one" }),
+    }),
+    mkRow("li.result", "ref_2", {
+      h3: leaf("Second post"),
+      a: leaf("Second post", { href: "https://x.test/two" }),
+    }),
   ];
   const get_property = loadGetPropertyFields(rows);
   const res = get_property({
@@ -699,16 +731,27 @@ test("get_property: fields reads several values from each row in one call", () =
 test("get_property: a field that matches nothing inside the row says so, and says why", () => {
   const rows = [mkRow("li.result", "ref_1", { h3: leaf("Only a title") })];
   const get_property = loadGetPropertyFields(rows);
-  const res = get_property({ selector: "li.result", all: true, fields: { title: "h3", points: ".score" } });
+  const res = get_property({
+    selector: "li.result",
+    all: true,
+    fields: { title: "h3", points: ".score" },
+  });
   assert.equal(res.matches[0].points, null);
   assert.match(res.note, /no match inside the row for: points \(1\/1 rows\)/);
   assert.match(res.note, /SIBLING of the row/);
 });
 
 test("get_property: the field note and the paging note do not overwrite each other", () => {
-  const rows = Array.from({ length: 5 }, (_, i) => mkRow("li.result", `ref_${i}`, { h3: leaf(`row ${i}`) }));
+  const rows = Array.from({ length: 5 }, (_, i) =>
+    mkRow("li.result", `ref_${i}`, { h3: leaf(`row ${i}`) })
+  );
   const get_property = loadGetPropertyFields(rows);
-  const res = get_property({ selector: "li.result", all: true, max: 2, fields: { title: "h3", points: ".score" } });
+  const res = get_property({
+    selector: "li.result",
+    all: true,
+    max: 2,
+    fields: { title: "h3", points: ".score" },
+  });
   // Two unrelated facts arrive as two entries, not as one joined sentence.
   const notes = [].concat(res.note);
   assert.equal(notes.length, 2);
@@ -760,7 +803,6 @@ test("fromPage is a pass-through now: the boundary is structural, not a marker",
   assert.equal(fromPage(undefined), undefined);
 });
 
-
 // =====================================================================================
 // waitForStableRect — a click must not read its coordinates off a moving box
 // =====================================================================================
@@ -805,14 +847,19 @@ function stabilityCtx({ visibilityState = "visible", animations = [] } = {}) {
       visibilityState,
       getAnimations: () => animations,
     },
-    requestAnimationFrame: (cb) => { frames++; setTimeout(cb, 16); },
+    requestAnimationFrame: (cb) => {
+      frames++;
+      setTimeout(cb, 16);
+    },
     setTimeout,
     Date,
     Infinity,
     Number,
     Math,
     Object,
-    get frames() { return frames; },
+    get frames() {
+      return frames;
+    },
   };
 }
 
@@ -824,14 +871,23 @@ test("a visible box that is not moving costs one frame and reports nothing", asy
   const ctx = stabilityCtx();
   const { waitForStableRect } = loadStability(ctx);
   const res = await waitForStableRect(movingEl([[10, 20, 100, 30]]));
-  assert.deepEqual({ ...res }, { moved: false }, "a static element must not add a field to the result");
+  assert.deepEqual(
+    { ...res },
+    { moved: false },
+    "a static element must not add a field to the result"
+  );
 });
 
 test("a visible box that settles after a few frames says it moved, and that it settled", async () => {
   const { waitForStableRect } = loadStability(stabilityCtx());
-  const res = await waitForStableRect(movingEl([
-    [10, 0, 100, 30], [10, 40, 100, 30], [10, 60, 100, 30], [10, 60, 100, 30],
-  ]));
+  const res = await waitForStableRect(
+    movingEl([
+      [10, 0, 100, 30],
+      [10, 40, 100, 30],
+      [10, 60, 100, 30],
+      [10, 60, 100, 30],
+    ])
+  );
   assert.equal(res.moved, true);
   assert.equal(res.settled, true);
 });
@@ -840,9 +896,15 @@ test("sub-pixel drift still counts as movement", async () => {
   // 400px over 10s is 0.66px per frame. A 1px tolerance read that as "not moving", and the
   // slow animations are the ones a click is most likely to land in the middle of.
   const { waitForStableRect } = loadStability(stabilityCtx());
-  const res = await waitForStableRect(movingEl([
-    [0, 0, 10, 10], [0.66, 0, 10, 10], [1.32, 0, 10, 10], [1.98, 0, 10, 10],
-  ]), { maxMs: 100 });
+  const res = await waitForStableRect(
+    movingEl([
+      [0, 0, 10, 10],
+      [0.66, 0, 10, 10],
+      [1.32, 0, 10, 10],
+      [1.98, 0, 10, 10],
+    ]),
+    { maxMs: 100 }
+  );
   assert.equal(res.moved, true);
 });
 
@@ -869,7 +931,10 @@ test("a hidden tab with nothing animating reports nothing, and never waits for a
 
 test("a hidden tab with a long animation reports the moving target without waiting for it", async () => {
   const el = movingEl([[0, 0, 10, 10]]);
-  const ctx = stabilityCtx({ visibilityState: "hidden", animations: [animation(el, { left: Infinity })] });
+  const ctx = stabilityCtx({
+    visibilityState: "hidden",
+    animations: [animation(el, { left: Infinity })],
+  });
   const { waitForStableRect } = loadStability(ctx);
   const res = await waitForStableRect(el, { maxMs: 300 });
   assert.equal(res.moved, true);
@@ -885,7 +950,7 @@ test("a hidden tab with a short animation waits it out and then reports it settl
   const ctx = stabilityCtx({ visibilityState: "hidden", animations });
   const { waitForStableRect } = loadStability(ctx);
   const p = waitForStableRect(el, { maxMs: 300 });
-  anim.playState = "finished";   // it ends while we are waiting
+  anim.playState = "finished"; // it ends while we are waiting
   const res = await p;
   assert.equal(res.moved, true);
   assert.equal(res.settled, true);
@@ -896,7 +961,10 @@ test("an animation that does not move the box is not a moving target", async () 
   const el = movingEl([[0, 0, 10, 10]]);
   const ctx = stabilityCtx({
     visibilityState: "hidden",
-    animations: [animation(el, { props: ["opacity"] }), animation(el, { props: ["backgroundColor"] })],
+    animations: [
+      animation(el, { props: ["opacity"] }),
+      animation(el, { props: ["backgroundColor"] }),
+    ],
   });
   const { waitForStableRect, runningMotion } = loadStability(ctx);
   assert.equal(runningMotion(el), null, "a fade must not make every click in the subtree warn");
@@ -907,16 +975,25 @@ test("an animation on an ancestor counts — a sliding modal carries its buttons
   const button = movingEl([[0, 0, 10, 10]]);
   const modal = { contains: (n) => n === button };
   button.parentNode = modal;
-  const ctx = stabilityCtx({ visibilityState: "hidden", animations: [animation(modal, { left: Infinity })] });
+  const ctx = stabilityCtx({
+    visibilityState: "hidden",
+    animations: [animation(modal, { left: Infinity })],
+  });
   const { runningMotion } = loadStability(ctx);
-  assert.ok(runningMotion(button), "an animation on the container must count for the control inside it");
+  assert.ok(
+    runningMotion(button),
+    "an animation on the container must count for the control inside it"
+  );
 });
 
 // =====================================================================================
 // target resolution — 5-step deterministic resolution and ambiguity handling
 // =====================================================================================
 
-function loadResolveTarget(elements = [], { refMap = {}, refLabels = {}, customMatches = null } = {}) {
+function loadResolveTarget(
+  elements = [],
+  { refMap = {}, refLabels = {}, customMatches = null } = {}
+) {
   const slices = [
     extractFunction(SRC, "createStructuredError"),
     extractFunction(SRC, "makeCandidate"),
@@ -938,7 +1015,10 @@ function loadResolveTarget(elements = [], { refMap = {}, refLabels = {}, customM
     isValidCss: (sel) =>
       typeof sel === "string" &&
       !sel.includes("!") &&
-      (sel.startsWith("#") || sel.startsWith(".") || /^[a-z0-9_-]+$/i.test(sel) || sel.includes("[")),
+      (sel.startsWith("#") ||
+        sel.startsWith(".") ||
+        /^[a-z0-9_-]+$/i.test(sel) ||
+        sel.includes("[")),
     deepQueryAll: (sel) => {
       if (sel === "button, a, input, select, textarea, [role=button]" || sel === "[role=button]") {
         return elements.filter((e) => !e.__nonInteractive);
@@ -946,7 +1026,9 @@ function loadResolveTarget(elements = [], { refMap = {}, refLabels = {}, customM
       if (sel.includes("input") || sel.includes("textarea") || sel.includes("aria-label")) {
         return elements.filter((e) => e.placeholder || e["aria-label"] || e.tagName === "INPUT");
       }
-      return elements.filter((e) => e.__sel === sel || e.tagName?.toLowerCase() === sel.toLowerCase());
+      return elements.filter(
+        (e) => e.__sel === sel || e.tagName?.toLowerCase() === sel.toLowerCase()
+      );
     },
     isVisible: (el) => !el.__hidden,
     accessibleName: (el) => el.getAttribute?.("aria-label") || el["aria-label"] || "",
@@ -976,15 +1058,33 @@ test("resolveTarget: step 1 resolves by ref (@ref_1, ref_1)", () => {
 });
 
 test("resolveTarget: step 2 resolves single bare CSS selector, while explicit css= prefix grants first-match", () => {
-  const btnUnique = { tagName: "BUTTON", innerText: "Submit", isConnected: true, __ref: "ref_0", __sel: "#btn-unique" };
+  const btnUnique = {
+    tagName: "BUTTON",
+    innerText: "Submit",
+    isConnected: true,
+    __ref: "ref_0",
+    __sel: "#btn-unique",
+  };
   const resolveTargetSingle = loadResolveTarget([btnUnique]);
   const resSingle = resolveTargetSingle({ target: "#btn-unique" });
   assert.equal(resSingle, btnUnique);
   assert.equal(resSingle._resolved.by, "css");
   assert.equal(resSingle._resolved.matchCount, 1);
 
-  const btn1 = { tagName: "BUTTON", innerText: "Submit", isConnected: true, __ref: "ref_1", __sel: ".btn-submit" };
-  const btn2 = { tagName: "BUTTON", innerText: "Submit", isConnected: true, __ref: "ref_2", __sel: ".btn-submit" };
+  const btn1 = {
+    tagName: "BUTTON",
+    innerText: "Submit",
+    isConnected: true,
+    __ref: "ref_1",
+    __sel: ".btn-submit",
+  };
+  const btn2 = {
+    tagName: "BUTTON",
+    innerText: "Submit",
+    isConnected: true,
+    __ref: "ref_2",
+    __sel: ".btn-submit",
+  };
   const resolveTargetMulti = loadResolveTarget([btn1, btn2]);
 
   // Bare CSS matching multiple elements must throw AMBIGUOUS_TARGET
@@ -1030,8 +1130,21 @@ test("resolveTarget: index= prefix string resolves by snapshot index", () => {
 });
 
 test("resolveTarget: bare tag name 'search' prefers visible button text (step 3) over container landmark", () => {
-  const landmark = { tagName: "SEARCH", innerText: "Landmark", isConnected: true, __ref: "ref_1", __sel: "search", __nonInteractive: true };
-  const btn = { tagName: "BUTTON", innerText: "search", isConnected: true, __ref: "ref_2", __sel: "button" };
+  const landmark = {
+    tagName: "SEARCH",
+    innerText: "Landmark",
+    isConnected: true,
+    __ref: "ref_1",
+    __sel: "search",
+    __nonInteractive: true,
+  };
+  const btn = {
+    tagName: "BUTTON",
+    innerText: "search",
+    isConnected: true,
+    __ref: "ref_2",
+    __sel: "button",
+  };
   const resolveTarget = loadResolveTarget([landmark, btn]);
   const res = resolveTarget({ target: "search" });
   assert.equal(res, btn);
@@ -1039,7 +1152,14 @@ test("resolveTarget: bare tag name 'search' prefers visible button text (step 3)
 });
 
 test("resolveTarget: bare tag name resolves as type selector in step 6 when no text matches", () => {
-  const nav = { tagName: "NAV", innerText: "Quick jump", isConnected: true, __ref: "ref_3", __sel: "nav", __nonInteractive: true };
+  const nav = {
+    tagName: "NAV",
+    innerText: "Quick jump",
+    isConnected: true,
+    __ref: "ref_3",
+    __sel: "nav",
+    __nonInteractive: true,
+  };
   const resolveTarget = loadResolveTarget([nav]);
   const res = resolveTarget({ target: "nav" });
   assert.equal(res, nav);
@@ -1072,7 +1192,12 @@ test("resolveTarget: step 4 resolves by exact placeholder or aria-label", () => 
 });
 
 test("resolveTarget: step 5 resolves by visible text substring", () => {
-  const btn = { tagName: "BUTTON", innerText: "Checkout now with Paypal", isConnected: true, __ref: "ref_30" };
+  const btn = {
+    tagName: "BUTTON",
+    innerText: "Checkout now with Paypal",
+    isConnected: true,
+    __ref: "ref_30",
+  };
   const resolveTarget = loadResolveTarget([btn]);
   const res = resolveTarget({ target: "Checkout now" });
   assert.equal(res, btn);
@@ -1112,10 +1237,7 @@ test("resolveTarget: explicit prefix css=, text=, placeholder= forces that resol
 });
 
 test("fill_form: sequential stop-on-failure contract returns completed fields and failedIndex", async () => {
-  const slices = [
-    extractFunction(SRC, "createStructuredError"),
-    extractFunction(SRC, "fill_form"),
-  ];
+  const slices = [extractFunction(SRC, "createStructuredError"), extractFunction(SRC, "fill_form")];
   const filledFields = [];
   const stubs = {
     location: { href: "https://site.test" },
@@ -1151,7 +1273,13 @@ test("fill_form: sequential stop-on-failure contract returns completed fields an
 });
 
 test("resolveTarget: a label and the control it names are one exact-text hit, not two", () => {
-  const input = { tagName: "INPUT", innerText: "", "aria-label": "Email", isConnected: true, __ref: "ref_7" };
+  const input = {
+    tagName: "INPUT",
+    innerText: "",
+    "aria-label": "Email",
+    isConnected: true,
+    __ref: "ref_7",
+  };
   const label = { tagName: "LABEL", innerText: "Email", isConnected: true, control: input };
   const resolveTarget = loadResolveTarget([label, input]);
   assert.equal(resolveTarget({ target: "Email" }), input);
@@ -1178,7 +1306,10 @@ test("fill_form: a <select> field chooses an option instead of writing into .val
     location: { href: "https://site.test" },
     startMutationCounter: () => ({ stop: () => 0 }),
     buildEffect: () => ({ mutations: 0 }),
-    resolveTarget: ({ target }) => ({ tagName: target === "country" ? "SELECT" : "INPUT", _resolved: {} }),
+    resolveTarget: ({ target }) => ({
+      tagName: target === "country" ? "SELECT" : "INPUT",
+      _resolved: {},
+    }),
     select_option: ({ target, values }) => {
       if (values[0] === "Atlantis") throw new Error('no option matching "Atlantis"');
       chosen.push([target, values[0]]);
@@ -1187,7 +1318,13 @@ test("fill_form: a <select> field chooses an option instead of writing into .val
     actionability: () => null,
   };
   const { fill_form } = loadFromContentJs(slices, ["fill_form"], stubs);
-  await fill_form({ fields: [{ target: "name", value: "An" }, { target: "country", value: "Vietnam" }], autoSettle: false });
+  await fill_form({
+    fields: [
+      { target: "name", value: "An" },
+      { target: "country", value: "Vietnam" },
+    ],
+    autoSettle: false,
+  });
   assert.deepEqual(chosen, [["country", "Vietnam"]]);
   assert.deepEqual(written, ["An"]);
   await assert.rejects(
@@ -1283,11 +1420,26 @@ test("naming: hidden text is the last resort, after every attribute", () => {
 });
 
 test("census: hoisted inputs are listed once, not again in the body", () => {
-  const { splitHoistedInputs } = loadFromContentJs([extractFunction(SRC, "splitHoistedInputs")], ["splitHoistedInputs"]);
-  const els = [{ tag: "a" }, { tag: "input" }, { tag: "button" }, { tag: "select" }, { tag: "textarea" }];
+  const { splitHoistedInputs } = loadFromContentJs(
+    [extractFunction(SRC, "splitHoistedInputs")],
+    ["splitHoistedInputs"]
+  );
+  const els = [
+    { tag: "a" },
+    { tag: "input" },
+    { tag: "button" },
+    { tag: "select" },
+    { tag: "textarea" },
+  ];
   const { hoisted, listed } = splitHoistedInputs(els);
-  assert.deepEqual(hoisted.map((e) => e.tag), ["input", "select", "textarea"]);
-  assert.deepEqual(listed.map((e) => e.tag), ["a", "button"]);
+  assert.deepEqual(
+    hoisted.map((e) => e.tag),
+    ["input", "select", "textarea"]
+  );
+  assert.deepEqual(
+    listed.map((e) => e.tag),
+    ["a", "button"]
+  );
 });
 
 test("census state: on reads as its name, off only where it is an answer", () => {
@@ -1299,15 +1451,22 @@ test("census state: on reads as its name, off only where it is an answer", () =>
   assert.deepEqual([...stateTags({ checked: "false" })], ["unchecked"]);
   assert.deepEqual([...stateTags({ expanded: "false" })], ["collapsed"]);
   assert.deepEqual([...stateTags({ expanded: "true", selected: "false" })], ["expanded"]);
-  assert.deepEqual([...stateTags({ current: "page", checked: "mixed" })], ["current=page", "checked=mixed"]);
+  assert.deepEqual(
+    [...stateTags({ current: "page", checked: "mixed" })],
+    ["current=page", "checked=mixed"]
+  );
   assert.deepEqual([...stateTags(undefined)], []);
 });
 
 test("census state: native checkboxes and radios report checked, controls report disabled", () => {
   const { nativeState } = loadFromContentJs([extractFunction(SRC, "nativeState")], ["nativeState"]);
   const plain = (o) => JSON.parse(JSON.stringify(o));
-  assert.deepEqual(plain(nativeState({ tagName: "INPUT", type: "checkbox", checked: true })), { checked: "true" });
-  assert.deepEqual(plain(nativeState({ tagName: "INPUT", type: "radio", checked: false })), { checked: "false" });
+  assert.deepEqual(plain(nativeState({ tagName: "INPUT", type: "checkbox", checked: true })), {
+    checked: "true",
+  });
+  assert.deepEqual(plain(nativeState({ tagName: "INPUT", type: "radio", checked: false })), {
+    checked: "false",
+  });
   assert.deepEqual(plain(nativeState({ tagName: "BUTTON", disabled: true })), { disabled: "true" });
   assert.deepEqual(plain(nativeState({ tagName: "INPUT", type: "text", disabled: false })), {});
   assert.deepEqual(plain(nativeState({ tagName: "A" })), {});
@@ -1325,7 +1484,10 @@ test("census: a disabled control that is on screen is listed; a hidden one is no
   const box = { getBoundingClientRect: () => ({ width: 80, height: 30 }) };
   assert.equal(isShownDisabled({ ...box, disabled: true }), true);
   assert.equal(isShownDisabled({ ...box, disabled: false }), false);
-  assert.equal(isShownDisabled({ ...box, disabled: true, __style: { ...style, display: "none" } }), false);
+  assert.equal(
+    isShownDisabled({ ...box, disabled: true, __style: { ...style, display: "none" } }),
+    false
+  );
   assert.equal(
     isShownDisabled({ disabled: true, getBoundingClientRect: () => ({ width: 0, height: 0 }) }),
     false
@@ -1334,7 +1496,11 @@ test("census: a disabled control that is on screen is listed; a hidden one is no
 
 test("find ranks an exact name before a word start, and a word start before a substring", () => {
   const { rankByMatch } = loadFromContentJs(
-    [extractFunction(SRC, "foldText"), extractFunction(SRC, "matchTier"), extractFunction(SRC, "rankByMatch")],
+    [
+      extractFunction(SRC, "foldText"),
+      extractFunction(SRC, "matchTier"),
+      extractFunction(SRC, "rankByMatch"),
+    ],
     ["rankByMatch"]
   );
   const items = ["apnews.com", "Hacker News", "new", "New comments", "renew"].map((n) => ({ n }));
@@ -1356,13 +1522,21 @@ test("keys carry the code and keyCode a real keyboard sends", () => {
   assert.deepEqual(kd("7"), { key: "7", code: "Digit7", keyCode: 55, which: 55 });
   assert.deepEqual(kd("Enter"), { key: "Enter", code: "Enter", keyCode: 13, which: 13 });
   assert.deepEqual(kd("Tab"), { key: "Tab", code: "Tab", keyCode: 9, which: 9 });
-  assert.deepEqual(kd("ArrowDown"), { key: "ArrowDown", code: "ArrowDown", keyCode: 40, which: 40 });
+  assert.deepEqual(kd("ArrowDown"), {
+    key: "ArrowDown",
+    code: "ArrowDown",
+    keyCode: 40,
+    which: 40,
+  });
   assert.deepEqual(kd("F5"), { key: "F5", code: "F5", keyCode: 116, which: 116 });
   assert.deepEqual(kd(" "), { key: " ", code: "Space", keyCode: 32, which: 32 });
 });
 
 test("a label that wraps its control is named by its own words, not the control's", () => {
-  const { labelOwnText } = loadFromContentJs([extractFunction(SRC, "labelOwnText")], ["labelOwnText"]);
+  const { labelOwnText } = loadFromContentJs(
+    [extractFunction(SRC, "labelOwnText")],
+    ["labelOwnText"]
+  );
   const removed = [];
   const option = { remove: () => removed.push("select") };
   const label = {
@@ -1380,7 +1554,10 @@ test("a label that wraps its control is named by its own words, not the control'
 
 test("scroll: a hidden tab gets the 'scroll' event it would not fire itself; a visible one does not", () => {
   const fired = [];
-  const node = (nodeType) => ({ nodeType, dispatchEvent: (e) => fired.push([nodeType, e.type, e.bubbles]) });
+  const node = (nodeType) => ({
+    nodeType,
+    dispatchEvent: (e) => fired.push([nodeType, e.type, e.bubbles]),
+  });
   const load = (visibilityState) =>
     loadFromContentJs([extractFunction(SRC, "announceScroll")], ["announceScroll"], {
       document: { visibilityState },
@@ -1388,7 +1565,14 @@ test("scroll: a hidden tab gets the 'scroll' event it would not fire itself; a v
     }).announceScroll;
   assert.equal(load("hidden")(node(9)), true);
   assert.equal(load("hidden")(node(1)), true);
-  assert.deepEqual(fired, [[9, "scroll", true], [1, "scroll", false]], "the document's bubbles to window; an element's does not");
+  assert.deepEqual(
+    fired,
+    [
+      [9, "scroll", true],
+      [1, "scroll", false],
+    ],
+    "the document's bubbles to window; an element's does not"
+  );
   fired.length = 0;
   assert.equal(load("visible")(node(9)), false);
   assert.deepEqual(fired, []);
@@ -1396,19 +1580,157 @@ test("scroll: a hidden tab gets the 'scroll' event it would not fire itself; a v
 
 test("hover sends pointer events before mouse events, at the element's centre", () => {
   const got = [];
-  class Ev { constructor(type, init) { this.type = type; Object.assign(this, init); } }
-  const { dispatchHover } = loadFromContentJs([extractFunction(SRC, "dispatchHover")], ["dispatchHover"], {
-    PointerEvent: class extends Ev {},
-    MouseEvent: class extends Ev {},
-    window: {},
-  });
+  class Ev {
+    constructor(type, init) {
+      this.type = type;
+      Object.assign(this, init);
+    }
+  }
+  const { dispatchHover } = loadFromContentJs(
+    [extractFunction(SRC, "dispatchHover")],
+    ["dispatchHover"],
+    {
+      PointerEvent: class extends Ev {},
+      MouseEvent: class extends Ev {},
+      window: {},
+    }
+  );
   const el = {
     getBoundingClientRect: () => ({ x: 10, y: 20, width: 100, height: 40 }),
     dispatchEvent: (e) => got.push(e),
   };
   dispatchHover(el);
-  assert.deepEqual(got.map((e) => e.type), ["pointerover", "pointerenter", "mouseover", "mouseenter", "pointermove", "mousemove"]);
-  assert.ok(got.every((e) => e.clientX === 60 && e.clientY === 40), "every event lands on the centre");
-  assert.equal(got.find((e) => e.type === "pointerenter").bubbles, false, "enter events do not bubble");
+  assert.deepEqual(
+    got.map((e) => e.type),
+    ["pointerover", "pointerenter", "mouseover", "mouseenter", "pointermove", "mousemove"]
+  );
+  assert.ok(
+    got.every((e) => e.clientX === 60 && e.clientY === 40),
+    "every event lands on the centre"
+  );
+  assert.equal(
+    got.find((e) => e.type === "pointerenter").bubbles,
+    false,
+    "enter events do not bubble"
+  );
   assert.equal(got.find((e) => e.type === "mouseover").bubbles, true);
+});
+
+// A native checkbox or radio as the content script sees it: tag, type and the checked property.
+const fakeInput = (type, checked, attrs = {}) => ({
+  tagName: "INPUT",
+  type,
+  checked,
+  getAttribute: (a) => (a in attrs ? attrs[a] : null),
+});
+
+test("get_property checked: reads a checkbox's checked property, false then true", () => {
+  const { readOneProperty } = loadFromContentJs(
+    [extractFunction(SRC, "readOneProperty"), extractFunction(SRC, "fromPage")],
+    ["readOneProperty"]
+  );
+  const box = fakeInput("checkbox", false);
+  assert.deepEqual({ ...readOneProperty(box, "checked") }, { property: "checked", value: false });
+  box.checked = true;
+  assert.deepEqual({ ...readOneProperty(box, "checked") }, { property: "checked", value: true });
+  assert.equal(readOneProperty(fakeInput("radio", true), "checked").value, true);
+});
+
+test("get_property checked: a text input is refused with an error naming checkbox or radio", () => {
+  const { readOneProperty } = loadFromContentJs(
+    [extractFunction(SRC, "readOneProperty"), extractFunction(SRC, "fromPage")],
+    ["readOneProperty"]
+  );
+  assert.throws(() => readOneProperty(fakeInput("text", false), "checked"), /checkbox or radio/);
+  assert.throws(
+    () => readOneProperty({ tagName: "DIV", getAttribute: () => null }, "checked"),
+    /checkbox or radio.*<div>/
+  );
+});
+
+function loadClickState() {
+  return loadFromContentJs(
+    [
+      extractConst(SRC, "CLICK_STATE_ATTRS"),
+      extractFunction(SRC, "clickStateOf"),
+      extractFunction(SRC, "applyClickState"),
+    ],
+    ["clickStateOf", "applyClickState"]
+  );
+}
+const quietEffect = () => ({
+  effect: { measured: true, domMutated: false, urlChanged: false, mutationCount: 0 },
+});
+
+test("click effect: a checkbox whose checked flips with 0 mutations is confirmed, with no warning", () => {
+  const { clickStateOf, applyClickState } = loadClickState();
+  const box = fakeInput("checkbox", false);
+  const before = clickStateOf(box);
+  box.checked = true;
+  const out = quietEffect();
+  applyClickState(out, before, clickStateOf(box));
+  assert.equal(out.warning, undefined);
+  assert.deepEqual([...out.effect.controlState.changed], ["checked: false -> true"]);
+});
+
+test("click effect: a radio that becomes checked is its own state change", () => {
+  const { clickStateOf, applyClickState } = loadClickState();
+  const radio = fakeInput("radio", false);
+  const before = clickStateOf(radio);
+  radio.checked = true;
+  const out = quietEffect();
+  applyClickState(out, before, clickStateOf(radio));
+  assert.equal(out.warning, undefined);
+  assert.deepEqual([...out.effect.controlState.changed], ["checked: false -> true"]);
+});
+
+test("click effect: a plain <div> with 0 mutations still warns that the page did not change", () => {
+  const { clickStateOf, applyClickState } = loadClickState();
+  const div = { tagName: "DIV", getAttribute: () => null };
+  const out = quietEffect();
+  applyClickState(out, clickStateOf(div), clickStateOf(div));
+  assert.match(out.warning, /the page did not change at all/);
+  assert.equal(out.effect.controlState, undefined);
+});
+
+test("click effect: an aria control that mutated the page but kept its state warns the selection did not take", () => {
+  const { clickStateOf, applyClickState } = loadClickState();
+  const tab = { tagName: "DIV", getAttribute: (a) => (a === "aria-selected" ? "false" : null) };
+  const out = { effect: { measured: true, domMutated: true, urlChanged: false, mutationCount: 3 } };
+  applyClickState(out, clickStateOf(tab), clickStateOf(tab));
+  assert.match(out.warning, /this control's own state did NOT \(selected: false\)/);
+  assert.deepEqual([...out.effect.controlState.unchanged], ["selected: false"]);
+});
+
+test("click effect: a click on a checkbox's label (or text inside it) is confirmed by the input's flip", () => {
+  const { clickStateOf, applyClickState } = loadClickState();
+  const box = fakeInput("checkbox", false);
+  const label = {
+    tagName: "LABEL",
+    control: box,
+    getAttribute: () => null,
+    closest: (sel) => (sel === "label" ? label : null),
+  };
+  const span = {
+    tagName: "SPAN",
+    getAttribute: () => null,
+    closest: (sel) => (sel === "label" ? label : null),
+  };
+  for (const el of [label, span]) {
+    box.checked = false;
+    const before = clickStateOf(el);
+    box.checked = true;
+    const out = quietEffect();
+    applyClickState(out, before, clickStateOf(el));
+    assert.equal(out.warning, undefined, `${el.tagName}: no warning`);
+    assert.deepEqual([...out.effect.controlState.changed], ["checked: false -> true"]);
+  }
+});
+
+test("click effect: an element outside any label still gets the did-not-change warning", () => {
+  const { clickStateOf, applyClickState } = loadClickState();
+  const div = { tagName: "DIV", getAttribute: () => null, closest: () => null };
+  const out = quietEffect();
+  applyClickState(out, clickStateOf(div), clickStateOf(div));
+  assert.match(out.warning || "", /did not change/);
 });

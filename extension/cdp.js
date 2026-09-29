@@ -171,7 +171,7 @@ async function send(tabId, method, params = {}) {
     return await sendRaw(tabId, method, params);
   } catch (e) {
     if (/debugger is not attached/i.test(e.message || "")) {
-      await attach(tabId);
+      await attachShared(tabId);
       const s = sessions.get(tabId);
       try {
         if (s && s.domainsEnabled) await enableDomains(tabId);
@@ -190,50 +190,173 @@ function persistAttached() {
 
 // Page events are on for every session, however it was attached: a JavaScript dialog is only
 // reported (Page.javascriptDialogOpening) once Page.enable has run.
-export async function ensureAttached(tabId) {
-  if (!sessions.has(tabId)) {
-    await attach(tabId);
-    sessions.set(tabId, { console: [], network: new Map(), domainsEnabled: false });
-    persistAttached();
-    try {
-      await sendRaw(tabId, "Page.enable");
-    } catch {}
+// Concurrent callers share one attach per tab: a second chrome.debugger.attach to a tab this
+// extension is still attaching fails exactly as if another tool held the tab. Every attach in this
+// file goes through attachShared.
+const attaching = new Map();
+const opening = new Map();
+
+function attachShared(tabId) {
+  let pending = attaching.get(tabId);
+  if (!pending) {
+    pending = attach(tabId).finally(() => attaching.delete(tabId));
+    attaching.set(tabId, pending);
   }
-  return sessions.get(tabId);
+  return pending;
 }
 
-export async function captureViewport(tabId, { format = "jpeg", quality = 55 } = {}) {
-  await ensureAttached(tabId);
-  const fmt = format === "png" ? "png" : "jpeg";
-  let clip;
-  let dpr = 1;
+// A session is recorded only once Page.enable has run, so a caller that finds it can rely on Page
+// events. A detach during the attach leaves no session, and the callers get a clear error.
+export async function ensureAttached(tabId) {
+  if (sessions.has(tabId)) return sessions.get(tabId);
+  let pending = opening.get(tabId);
+  if (!pending) {
+    pending = (async () => {
+      await attachShared(tabId);
+      try {
+        await sendRaw(tabId, "Page.enable");
+      } catch (err) {
+        if (/not attached/i.test(err.message || "")) {
+          throw new Error(`the debugger detached from tab ${tabId} while attaching; try again`);
+        }
+      }
+      sessions.set(tabId, { console: [], network: new Map(), domainsEnabled: false });
+      persistAttached();
+    })().finally(() => opening.delete(tabId));
+    opening.set(tabId, pending);
+  }
+  await pending;
+  const s = sessions.get(tabId);
+  if (!s) throw new Error(`the debugger detached from tab ${tabId} while attaching; try again`);
+  return s;
+}
+
+// Wakes a tab the browser froze in the background, through the page lifecycle. When no session
+// held the tab, the debugger is detached again afterwards, so the "being debugged" bar only
+// flashes.
+export async function wakeFrozenTab(tabId) {
+  if (opening.has(tabId)) await opening.get(tabId).catch(() => {});
+  const held = sessions.has(tabId);
+  if (!held) await attachShared(tabId);
   try {
-    const m = await send(tabId, "Page.getLayoutMetrics");
-    const vp = m.cssVisualViewport || m.cssLayoutViewport || m.visualViewport || {};
-    const w = Math.round(vp.clientWidth || 0);
-    const h = Math.round(vp.clientHeight || 0);
-    const devVp = m.visualViewport || {};
-    if (w && devVp.clientWidth) dpr = Math.max(1, devVp.clientWidth / w);
-    if (w && h) {
-      const MAX_SIDE = 1568;
-      const scale = Math.min(1, MAX_SIDE / Math.max(w, h));
-      const x = Math.round(vp.pageX || 0);
-      const y = Math.round(vp.pageY || 0);
-      clip = { x, y, width: w, height: h, scale };
+    await sendRaw(tabId, "Page.setWebLifecycleState", { state: "active" });
+  } finally {
+    if (!held && !sessions.has(tabId) && !opening.has(tabId)) {
+      try {
+        await detach(tabId);
+      } catch {}
     }
-  } catch {}
-  lastCapture[tabId] = { scale: (clip ? clip.scale : 1) * dpr };
-  const shoot = (q) =>
-    send(tabId, "Page.captureScreenshot", {
-      format: fmt,
-      ...(fmt === "jpeg" ? { quality: q } : {}),
-      ...(clip ? { clip } : {}),
-      captureBeyondViewport: false,
-      fromSurface: true,
-    });
-  let res = await shoot(quality);
-  if (fmt === "jpeg" && res.data.length > 500000) res = await shoot(30);
-  return { dataUrl: `data:image/${fmt};base64,${res.data}` };
+  }
+}
+
+// A background capture on a browser that paints no frame for it would never answer; the capture
+// step alone is bounded (not the attach before it), so the caller gets a hint instead of a hang.
+const BACKGROUND_SHOT_MS = 5000;
+
+function boundBackgroundShot(tabId, capture) {
+  let timer;
+  const bound = new Promise((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `tab ${tabId} is in the background and its capture did not answer within 5 s. ` +
+              `Bring it to the front with browser_tabs({action: "select", tabId: ${tabId}, activate: true}), ` +
+              `then take the screenshot again.`
+          )
+        ),
+      BACKGROUND_SHOT_MS
+    );
+  });
+  return Promise.race([capture(), bound]).finally(() => clearTimeout(timer));
+}
+
+// Focus emulation makes a background tab's page report itself visible and focused, and a
+// browser that paints no frame for a hidden tab (Edge) then paints one, so Page.captureScreenshot
+// answers. A capture holds it on only for its own duration; concurrent captures of one tab share
+// one on/off pair. On a tab where a caller turned it on (cdp_send, spoof_visibility) a capture
+// neither sends it nor turns it off. Per tab: { caller, captures }.
+const focusEmulation = new Map();
+
+async function withFocusEmulation(tabId, fn) {
+  let st = focusEmulation.get(tabId);
+  if (!st) {
+    st = { caller: false, captures: 0 };
+    focusEmulation.set(tabId, st);
+  }
+  if (st.caller) return await fn();
+  st.captures++;
+  try {
+    if (st.captures === 1) {
+      try {
+        await send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
+      } catch {}
+    }
+    return await fn();
+  } finally {
+    st.captures--;
+    if (st.captures === 0 && !st.caller) {
+      // Only this capture's own record: a detach and re-attach may have started a newer one
+      if (focusEmulation.get(tabId) === st) focusEmulation.delete(tabId);
+      try {
+        await send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: false });
+      } catch {}
+    }
+  }
+}
+
+// Records focus emulation that a caller set on a tab itself, so that captures leave it alone.
+function noteCallerFocusEmulation(tabId, method, params) {
+  if (method !== "Emulation.setFocusEmulationEnabled") return;
+  const st = focusEmulation.get(tabId) || { caller: false, captures: 0 };
+  st.caller = !!(params && params.enabled);
+  if (st.caller || st.captures > 0) focusEmulation.set(tabId, st);
+  else focusEmulation.delete(tabId);
+}
+
+// emulateFocus: the tab is not the active tab of a focused window. deadline: a promise that
+// rejects when the caller stops waiting; focus emulation is turned off then too.
+export async function captureViewport(
+  tabId,
+  { format = "jpeg", quality = 55, emulateFocus = false, deadline } = {}
+) {
+  const bounded = (p) => (deadline ? Promise.race([p, deadline]) : p);
+  await bounded(ensureAttached(tabId));
+  const fmt = format === "png" ? "png" : "jpeg";
+  const capture = async () => {
+    let clip;
+    let dpr = 1;
+    try {
+      const m = await send(tabId, "Page.getLayoutMetrics");
+      const vp = m.cssVisualViewport || m.cssLayoutViewport || m.visualViewport || {};
+      const w = Math.round(vp.clientWidth || 0);
+      const h = Math.round(vp.clientHeight || 0);
+      const devVp = m.visualViewport || {};
+      if (w && devVp.clientWidth) dpr = Math.max(1, devVp.clientWidth / w);
+      if (w && h) {
+        const MAX_SIDE = 1568;
+        const scale = Math.min(1, MAX_SIDE / Math.max(w, h));
+        const x = Math.round(vp.pageX || 0);
+        const y = Math.round(vp.pageY || 0);
+        clip = { x, y, width: w, height: h, scale };
+      }
+    } catch {}
+    lastCapture[tabId] = { scale: (clip ? clip.scale : 1) * dpr };
+    const shoot = (q) =>
+      send(tabId, "Page.captureScreenshot", {
+        format: fmt,
+        ...(fmt === "jpeg" ? { quality: q } : {}),
+        ...(clip ? { clip } : {}),
+        captureBeyondViewport: false,
+        fromSurface: true,
+      });
+    let res = await shoot(quality);
+    if (fmt === "jpeg" && res.data.length > 500000) res = await shoot(30);
+    return { dataUrl: `data:image/${fmt};base64,${res.data}` };
+  };
+  return emulateFocus
+    ? await withFocusEmulation(tabId, () => bounded(capture()))
+    : await bounded(capture());
 }
 
 function requireSession(tabId) {
@@ -437,6 +560,7 @@ chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId != null) {
     sessions.delete(source.tabId);
     delete lastCapture[source.tabId];
+    focusEmulation.delete(source.tabId);
     persistAttached();
   }
 });
@@ -444,6 +568,7 @@ chrome.debugger.onDetach.addListener((source) => {
 export function dropTab(tabId) {
   sessions.delete(tabId);
   delete lastCapture[tabId];
+  focusEmulation.delete(tabId);
   dialogs.delete(tabId);
   dialogWaiters.delete(tabId);
   persistAttached();
@@ -620,6 +745,7 @@ export async function handleCdp(action, params, tabId) {
           await detach(tabId);
         } catch {}
         sessions.delete(tabId);
+        focusEmulation.delete(tabId);
         persistAttached();
       }
       return { ok: true, result: { attached: false, tabId } };
@@ -708,8 +834,14 @@ export async function handleCdp(action, params, tabId) {
           captureBeyondViewport: params.fullPage !== false,
           fromSurface: true,
         });
-      let res = await shoot(quality);
-      if (format === "jpeg" && res.data.length > 500000) res = await shoot(30);
+      const capture = async () => {
+        let res = await shoot(quality);
+        if (format === "jpeg" && res.data.length > 500000) res = await shoot(30);
+        return res;
+      };
+      const res = params.emulateFocus
+        ? await withFocusEmulation(tabId, () => boundBackgroundShot(tabId, capture))
+        : await capture();
       return { ok: true, result: { dataUrl: `data:image/${format};base64,${res.data}` } };
     }
 
@@ -721,6 +853,7 @@ export async function handleCdp(action, params, tabId) {
         try {
           await send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: false });
         } catch {}
+        noteCallerFocusEmulation(tabId, "Emulation.setFocusEmulationEnabled", { enabled: false });
         const undo = `(() => {
           const saved = window.__bctlVisibility;
           if (!saved) return false;
@@ -739,6 +872,7 @@ export async function handleCdp(action, params, tabId) {
       try {
         await send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
       } catch {}
+      noteCallerFocusEmulation(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
       const patch = `(() => {
         const patched = { visibilityState: false, hidden: false };
         if (!window.__bctlVisibility) {
@@ -960,6 +1094,7 @@ export async function handleCdp(action, params, tabId) {
         throw new Error(`'${method}' is not a CDP method name — expected Domain.method`);
       }
       const result = await send(tabId, method, params.params || {});
+      noteCallerFocusEmulation(tabId, method, params.params);
       return { ok: true, result: { method, result: result === undefined ? null : result } };
     }
 
@@ -1050,20 +1185,26 @@ export async function handleCdp(action, params, tabId) {
         scrollX = lvp.pageX || 0;
         scrollY = lvp.pageY || 0;
       } catch {}
-      const res = await send(tabId, "Page.captureScreenshot", {
-        format,
-        clip: { x: r.x + scrollX, y: r.y + scrollY, width: r.width, height: r.height, scale: 1 },
-        fromSurface: true,
-        captureBeyondViewport: true,
-      });
+      const capture = () =>
+        send(tabId, "Page.captureScreenshot", {
+          format,
+          clip: { x: r.x + scrollX, y: r.y + scrollY, width: r.width, height: r.height, scale: 1 },
+          fromSurface: true,
+          captureBeyondViewport: true,
+        });
+      const res = params.emulateFocus
+        ? await withFocusEmulation(tabId, () => boundBackgroundShot(tabId, capture))
+        : await capture();
       return { ok: true, result: { dataUrl: `data:image/${format};base64,${res.data}` } };
     }
 
     case "print_pdf": {
+      // Attaches for the print only when no session holds the tab, and detaches afterwards only
+      // if no session was opened on it meanwhile (another command may have started using it).
       const needAttach = !sessions.has(tabId);
       if (needAttach) {
         try {
-          await attach(tabId);
+          await attachShared(tabId);
         } catch (err) {
           if (!err.message.includes("already attached")) throw err;
         }
@@ -1072,7 +1213,7 @@ export async function handleCdp(action, params, tabId) {
         const res = await send(tabId, "Page.printToPDF", { printBackground: true });
         return { ok: true, result: { base64: res.data } };
       } finally {
-        if (needAttach) {
+        if (needAttach && !sessions.has(tabId) && !opening.has(tabId)) {
           try {
             await detach(tabId);
           } catch {}

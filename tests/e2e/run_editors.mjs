@@ -7,19 +7,28 @@
 // text. A fix verified against one editor is not verified.
 import http from "node:http";
 import { readFileSync } from "node:fs";
-import { openMainTab, teardown, verifyClean, installReaper, e2eBrowser } from "./harness.mjs";
+import {
+  openMainTab,
+  teardown,
+  verifyClean,
+  installReaper,
+  e2eBrowser,
+  BRIDGE,
+} from "./harness.mjs";
 
 const CLIENT = { session: `e2e-${process.pid}`, source: "e2e" };
 
 installReaper();
 
-const BRIDGE = "http://127.0.0.1:8765";
 const post = async (a, p = {}) => {
   const browser = await e2eBrowser();
   return fetch(`${BRIDGE}/command`, {
-    method: "POST", headers: { "content-type": "application/json" },
+    method: "POST",
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({ action: a, params: p, client: CLIENT, ...(browser ? { browser } : {}) }),
-  }).then((r) => r.json()).catch((e) => ({ ok: false, error: e.message }));
+  })
+    .then((r) => r.json())
+    .catch((e) => ({ ok: false, error: e.message }));
 };
 
 const FIXTURE = new URL("./editors.html", import.meta.url).pathname;
@@ -33,12 +42,17 @@ const CASES = [
 
 const main = async () => {
   const health = await post("status");
-  if (!health || health.ok === false) { console.log("SKIP: bridge not reachable"); process.exit(0); }
+  if (!health || health.ok === false) {
+    console.log("SKIP: bridge not reachable");
+    process.exit(0);
+  }
 
-  const srv = http.createServer((_q, s) => {
-    s.writeHead(200, { "content-type": "text/html" });
-    s.end(readFileSync(FIXTURE));
-  }).listen(0);
+  const srv = http
+    .createServer((_q, s) => {
+      s.writeHead(200, { "content-type": "text/html" });
+      s.end(readFileSync(FIXTURE));
+    })
+    .listen(0);
   const port = srv.address().port;
 
   const tabId = await openMainTab(`http://127.0.0.1:${port}/`);
@@ -49,18 +63,24 @@ const main = async () => {
     for (const [name, sel] of CASES) {
       const mark = `bctl-${verb}-${Math.random().toString(36).slice(2, 8)}`;
       await post(verb, { selector: sel, text: mark, tabId });
-      await new Promise((r) => setTimeout(r, 250));   // let an async editor commit
-      const r = await post("eval_js", { tabId, expression:
-        `(function(){var e=document.querySelector(${JSON.stringify(sel)});
+      await new Promise((r) => setTimeout(r, 250)); // let an async editor commit
+      const r = await post("eval_js", {
+        tabId,
+        expression: `(function(){var e=document.querySelector(${JSON.stringify(sel)});
           var v=e.isContentEditable?(e.innerText||""):(e.value||"");
-          return (v.match(new RegExp(${JSON.stringify(mark)},"g"))||[]).length;})()` });
+          return (v.match(new RegExp(${JSON.stringify(mark)},"g"))||[]).length;})()`,
+      });
       const n = r.ok ? r.result.value : "err";
       const ok = n === 1;
       if (!ok) fails++;
-      console.log(`  ${ok ? "PASS" : "FAIL"}  ${verb.padEnd(5)} ${name.padEnd(30)} occurrences=${n}`);
-      await post("eval_js", { tabId, expression:
-        `(function(){var e=document.querySelector(${JSON.stringify(sel)});
-          if(e.isContentEditable)e.textContent="";else e.value="";return 1;})()` });
+      console.log(
+        `  ${ok ? "PASS" : "FAIL"}  ${verb.padEnd(5)} ${name.padEnd(30)} occurrences=${n}`
+      );
+      await post("eval_js", {
+        tabId,
+        expression: `(function(){var e=document.querySelector(${JSON.stringify(sel)});
+          if(e.isContentEditable)e.textContent="";else e.value="";return 1;})()`,
+      });
     }
   }
 

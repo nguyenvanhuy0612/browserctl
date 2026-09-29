@@ -20,7 +20,7 @@ after(() => {
 
 const CASES = [
   "case-pass",
-  "case-fail-fb-two-profiles",
+  "case-fail-probe-not-opened",
   "case-close-tab-fails",
   "case-one-browser-skips",
 ];

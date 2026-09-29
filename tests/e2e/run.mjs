@@ -298,6 +298,21 @@ async function main() {
       const v = await cmd("eval_js", { expression: "window.__clicked||0" });
       assert(v.value === 1, `click had no effect (clicked=${v.value})`);
     });
+    // A checkbox's checked is a property, not an attribute: the click changes no DOM, and the
+    // effect has to count the property flip as the control's own state change.
+    await test("click a checkbox: get_property checked reads true, and no warning", async () => {
+      await cmd("eval_js", { expression: "document.getElementById('cbox').checked = false; 1" });
+      const r = await cmd("click", { target: "css=#cbox" });
+      assert(!r.warning, `a checkbox click that checked it must not warn: ${r.warning}`);
+      assert(
+        (r.effect.controlState?.changed || []).includes("checked: false -> true"),
+        `controlState must name the flip: ${JSON.stringify(r.effect.controlState)}`
+      );
+      const v = await cmd("get_property", { target: "css=#cbox", property: "checked" });
+      assert(v.value === true, `checked read back: ${JSON.stringify(v)}`);
+      const msg = await cmdFail("get_property", { target: "css=#title", property: "checked" });
+      assert(/checkbox or radio/.test(msg), `checked on a non-checkbox must be refused: ${msg}`);
+    });
     // Only the browser process can mint a File, so upload is the one capability a page's own
     // JavaScript cannot fake — and the input is hidden behind a styled label on nearly every
     // real upload UI, which is the part that has to work.
@@ -528,9 +543,22 @@ async function main() {
 
     // --- previously untested commands ---
 
+    // The suite's tab is opened in the background, so this is a background capture: it runs
+    // under focus emulation (the only way Edge paints a hidden tab), answers promptly, and
+    // leaves the tab hidden and in the background.
     await test("screenshot (viewport)", async () => {
+      const before = (await cmd("list_tabs", {})).tabs.find((t) => t.id === tabId);
+      const t0 = Date.now();
       const r = await cmd("screenshot", {});
+      const ms = Date.now() - t0;
       assert(/^data:image\/(jpeg|png);base64,/.test(r.dataUrl), "no image");
+      if (before && !before.active) {
+        assert(ms < 2000, `a background capture took ${ms} ms`);
+        const after = (await cmd("list_tabs", {})).tabs.find((t) => t.id === tabId);
+        assert(after && !after.active, "the capture brought the tab to the front");
+        const vis = await cmd("eval_js", { expression: "document.visibilityState" });
+        assert(vis.value === "hidden", `the page is ${vis.value} after the capture`);
+      }
     });
 
     // --- light network capture ---

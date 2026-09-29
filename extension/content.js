@@ -191,6 +191,66 @@
     return state;
   }
 
+  // What a click can change on the control itself: its aria state attributes and, on a native
+  // checkbox or radio, the checked property, which changes without any DOM mutation.
+  const CLICK_STATE_ATTRS = ["aria-checked", "aria-selected", "aria-pressed", "aria-expanded"];
+
+  function clickStateOf(el) {
+    const state = {};
+    for (const a of CLICK_STATE_ATTRS) {
+      try {
+        const v = el.getAttribute(a);
+        if (v !== null) state[a.replace("aria-", "")] = v;
+      } catch {}
+    }
+    // A click on a checkbox's <label> (or on text inside it) toggles the labelled input
+    let input = el.tagName === "INPUT" ? el : null;
+    if (!input && el.closest) {
+      const label = el.closest("label");
+      if (label && label.control && label.control.tagName === "INPUT") input = label.control;
+    }
+    const type = input ? (input.type || "").toLowerCase() : "";
+    if (type === "checkbox" || type === "radio") state.checked = String(!!input.checked);
+    return state;
+  }
+
+  // Adds a click's verdict on the control's own state to OUT. BEFORE and AFTER come from
+  // clickStateOf. A change in that state confirms the click even with 0 mutations; a page that
+  // changed while the state did not, or nothing changing at all, gets a warning.
+  function applyClickState(out, before, after) {
+    const addWarning = (w) => {
+      out.warning = out.warning ? `${out.warning} — ${w}` : w;
+    };
+    const keys = Object.keys(before);
+    let ownStateChanged = false;
+    if (keys.length > 0) {
+      const changed = [];
+      const unchanged = [];
+      for (const k of keys) {
+        const now = k in after ? after[k] : null;
+        if (now !== before[k]) changed.push(`${k}: ${before[k]} -> ${now}`);
+        else unchanged.push(`${k}: ${before[k]}`);
+      }
+      out.effect.controlState = { changed, unchanged };
+      ownStateChanged = changed.length > 0;
+      if (!ownStateChanged && out.effect.domMutated) {
+        addWarning(
+          `the page changed (${out.effect.mutationCount} mutations) but this control's own state did NOT (${unchanged.join(", ")}): the click landed somewhere, but the selection did not take. Re-read the control before assuming it is set.`
+        );
+      }
+    }
+    if (
+      out.effect.measured &&
+      !out.effect.domMutated &&
+      !out.effect.urlChanged &&
+      !ownStateChanged
+    ) {
+      addWarning(
+        "the page did not change at all (0 mutations, same URL): treat this click as NOT confirmed and verify before continuing"
+      );
+    }
+  }
+
   function shortHref(href) {
     if (!href) return href;
     let s = String(href);
@@ -2654,18 +2714,7 @@
     const warning = actionability(el);
     const urlBefore = location.href;
     const eventTarget = shadowInteractiveTarget(el) || el;
-    const STATEFUL = ["aria-checked", "aria-selected", "aria-pressed", "aria-expanded"];
-    const stateBefore = {};
-    let isStateful = false;
-    for (const a of STATEFUL) {
-      try {
-        const v = el.getAttribute(a);
-        if (v !== null) {
-          stateBefore[a] = v;
-          isStateful = true;
-        }
-      } catch {}
-    }
+    const stateBefore = clickStateOf(el);
 
     el.scrollIntoView({ block: "center", inline: "center" });
     const stability = await waitForStableRect(el);
@@ -2754,31 +2803,7 @@
         `element is not visible (${warning}) — the handler was still invoked, but verify the effect`
       );
     }
-    if (isStateful) {
-      const changed = [];
-      const unchanged = [];
-      for (const a of Object.keys(stateBefore)) {
-        let now = null;
-        try {
-          now = el.getAttribute(a);
-        } catch {}
-        (now !== stateBefore[a] ? changed : unchanged).push(
-          `${a.replace("aria-", "")}: ${stateBefore[a]}${now !== stateBefore[a] ? ` -> ${now}` : ""}`
-        );
-      }
-      out.effect.controlState = { changed, unchanged };
-      if (changed.length === 0 && out.effect.domMutated) {
-        out.warning =
-          (out.warning ? out.warning + " — " : "") +
-          `the page changed (${out.effect.mutationCount} mutations) but this control's own state did NOT (${unchanged.join(", ")}): the click landed somewhere, but the selection did not take. Re-read the control before assuming it is set.`;
-      }
-    }
-
-    if (out.effect.measured && !out.effect.domMutated && !out.effect.urlChanged) {
-      out.warning =
-        (out.warning ? out.warning + " — " : "") +
-        "the page did not change at all (0 mutations, same URL): treat this click as NOT confirmed and verify before continuing";
-    }
+    applyClickState(out, stateBefore, clickStateOf(el));
     return out;
   }
 
@@ -4300,6 +4325,16 @@
           } catch {}
         }
         return attrOut;
+      }
+      case "checked": {
+        const type = el.tagName === "INPUT" ? (el.type || "").toLowerCase() : "";
+        if (type !== "checkbox" && type !== "radio") {
+          const tag = `<${el.tagName.toLowerCase()}${type ? ` type="${type}"` : ""}>`;
+          throw new Error(
+            `property "checked" reads a checkbox or radio, and this element is ${tag}. For a custom control, read attr "aria-checked".`
+          );
+        }
+        return { property: "checked", value: !!el.checked };
       }
       case "box": {
         const r = el.getBoundingClientRect();

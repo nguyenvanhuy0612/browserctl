@@ -1,6 +1,6 @@
-# Multi-browser agent probes (Task 8, Step 2)
+# Multi-browser agent probes
 
-These are the checks Step 1 (`tests/e2e/multi_browser_live.mjs`) cannot script: an agent product
+These are the checks the live scripts (`tests/e2e/multi_browser_live.mjs`, `tests/e2e/multi_browser_parallel.mjs`) cannot script: an agent product
 reading the prompt in its own voice and deciding what tool calls to make. Run each prompt with a
 fresh agent session (AGY, and separately Claude Code), on its unchanged single MCP entry — no
 per-agent config for the second browser. Follow `browserctl-agent-probe-scoring`: score every
@@ -10,8 +10,8 @@ prompt from the bridge call log, never from the agent's own report of what it di
 
 - The bridge running with `BROWSERCTL_CALL_LOG=<path>` set before it starts, so every command
   through it is recorded. `GET /status` on the bridge reports the same path back as `callLog`.
-- The same browsers Step 1 used: Chrome with two profiles (one has facebook.com open), Edge
-  with the SAC login page open.
+- The browsers for the run: Chrome with two profiles (one has facebook.com open), Edge
+  with https://en.wikipedia.org/wiki/Main_Page open.
 - Note the call log's byte size before each prompt (`stat` or the bridge's own `callLogBytes`
   in `/status`), so the log lines belonging to one prompt can be read back out by offset.
 
@@ -46,7 +46,7 @@ To score a prompt:
 
 | Prompt | Pass if |
 |---|---|
-| "click Users trên edge" | at most 3 agent calls (`switch_tab` from `select{browser}`, `snapshot`, `click`); every `switch_tab`, `snapshot` and `click` line's `browser` is the Edge alias; no shell-out to the CLI |
+| "click Contents trên edge" (Wikipedia open in Edge) | at most 3 agent calls (`switch_tab` from `select{browser}`, `snapshot`, `click`); every `switch_tab`, `snapshot` and `click` line's `browser` is the Edge alias; no shell-out to the CLI |
 | "mở tab facebook đang mở và click Home" (facebook open in one Chrome profile) | at most 4 agent calls (`list`, `select`, `snapshot`, `click`); the `click` line's `tabId` is that profile's tab |
 | "click Home trên facebook" (facebook open in two Chrome profiles) | the agent asks which profile, or names both, before any call whose `action` is `click`; no click line appears in the log before it does |
 | "mở example.com trên edge" | the `new_tab` line's `browser` is the Edge alias |
@@ -56,5 +56,5 @@ To score a prompt:
 ## Recording a result
 
 For each prompt, record: agent product, pass/fail, and the call count and browser/tabId
-grouping the log actually shows (not the agent's transcript). These go into the RFC Section 14
-results table once the live run (Steps 1 and 2 together) is done.
+grouping the log actually shows (not the agent's transcript). Record the result in the release
+notes of the version under test.
