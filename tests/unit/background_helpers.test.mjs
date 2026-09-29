@@ -273,3 +273,97 @@ test("an element's frame is named by origin and path, without the iframe's query
   assert.equal(ctx.__fn("data:text/html,<p>hi?x</p>"), "data:text/html,<p>hi");
   assert.equal(ctx.__fn(""), "");
 });
+
+// switch_tab and new_tab set the target without changing what the user sees; only an explicit
+// activate makes the tab the visible one.
+function loadTabOps() {
+  const calls = [];
+  const pins = [];
+  const tab = { id: 9, windowId: 3, url: "https://t/", title: "T" };
+  const ctx = vm.createContext({
+    pinTarget: (id) => pins.push(id),
+    chrome: {
+      tabs: {
+        async get(id) {
+          calls.push(["get", id]);
+          return tab;
+        },
+        async update(id, props) {
+          calls.push(["update", id, props]);
+          return tab;
+        },
+        async create(props) {
+          calls.push(["create", props]);
+          return { id: 10 };
+        },
+      },
+      windows: {
+        async update(id, props) {
+          calls.push(["windows.update", id, props]);
+        },
+      },
+    },
+  });
+  vm.runInContext(
+    extractFunction("switchTab") +
+      "\n" +
+      extractFunction("newTab") +
+      "\nglobalThis.__switch = switchTab; globalThis.__new = newTab;",
+    ctx
+  );
+  return { switchTab: ctx.__switch, newTab: ctx.__new, calls, pins };
+}
+
+test("switch_tab pins the tab without activating it", async () => {
+  const { switchTab, calls, pins } = loadTabOps();
+  const res = await switchTab({ id: 9 });
+  assert.deepEqual(pins, [9]);
+  assert.ok(!calls.some((c) => c[0] === "update"), JSON.stringify(calls));
+  assert.deepEqual({ ...res }, { id: 9, url: "https://t/", title: "T" });
+});
+
+test("switch_tab with activate makes the tab visible", async () => {
+  const { switchTab, calls, pins } = loadTabOps();
+  await switchTab({ id: 9, activate: true });
+  const update = calls.find((c) => c[0] === "update");
+  assert.equal(JSON.stringify(update), JSON.stringify(["update", 9, { active: true }]));
+  assert.deepEqual(pins, [9]);
+});
+
+test("new_tab opens in the background unless activate is given", async () => {
+  const bg = loadTabOps();
+  await bg.newTab({});
+  assert.equal(JSON.stringify(bg.calls[0]), JSON.stringify(["create", { active: false }]));
+  const fg = loadTabOps();
+  await fg.newTab({ activate: true });
+  assert.equal(JSON.stringify(fg.calls[0]), JSON.stringify(["create", { active: true }]));
+});
+
+// A browser that does not paint a background tab (Edge) never answers the CDP capture. The capture
+// is bounded, and the error says how to bring the tab to the front.
+function loadCaptureBackground(captureViewport) {
+  const ctx = vm.createContext({ setTimeout, clearTimeout, Promise, captureViewport });
+  vm.runInContext(
+    "const BACKGROUND_CAPTURE_MS = 50;\n" +
+      extractFunction("captureBackground") +
+      "\nglobalThis.__fn = captureBackground;",
+    ctx
+  );
+  return ctx.__fn;
+}
+
+test("a background capture the browser never answers fails with a hint instead of hanging", async () => {
+  const capture = loadCaptureBackground(() => new Promise(() => {}));
+  const started = Date.now();
+  await assert.rejects(capture({ id: 7 }, {}), (err) => {
+    assert.match(err.message, /tab 7 is not in front/);
+    assert.match(err.message, /activate: true/);
+    return true;
+  });
+  assert.ok(Date.now() - started < 1000);
+});
+
+test("a background capture the browser answers is returned unchanged", async () => {
+  const capture = loadCaptureBackground(async (id) => ({ dataUrl: `data:image/jpeg;base64,${id}` }));
+  assert.deepEqual(await capture({ id: 9 }, {}), { dataUrl: "data:image/jpeg;base64,9" });
+});

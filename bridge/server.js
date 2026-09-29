@@ -5,7 +5,8 @@ import { dirname, join, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execa } from "execa";
 import { WebSocketServer } from "ws";
-import { markDaemonRunning } from "./state.js";
+import { markDaemonRunning, getStateDir } from "./state.js";
+import { createRegistry } from "./registry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -28,7 +29,9 @@ const ACTION_TIMEOUT_MS = { replay: 120_000, export_har: 120_000 };
 const WAIT_ACTIONS = new Set(["wait_for", "wait_settle", "wait_network_idle"]);
 const TIMEOUT_BUFFER_MS = 5_000;
 const MAX_TIMEOUT_MS = 300_000;
-const HEARTBEAT_MS = 20_000;
+const HEARTBEAT_MS = envNum("HEARTBEAT_MS", 20_000);
+const FANOUT_TIMEOUT_MS = envNum("FANOUT_TIMEOUT_MS", 3_000);
+const CLONE_PROBE_MS = envNum("CLONE_PROBE_MS", 1_500);
 const MAX_WS_PAYLOAD_BYTES = envNum("MAX_WS_PAYLOAD_BYTES", 100 * 1024 * 1024);
 
 function computeTimeoutMs(action, params) {
@@ -40,9 +43,43 @@ function computeTimeoutMs(action, params) {
   return Math.min(ms, MAX_TIMEOUT_MS);
 }
 
-let extensionSocket = null;
+const registry = createRegistry({ aliasFile: join(getStateDir(), "browsers.json") });
+const sockets = new Map();
 
 const pending = new Map();
+
+// Waiters for a probed connId: connId -> Set<resolve(alive: boolean)>. Several probes can be in
+// flight against the same holder at once (two clones racing in); a pong resolves every waiter on
+// that connection, and each waiter removes only itself (by its own pong or its own timeout), so
+// one probe settling never touches another's entry.
+const cloneProbes = new Map();
+
+// Pings a connection and waits up to `ms` for its pong. Resolves `true` when the pong arrives,
+// `false` when it does not, the socket is already gone, or sending the ping fails. Never rejects.
+function probeAlive(ws, ms) {
+  return new Promise((resolve) => {
+    if (!ws || ws.readyState !== 1) return resolve(false);
+    let settled = false;
+    const finish = (alive) => {
+      if (settled) return;
+      settled = true;
+      const waiters = cloneProbes.get(ws.connId);
+      if (waiters) {
+        waiters.delete(finish);
+        if (waiters.size === 0) cloneProbes.delete(ws.connId);
+      }
+      resolve(alive);
+    };
+    if (!cloneProbes.has(ws.connId)) cloneProbes.set(ws.connId, new Set());
+    cloneProbes.get(ws.connId).add(finish);
+    setTimeout(() => finish(false), ms);
+    try {
+      ws.send(JSON.stringify({ type: "ping" }));
+    } catch {
+      finish(false);
+    }
+  });
+}
 
 const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url === "/status") {
@@ -60,23 +97,84 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server, path: "/extension", maxPayload: MAX_WS_PAYLOAD_BYTES });
 
-function rejectAllPending(reason) {
-  for (const entry of pending.values()) {
+// Rejects every command in flight on one connection, leaving other connections' pending
+// commands untouched.
+function rejectPendingFor(connId, reason) {
+  for (const [id, entry] of pending) {
+    if (entry.connId !== connId) continue;
     clearTimeout(entry.timer);
     entry.resolve({ ok: false, error: reason });
+    pending.delete(id);
   }
-  pending.clear();
+}
+
+// A hello field is shown in /status and written to the log: keep it a short, single-line string.
+function helloField(value, max) {
+  if (typeof value !== "string") return null;
+  const clean = value
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, max);
+  return clean || null;
+}
+
+// A hello whose instanceId is already held by another live connection probes that holder with a
+// ping. A holder that answers keeps its identity, and the newcomer is admitted under a new id
+// and told so with a `welcome` frame (a copied profile directory). A holder that stays silent is
+// treated as stale and replaced.
+async function handleHello(ws, msg) {
+  // A hello counts only from a socket the bridge holds; a replaced or closed one names no browser
+  if (sockets.get(ws.connId) !== ws) return;
+  const instanceId = helloField(msg.instanceId, 64);
+  const browserType = helloField(msg.browserType, 32) || "unknown";
+  const label = helloField(msg.label, 40);
+  const focused = msg.focused === true;
+
+  const holder = instanceId ? registry.byInstance(instanceId) : null;
+  let admitId = instanceId;
+  let cloned = false;
+  if (holder && holder.connId !== ws.connId) {
+    const holderWs = sockets.get(holder.connId);
+    const alive = await probeAlive(holderWs, CLONE_PROBE_MS);
+    // The newcomer may have closed while the probe waited; its close already left the registry
+    if (ws.readyState !== 1 || sockets.get(ws.connId) !== ws) return;
+    if (alive) {
+      admitId = `${instanceId}_${randomUUID().replace(/-/g, "").slice(0, 4)}`;
+      cloned = true;
+    }
+  }
+
+  const entry = registry.admit({
+    connId: ws.connId,
+    instanceId: admitId,
+    browserType,
+    label,
+    focused,
+  });
+
+  if (cloned) {
+    try {
+      ws.send(JSON.stringify({ type: "welcome", instanceId: admitId }));
+    } catch {}
+  } else if (holder && holder.connId !== ws.connId) {
+    const old = sockets.get(holder.connId);
+    sockets.delete(holder.connId);
+    rejectPendingFor(holder.connId, "extension disconnected");
+    try {
+      old?.close(1000, "replaced by same instance");
+    } catch {}
+  }
+
+  log(
+    `extension instance '${entry.instanceId}' registered as ${entry.alias} (${entry.browserType})`
+  );
 }
 
 wss.on("connection", (ws) => {
-  if (extensionSocket) {
-    rejectAllPending("extension disconnected");
-    try {
-      extensionSocket.close();
-    } catch {}
-  }
-  extensionSocket = ws;
   ws.isAlive = true;
+  ws.connId = randomUUID();
+  sockets.set(ws.connId, ws);
+  registry.admit({ connId: ws.connId, instanceId: null, browserType: null, focused: false });
   log("extension connected");
 
   ws.on("message", (data) => {
@@ -86,29 +184,36 @@ wss.on("connection", (ws) => {
     } catch {
       return;
     }
+
+    if (msg.type === "hello") {
+      handleHello(ws, msg).catch((err) => log("hello handling failed:", err.message));
+      return;
+    }
+
+    if (msg.type === "focus") {
+      registry.touchFocus(ws.connId, msg.focused === true);
+      return;
+    }
+
     if (msg.type === "pong") {
       ws.isAlive = true;
+      const waiters = cloneProbes.get(ws.connId);
+      if (waiters) for (const finish of [...waiters]) finish(true);
       return;
     }
     const entry = pending.get(msg.id);
-    if (!entry) return;
+    if (!entry || entry.connId !== ws.connId) return;
     clearTimeout(entry.timer);
     pending.delete(msg.id);
     entry.resolve(msg);
   });
 
   ws.on("close", () => {
-    const wasActive = extensionSocket === ws;
-    if (wasActive) extensionSocket = null;
-    if (wasActive) {
-      const reason = ws.bctlOversized ? "payload too large" : "extension disconnected";
-      rejectAllPending(reason);
-      log(
-        ws.bctlOversized ? "extension disconnected (payload too large)" : "extension disconnected"
-      );
-    } else {
-      log("stale extension socket closed");
-    }
+    sockets.delete(ws.connId);
+    registry.remove(ws.connId);
+    const reason = ws.bctlOversized ? "payload too large" : "extension disconnected";
+    rejectPendingFor(ws.connId, reason);
+    log(ws.bctlOversized ? "extension disconnected (payload too large)" : "extension disconnected");
   });
 
   ws.on("error", (err) => {
@@ -118,19 +223,19 @@ wss.on("connection", (ws) => {
 });
 
 const heartbeat = setInterval(() => {
-  const ws = extensionSocket;
-  if (!ws) return;
-  if (ws.isAlive === false) {
-    log("extension heartbeat timeout; dropping stale socket");
+  for (const ws of sockets.values()) {
+    if (ws.isAlive === false) {
+      log("extension heartbeat timeout; dropping stale socket");
+      try {
+        ws.terminate();
+      } catch {}
+      continue;
+    }
+    ws.isAlive = false;
     try {
-      ws.terminate();
+      ws.send(JSON.stringify({ type: "ping" }));
     } catch {}
-    return;
   }
-  ws.isAlive = false;
-  try {
-    ws.send(JSON.stringify({ type: "ping" }));
-  } catch {}
 }, HEARTBEAT_MS);
 
 wss.on("close", () => clearInterval(heartbeat));
@@ -192,15 +297,136 @@ function logCall(entry) {
 }
 
 function statusPayload() {
+  const browsers = registry.list();
   return {
     bridgeUrl: `http://${HOST === "0.0.0.0" ? "127.0.0.1" : HOST}:${PORT}`,
-    extensionConnected: extensionSocket != null,
+    extensionConnected: browsers.length > 0,
+    browsers: browsers.map((e) => ({
+      alias: e.alias,
+      browserType: e.browserType,
+      label: e.label,
+      instanceId: e.instanceId,
+      legacy: e.legacy,
+      connectedAt: e.connectedAt,
+      lastFocusedAt: e.lastFocusedAt,
+    })),
     runId: RUN_ID,
     pid: process.pid,
     callLog: CALL_LOG_PATH || null,
     callLogBytes: CALL_LOG_PATH ? callLogSize() : null,
     callLogMaxBytes: CALL_LOG_PATH ? CALL_LOG_MAX_BYTES : null,
   };
+}
+
+// The shape a routing error reports each candidate browser in: enough to read and to select by.
+function browserSummary(e) {
+  return { alias: e.alias, browserType: e.browserType, label: e.label };
+}
+
+// Sends one command to one registry entry and resolves with its reply, or a synthetic failure
+// reply if the socket is gone, sending fails, or no reply arrives within `timeoutMs`. Used for
+// fan-out, where one slow or dead browser must never block the others.
+function sendToEntry(entry, action, params, timeoutMs) {
+  const ws = sockets.get(entry.connId);
+  if (!ws || ws.readyState !== 1) {
+    return Promise.resolve({ ok: false, error: "extension disconnected" });
+  }
+  const id = randomUUID();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      resolve({ ok: false, error: `command '${action}' timed out after ${timeoutMs}ms` });
+    }, timeoutMs);
+    pending.set(id, {
+      connId: entry.connId,
+      timer,
+      reject: () => {},
+      resolve: (reply) => {
+        clearTimeout(timer);
+        resolve(reply);
+      },
+    });
+    try {
+      ws.send(JSON.stringify({ id, action, params: params || {} }));
+    } catch (err) {
+      clearTimeout(timer);
+      pending.delete(id);
+      resolve({ ok: false, error: "failed to reach extension: " + err.message });
+    }
+  });
+}
+
+// Adds `browser` to every tab of a list_tabs reply, leaving every other field (including
+// `pinned`) untouched.
+function tagTabs(reply, alias) {
+  if (!reply.ok || !reply.result || !Array.isArray(reply.result.tabs)) return reply;
+  return {
+    ...reply,
+    result: { ...reply.result, tabs: reply.result.tabs.map((t) => ({ ...t, browser: alias })) },
+  };
+}
+
+// list_tabs fanned out to every connected browser in parallel: every tab carries the alias that
+// served it, and a slow or dead browser is reported per-alias without holding up the rest. Each
+// browser's result is call-logged individually, sharing the one HTTP request's `seq`.
+function respondFanOutListTabs(params, res, logCtx) {
+  const entries = registry.list();
+  Promise.all(
+    entries.map((entry) =>
+      sendToEntry(entry, "list_tabs", params, FANOUT_TIMEOUT_MS).then((reply) => ({ entry, reply }))
+    )
+  ).then((results) => {
+    const tabs = [];
+    const browsers = {};
+    for (const { entry, reply } of results) {
+      const tagged = tagTabs(reply, entry.alias);
+      const entryTabs = tagged.ok && Array.isArray(tagged.result?.tabs) ? tagged.result.tabs : [];
+      tabs.push(...entryTabs);
+      browsers[entry.alias] = {
+        type: entry.browserType,
+        label: entry.label,
+        ok: !!reply.ok,
+        pinned: reply.ok && reply.result ? (reply.result.pinned ?? null) : null,
+        ...(reply.ok ? null : { error: reply.error || "error" }),
+      };
+      recordCall({
+        ...logCtx,
+        action: "list_tabs",
+        params,
+        instanceId: entry.instanceId,
+        browser: entry.alias,
+        ok: !!reply.ok,
+        extra: { fanout: true, ...(reply.ok ? null : { code: reply.code || null }) },
+      });
+    }
+    sendJson(res, 200, { ok: true, result: { tabs, browsers } });
+  });
+}
+
+// One call-log line: shared request context (session/source/seq/startedAt) plus which browser
+// served it and whether it succeeded.
+function recordCall({ who, seq, startedAt, action, params, instanceId, browser, ok, extra }) {
+  logCall({
+    // A command the caller sent for its own bookkeeping, not one its agent asked for
+    ...(who.internal ? { internal: true } : null),
+    // The response size is what a page read actually costs an agent, and the only honest way
+    // to compare two runs: token totals carry the agent's own reasoning, which varies far more
+    // between runs than the payload does.
+    ts: new Date().toISOString(),
+    runId: RUN_ID,
+    runStartedAt: RUN_STARTED_AT,
+    session: who.session,
+    source: who.source,
+    instanceId,
+    browser,
+    seq,
+    action,
+    tabId: (params && (params.tabId ?? params.tab_id)) ?? null,
+    params: paramShape(params),
+    ok,
+    durationMs: Date.now() - startedAt,
+    ...(extra || {}),
+  });
 }
 
 // Who is calling, as declared by the caller: a session id that lasts one client process, and a
@@ -211,11 +437,12 @@ function clientTag(client) {
   return {
     session: pick(client && client.session, 32),
     source: pick(client && client.source, 16),
+    internal: client?.internal === true,
   };
 }
 
 function handleCommand(body, res) {
-  const { action, params, client } = body || {};
+  const { action, params, client, browser, fanOut } = body || {};
   if (!action || typeof action !== "string") {
     return sendJson(res, 400, { ok: false, error: "missing 'action'" });
   }
@@ -290,32 +517,50 @@ function handleCommand(body, res) {
     }
   }
 
-  if (!extensionSocket) {
-    return sendJson(res, 503, { ok: false, error: "extension not connected" });
-  }
-
-  const id = randomUUID();
-  const message = { id, action, params: params || {} };
   const seq = ++callSeq;
   const startedAt = Date.now();
   const who = clientTag(client);
+
+  // list_tabs naming no browser fans out when several are connected, unless the caller asks
+  // for the default browser alone with fanOut: false
+  const fanOutList =
+    action === "list_tabs" &&
+    (browser === "*" || (!browser && fanOut !== false && registry.list().length > 1));
+  if (fanOutList && registry.list().length) {
+    return respondFanOutListTabs(params, res, { who, seq, startedAt });
+  }
+
+  // An entry whose socket is gone is treated as disconnected: it leaves the registry and the
+  // selector is resolved again, exactly as if that browser had never been there
+  let route = registry.resolve(fanOutList ? null : browser);
+  while (route.entry && sockets.get(route.entry.connId)?.readyState !== 1) {
+    registry.remove(route.entry.connId);
+    route = registry.resolve(browser);
+  }
+  if (route.error) {
+    return sendJson(res, 409, {
+      ok: false,
+      code: route.error.code,
+      error: route.error.message,
+      data: { browsers: route.error.candidates.map(browserSummary) },
+    });
+  }
+  const entry = route.entry;
+  const ws = sockets.get(entry.connId);
+
+  const id = randomUUID();
+  const message = { id, action, params: params || {} };
   const record = (ok, extra) =>
-    logCall({
-      // The response size is what a page read actually costs an agent, and the only honest way
-      // to compare two runs: token totals carry the agent's own reasoning, which varies far
-      // more between runs than the payload does.
-      ts: new Date().toISOString(),
-      runId: RUN_ID,
-      runStartedAt: RUN_STARTED_AT,
-      session: who.session,
-      source: who.source,
+    recordCall({
+      who,
       seq,
+      startedAt,
       action,
-      tabId: (params && (params.tabId ?? params.tab_id)) ?? null,
-      params: paramShape(params),
+      params,
+      instanceId: entry.instanceId,
+      browser: entry.alias,
       ok,
-      durationMs: Date.now() - startedAt,
-      ...(extra || {}),
+      extra,
     });
 
   const timeoutMs = computeTimeoutMs(action, params);
@@ -324,36 +569,45 @@ function handleCommand(body, res) {
       pending.delete(id);
       reject(new Error(`command '${action}' timed out after ${timeoutMs}ms`));
     }, timeoutMs);
-    pending.set(id, { resolve, reject, timer });
+    pending.set(id, { connId: entry.connId, resolve, reject, timer });
   });
 
   try {
-    extensionSocket.send(JSON.stringify(message));
+    ws.send(JSON.stringify(message));
   } catch (err) {
-    const entry = pending.get(id);
-    if (entry) {
-      clearTimeout(entry.timer);
+    const pendingEntry = pending.get(id);
+    if (pendingEntry) {
+      clearTimeout(pendingEntry.timer);
       pending.delete(id);
     }
     record(false, { failure: "send" });
-    return sendJson(res, 502, { ok: false, error: "failed to reach extension: " + err.message });
+    return sendJson(res, 502, {
+      ok: false,
+      error: "failed to reach extension: " + err.message,
+      browser: entry.alias,
+    });
   }
 
   wait
     .then((reply) => {
+      const outgoing = action === "list_tabs" ? tagTabs(reply, entry.alias) : reply;
       const bytes = (() => {
         try {
-          return JSON.stringify(reply.result ?? reply).length;
+          return JSON.stringify(outgoing.result ?? outgoing).length;
         } catch {
           return null;
         }
       })();
-      record(!!reply.ok, { bytes, ...(reply.ok ? null : { code: reply.code || null }) });
-      return sendJson(res, reply.ok ? 200 : 400, reply);
+      record(!!outgoing.ok, { bytes, ...(outgoing.ok ? null : { code: outgoing.code || null }) });
+      return sendJson(res, outgoing.ok ? 200 : 400, { ...outgoing, browser: entry.alias });
     })
     .catch((err) => {
       record(false, { failure: "timeout" });
-      return sendJson(res, 504, { ok: false, error: String(err.message || err) });
+      return sendJson(res, 504, {
+        ok: false,
+        error: String(err.message || err),
+        browser: entry.alias,
+      });
     });
 }
 

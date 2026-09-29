@@ -1,16 +1,22 @@
 // Unit tests for the bridge HTTP+WS relay (bridge/server.js). No Chrome/extension
 // involved — a small fake WebSocket client stands in for the real extension so we
 // can drive every code path (correlation, timeout, disconnect, oversized payload,
-// socket replacement) fast and deterministically.
+// legacy-connection admission) fast and deterministically.
 //
 // Run: npm test (from bridge/), or: node --test tests/unit/  (from the repo root)
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { WebSocket } from "ws";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// Isolated HOME so the registry's alias file (~/.browserctl/browsers.json) never touches a real
+// bridge's state. Must be set before server.js (and the state/registry modules it imports) load.
+const TEST_HOME = mkdtempSync(join(tmpdir(), "browserctl-bridge-test-"));
+process.env.HOME = TEST_HOME;
+process.env.USERPROFILE = TEST_HOME;
 
 // Small, test-only overrides so timeout/payload-cap behavior can be exercised in
 // milliseconds/kilobytes instead of real minutes/megabytes. Must be set before
@@ -55,19 +61,37 @@ async function post(action, params, client) {
 function connectFakeExtension() {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(WS_URL);
+    ws.closeInfo = new Promise((r) =>
+      ws.once("close", (code, reason) => r({ code, reason: reason.toString() }))
+    );
     ws.once("open", () => resolve(ws));
     ws.once("error", reject);
   });
 }
 
+// Closes a fake extension and waits for the bridge to have processed its removal from the
+// registry, so the next test starts from a clean connection count.
+async function closeExt(ws) {
+  if (ws.readyState === WebSocket.OPEN) ws.close();
+  await ws.closeInfo;
+  await new Promise((r) => setTimeout(r, 20));
+}
+
 function nextMessage(ws) {
-  return new Promise((resolve) => ws.once("message", (data) => resolve(JSON.parse(data.toString()))));
+  return new Promise((resolve) =>
+    ws.once("message", (data) => resolve(JSON.parse(data.toString())))
+  );
 }
 
 after(async () => {
-  for (const client of wss.clients) { try { client.terminate(); } catch {} }
+  for (const client of wss.clients) {
+    try {
+      client.terminate();
+    } catch {}
+  }
   await new Promise((resolve) => wss.close(() => resolve()));
   await new Promise((resolve) => server.close(() => resolve()));
+  rmSync(TEST_HOME, { recursive: true, force: true });
 });
 
 // ---- computeTimeoutMs: pure logic, no server round-trip needed ----
@@ -158,21 +182,21 @@ test("POST /command with action exec_system_cmd handles timeouts and errors grac
   assert.equal(data.result.failed, true);
 });
 
-test("no extension connected -> 503 'extension not connected'", async () => {
+test("no extension connected -> 409 NO_BROWSER", async () => {
   const { status, data } = await post("click", {});
-  assert.equal(status, 503);
+  assert.equal(status, 409);
   assert.equal(data.ok, false);
-  assert.match(data.error, /not connected/);
+  assert.equal(data.code, "NO_BROWSER");
 });
 
 // ---- WS correlation / timeout / disconnect, with a fake extension client ----
 
-// Each test below opens its OWN fake extension connection rather than sharing one
-// across test() blocks. The bridge only ever has a single live extension socket,
-// so isolating state per test (instead of chaining off whatever a previous test
-// left connected) keeps the tests deterministic and independently rerunnable.
+// Each test below opens its OWN fake extension connection and closes it (via `closeExt`,
+// which waits for the bridge to process the removal) before the test ends, so a
+// selector-less command in a later test always sees exactly the one connection that test
+// itself opened.
 
-// Send `action`, capture the message the (single) extension receives, reply with
+// Send `action`, capture the message the (single connected) extension receives, reply with
 // `result`, and return the still-pending HTTP promise for the caller to await.
 function roundTrip(ws, action, params, result) {
   const p = post(action, params);
@@ -186,7 +210,7 @@ test("connecting a fake extension makes it serve commands", async () => {
   const ext = await connectFakeExtension();
   const { data } = await roundTrip(ext, "eval_js", { expression: "0" }, { value: 0 });
   assert.equal(data.ok, true);
-  ext.close();
+  await closeExt(ext);
 });
 
 test("request/reply correlate by id", async () => {
@@ -199,7 +223,7 @@ test("request/reply correlate by id", async () => {
   const { status, data } = await p;
   assert.equal(status, 200);
   assert.deepEqual(data.result, { value: 2 });
-  ext.close();
+  await closeExt(ext);
 });
 
 test("unknown reply id is ignored without affecting later commands", async () => {
@@ -207,7 +231,7 @@ test("unknown reply id is ignored without affecting later commands", async () =>
   ext.send(JSON.stringify({ id: "no-such-id", ok: true, result: {} }));
   const { data } = await roundTrip(ext, "eval_js", { expression: "2+2" }, { value: 4 });
   assert.equal(data.result.value, 4);
-  ext.close();
+  await closeExt(ext);
 });
 
 test("a late duplicate reply for an already-resolved id is ignored", async () => {
@@ -218,11 +242,13 @@ test("a late duplicate reply for an already-resolved id is ignored", async () =>
   const { data } = await p;
   assert.equal(data.result.value, 6);
   // replaying the same id after it already resolved must not throw or resurface elsewhere
-  assert.doesNotThrow(() => ext.send(JSON.stringify({ id: msg.id, ok: true, result: { value: 999 } })));
+  assert.doesNotThrow(() =>
+    ext.send(JSON.stringify({ id: msg.id, ok: true, result: { value: 999 } }))
+  );
   // server is still healthy afterward
   const r2 = await roundTrip(ext, "eval_js", { expression: "4+4" }, { value: 8 });
   assert.equal(r2.data.result.value, 8);
-  ext.close();
+  await closeExt(ext);
 });
 
 test("per-request timeout fires when the extension never replies", async () => {
@@ -231,34 +257,41 @@ test("per-request timeout fires when the extension never replies", async () => {
   assert.equal(status, 504);
   assert.equal(data.ok, false);
   assert.match(data.error, /timed out/);
-  ext.close();
+  await closeExt(ext);
 });
 
 test("extension close rejects a pending request as 'extension disconnected'", async () => {
   const ext = await connectFakeExtension();
   const p = post("click", {});
   await nextMessage(ext); // sent, now in flight
-  ext.close();
+  await closeExt(ext);
   const { data } = await p;
   assert.equal(data.ok, false);
   assert.match(data.error, /extension disconnected/);
 });
 
-test("socket replacement rejects pending requests on the old socket", async () => {
+test("a second legacy socket coexists: it never disturbs the first one's in-flight command, and two connections with no focus info need a selector", async () => {
   const extA = await connectFakeExtension();
-  const p = post("click", {});
-  await nextMessage(extA); // extA has it in flight, will never reply
-  const extB = await connectFakeExtension(); // supersedes extA
-  const { data } = await p;
-  assert.equal(data.ok, false);
-  assert.match(data.error, /extension disconnected/);
+  const p = post("click", {}); // routed to extA, the sole connection at the time
+  const msg = await nextMessage(extA);
+  const extB = await connectFakeExtension(); // a second legacy connection, admitted alongside
+  await new Promise((r) => setTimeout(r, 30));
 
-  // the new socket is live and serves new commands
-  const p2 = post("eval_js", { expression: "5+5" });
-  const msg2 = await nextMessage(extB);
-  extB.send(JSON.stringify({ id: msg2.id, ok: true, result: { value: 10 } }));
-  assert.equal((await p2).data.result.value, 10);
-  extB.close();
+  // extA's in-flight command is untouched by extB joining
+  extA.send(JSON.stringify({ id: msg.id, ok: true, result: { value: 1 } }));
+  const { data } = await p;
+  assert.equal(data.ok, true);
+  assert.equal(data.result.value, 1);
+  assert.equal(extB.readyState, WebSocket.OPEN);
+
+  // with two connections and no focus info, a command naming no browser is rejected
+  const { status, data: data2 } = await post("eval_js", {});
+  assert.equal(status, 409);
+  assert.equal(data2.code, "NEEDS_BROWSER");
+
+  await closeExt(extA);
+  await closeExt(extB);
+  await new Promise((r) => setTimeout(r, 30));
 });
 
 test("oversized inbound WS message is closed with a friendly 'payload too large' reply", async () => {
@@ -276,7 +309,7 @@ test("oversized inbound WS message is closed with a friendly 'payload too large'
 // leaves the input empty and the CDP call still succeeds. Measured: a relative path and a
 // missing file both came back ok:true with bytes:0. The bridge is the layer with a filesystem
 // to check against, so it refuses before the command reaches the extension at all (these run
-// with no extension connected, which would otherwise 503).
+// with no extension connected, which would otherwise answer NO_BROWSER).
 test("POST /command upload: a relative path is refused, naming the reason", async () => {
   const r = await post("upload", { files: ["report.pdf"] });
   assert.equal(r.status, 400);
@@ -303,10 +336,14 @@ test("POST /command upload with no files at all says what it needs", async () =>
 });
 
 test("POST /command upload: a readable file gets past the check and on to the extension", async () => {
-  // No extension is connected here, so 503 is proof it passed validation rather than
+  // No extension is connected here, so NO_BROWSER is proof it passed validation rather than
   // a 400 from it — the check must not reject a path that is genuinely fine.
   const r = await post("upload", { files: [new URL(import.meta.url).pathname] });
-  assert.equal(r.status, 503, `expected the relay to take it, got ${r.status}: ${JSON.stringify(r.data)}`);
+  assert.equal(
+    r.data.code,
+    "NO_BROWSER",
+    `expected the relay to take it, got: ${JSON.stringify(r.data)}`
+  );
 });
 
 // ---- the client tag on a logged call ----
@@ -326,7 +363,7 @@ test("a logged call carries the caller's session and source", async () => {
   const entry = lastLoggedCall();
   assert.equal(entry.session, "sess-abc");
   assert.equal(entry.source, "mcp");
-  ext.close();
+  await closeExt(ext);
 });
 
 test("a call with no client tag logs null rather than inventing one", async () => {
@@ -336,7 +373,7 @@ test("a call with no client tag logs null rather than inventing one", async () =
   const entry = lastLoggedCall();
   assert.equal(entry.session, null);
   assert.equal(entry.source, null);
-  ext.close();
+  await closeExt(ext);
 });
 
 test("a junk client tag is clamped, never trusted", async () => {
@@ -349,7 +386,7 @@ test("a junk client tag is clamped, never trusted", async () => {
   const entry = lastLoggedCall();
   assert.equal(entry.session.length, 32);
   assert.equal(entry.source, null);
-  ext.close();
+  await closeExt(ext);
 });
 
 after(() => rmSync(TEST_CALL_LOG, { force: true }));

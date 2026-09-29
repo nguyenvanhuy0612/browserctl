@@ -3,6 +3,29 @@
 One entry per published version. The reasoning and measurements behind each change are in the
 commit history and on the GitHub release.
 
+## 0.9.1
+
+One bridge serves every browser and profile on the machine. Install the extension in each profile
+and leave its port at 8765: there is no port to assign and nothing to add to the MCP config. Each
+agent session keeps its own target tab, chosen on first use (the visible tab of the browser you
+focused last) and kept afterwards, so two sessions can work in Chrome and Edge at the same time.
+`browser_tabs` gained `browser`, `query` and `activate`; `tabId` routes to whichever browser owns
+it. The CLI gained `--browser` / `-b` and `BROWSERCTL_BROWSER`, and `browserctl status` lists
+every connected browser.
+
+**BREAKING:**
+- Point every extension at port 8765 (Options > port, Save & reconnect) and stop any extra bridge
+  you ran for a second browser.
+- `browser_tabs select` no longer brings the tab to the front; pass `activate: true` for that. The
+  CLI's `tab switch` still does.
+- A closed target tab is `TARGET_CLOSED` (listing the open tabs) instead of falling back to the
+  active tab, until `browser_tabs` select or new. A disconnected browser is
+  `BROWSER_DISCONNECTED` until it reconnects.
+- A session's first call answers with a `target` block instead of the "re-issue" guard error.
+- `browser_tabs list` returns `{tabs, browsers, target}`, each tab tagged with its `browser`.
+- `/status` and `browser_status` list `browsers` instead of a top-level `instanceId` /
+  `browserType`. No browser connected is `409 NO_BROWSER` (was `503`). CLI routing errors exit 2.
+
 ## 0.9.0
 
 Every tool was run against real pages and automation practice sites; this release is what that

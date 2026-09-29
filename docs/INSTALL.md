@@ -345,10 +345,40 @@ The bridge auto-starts the first time the CLI or an MCP tool needs it. Manual co
 
 `browserctl stop` records a stopped state, and auto-start stays off until `browserctl start`
 (or the CLI flag `--auto-daemon`). The daemon is shared by every agent and the CLI, so do not
-stop it just to clean up after a task.
+stop it just to clean up after a task. The state is kept per port in
+`~/.browserctl/daemon-<port>.json`, so stopping the bridge on one port leaves the others
+auto-starting.
 
 The bridge listens on all interfaces (`HOST=0.0.0.0`) by default. To keep it local-only, set
 `HOST=127.0.0.1` in the environment that starts it.
+
+## Multiple browsers or profiles
+
+One bridge serves every browser and every profile. Install the extension in each profile.
+Nothing else is needed — no port to pick, no MCP entry per browser, no `instance` to configure.
+
+1. Load the extension in each browser or profile you want to drive (Step 2 above).
+2. Optionally set a label in the extension's settings (icon > Open settings > Label), so
+   `browserctl status` and an agent's `browser` selector can refer to it by name instead of an
+   assigned alias like `chrome-2`.
+3. `browserctl status` lists every connected browser, with its alias, type, label and focus
+   state.
+
+Every extension connects to the same bridge port, 8765 unless you moved it (see
+Troubleshooting). If a browser's extension is set to another port (for example 8766, with a
+second bridge running for it), set it back: extension settings
+(icon > Open settings) > port `8765` > **Save & reconnect**. Then stop the extra bridge:
+`BROWSERCTL_BRIDGE_URL=http://127.0.0.1:8766 browserctl stop` (macOS/Linux shell; in PowerShell,
+set `$env:BROWSERCTL_BRIDGE_URL` first, then run `browserctl stop`).
+
+An agent session picks up a target the first time it acts (the browser it last focused, or the
+sole browser when only one is connected) and stays on it for the rest of the session. `--browser`
+(CLI) picks one explicitly; see [REFERENCE.md](REFERENCE.md#several-browsers) for the full
+resolution rules.
+
+Two errors are specific to this: `NEEDS_BROWSER` (several browsers connected, none focused —
+name the browser, for example "in Edge", or focus that browser once) and `AMBIGUOUS_BROWSER` (two
+profiles of the same type — use the alias, or set a label so they read apart).
 
 ## Environment variables
 
@@ -358,6 +388,7 @@ daemon is started by whichever of them runs first and keeps that environment unt
 | Variable | Default | Used by | Meaning |
 |---|---|---|---|
 | `BROWSERCTL_BRIDGE_URL` | `http://127.0.0.1:8765` | MCP, CLI | Where to reach the bridge. An auto-started bridge listens on this URL's port. |
+| `BROWSERCTL_BROWSER` | unset | CLI | Default `--browser` selector (alias, label, instanceId or type) for CLI commands that reach a browser. Overridden by `--browser`/`-b` when given. |
 | `BROWSERCTL_MCP_PROFILE` | `core` | MCP | `core` exposes 25 tools and loads the rest on demand; `all` (or `full`) exposes all 69. |
 | `BROWSERCTL_AUTO_START` | `auto` | MCP, CLI | `manual` (or `false`) never starts the bridge; start it with `browserctl start`. |
 | `BROWSERCTL_CALL_LOG` | off | bridge | `1`/`true` logs every call to `bridge/calls.jsonl` inside the package; a path logs there instead. The log holds page content — keep it off unless debugging. |
@@ -374,6 +405,12 @@ daemon is started by whichever of them runs first and keeps that environment unt
   1. `BROWSERCTL_BRIDGE_URL=http://127.0.0.1:8766` in the MCP entry and your shell, then
      `browserctl restart`.
   2. The extension's settings (icon > Open settings): port `8766`, **Save & reconnect**.
+- **`NEEDS_BROWSER`** — several browsers are connected and none was focused since the bridge
+  started, so there is nothing to default to. Name the browser (for example "in Edge"), or
+  focus that browser once and retry.
+- **`AMBIGUOUS_BROWSER`** — two connected profiles share a browser type (for example two Chrome
+  profiles), so a type name such as `"chrome"` does not pick one. Use the alias (`chrome-2`), or
+  set a label in that profile's extension settings.
 - **Client says the server failed to start or `command not found`** — GUI clients (Claude Desktop,
   Cursor) often do not see the PATH of your shell, especially with nvm/fnm/volta. Use the full path
   from `which browserctl-mcp` (macOS/Linux) or `where browserctl-mcp` (Windows) as the command.

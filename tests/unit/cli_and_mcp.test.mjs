@@ -435,6 +435,13 @@ test("MCP: application errors keep their code/recoveryHint and are not retried",
       req.on("end", () => {
         const { action } = JSON.parse(body || "{}");
         if (action === "click") requestCount++;
+        // The session's first call resolves its target tab before sending the command itself
+        if (action === "list_tabs") {
+          const tab = { id: 1, url: "https://example.com", title: "Example", active: true, focusedWindow: true };
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: true, result: { tabs: [tab] } }));
+          return;
+        }
         if (action === "status") {
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ ok: true, result: { ready: true } }));
@@ -1895,4 +1902,58 @@ test("MCP: the rendered extract names each ref with one '@'", async () => {
   assert.equal(ctx.__fn("@ref_1"), "@ref_1");
   assert.equal(ctx.__fn("ref_1"), "@ref_1");
   assert.equal(ctx.__fn("f2:ref_9"), "@f2:ref_9");
+});
+
+// ---------------------------------------------------------------------------
+// CLI --browser selector, against a real bridge with fake extensions. The CLI is stateless
+// per invocation (no session target like MCP has), so it picks a browser with a flag/env var
+// instead. Each case runs in its own process (children/cli-browser-select.mjs) since it starts
+// a real bridge on an ephemeral port with an isolated HOME.
+// ---------------------------------------------------------------------------
+
+const cliBrowserFixture = join(__dirname, "children", "cli-browser-select.mjs");
+
+async function runCliBrowserCase(name) {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const home = mkdtempSync(join(tmpdir(), "browserctl-cli-browser-"));
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  for (const k of ["BROWSERCTL_BRIDGE_URL", "BRIDGE_URL", "PORT", "BROWSERCTL_CALL_LOG"]) {
+    delete env[k];
+  }
+  try {
+    const { stdout } = await execFileAsync(process.execPath, [cliBrowserFixture, name], {
+      env,
+      timeout: 60_000,
+    });
+    assert.ok(stdout.includes(`OK ${name}`), stdout);
+  } catch (err) {
+    throw new Error(`${name} failed:\n${err.stderr || err.message}`);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test("CLI: --browser routes a command to only the named browser", async () => {
+  await runCliBrowserCase("select-reaches-only-that-browser");
+});
+
+test("CLI: -b is the short form of --browser", async () => {
+  await runCliBrowserCase("short-flag-reaches-only-that-browser");
+});
+
+test("CLI: BROWSERCTL_BROWSER supplies the default selector", async () => {
+  await runCliBrowserCase("env-var-selects-default-browser");
+});
+
+test("CLI: no selector, two browsers, no focus: exits 2 with NEEDS_BROWSER and lists the aliases", async () => {
+  await runCliBrowserCase("no-flag-two-browsers-no-focus-needs-browser");
+});
+
+test("CLI: status prints one line per connected browser, aliases included", async () => {
+  await runCliBrowserCase("status-prints-both-aliases");
+});
+
+test("CLI: tab list gains a BROWSER column once more than one browser is connected", async () => {
+  await runCliBrowserCase("tab-list-shows-browser-column-with-two-browsers");
 });

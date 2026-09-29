@@ -7,17 +7,20 @@
 // text. A fix verified against one editor is not verified.
 import http from "node:http";
 import { readFileSync } from "node:fs";
-import { openMainTab, teardown, verifyClean, installReaper } from "./harness.mjs";
+import { openMainTab, teardown, verifyClean, installReaper, e2eBrowser } from "./harness.mjs";
 
 const CLIENT = { session: `e2e-${process.pid}`, source: "e2e" };
 
 installReaper();
 
 const BRIDGE = "http://127.0.0.1:8765";
-const post = (a, p = {}) => fetch(`${BRIDGE}/command`, {
-  method: "POST", headers: { "content-type": "application/json" },
-  body: JSON.stringify({ action: a, params: p, client: CLIENT }),
-}).then((r) => r.json()).catch((e) => ({ ok: false, error: e.message }));
+const post = async (a, p = {}) => {
+  const browser = await e2eBrowser();
+  return fetch(`${BRIDGE}/command`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: a, params: p, client: CLIENT, ...(browser ? { browser } : {}) }),
+  }).then((r) => r.json()).catch((e) => ({ ok: false, error: e.message }));
+};
 
 const FIXTURE = new URL("./editors.html", import.meta.url).pathname;
 const CASES = [

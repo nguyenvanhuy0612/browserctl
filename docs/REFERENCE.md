@@ -1,4 +1,4 @@
-# browserctl Core Tool Reference — v0.9.0
+# browserctl Core Tool Reference — v0.9.1
 
 browserctl provides 25 core tools (69 tools across all profiles) for web automation and agent inspection.
 
@@ -45,6 +45,48 @@ alongside `effect` to confirm the call landed where you meant, without taking a 
 re-render. A stale ref is refused rather than re-pointed at whatever now occupies that position;
 where the old label can still be found, the error names the ref that replaced it.
 
+## Several browsers
+
+One bridge serves every connected browser and profile at once — nothing to configure. Each MCP
+session keeps a **target**: the browser and tab that session is driving. The agent never passes
+it; the server applies it to every call automatically.
+
+- The first call of a session resolves the target: the browser last focused by the user, or the
+  sole browser if only one is connected, and in it the tab the user sees (the active tab of its
+  focused window) — never a tab another session selected in the background. With several browsers connected and
+  none focused, the call fails with `NEEDS_BROWSER`, naming the connected browsers.
+- The target is then sticky: later focus changes elsewhere do not move it. It changes only through
+  `browser_tabs({action: "select", ...})` or `browser_tabs({action: "new", ...})`.
+- `tabId` (already documented above) is the per-call, cross-browser override: a call carrying it
+  acts on that tab once, without moving the session's target. The server finds which browser owns
+  the id; an id open in two browsers is `AMBIGUOUS_TAB`.
+
+`browser_tabs` gains three parameters for this:
+
+- `browser` (`'list'`, `'select'`, `'new'`): which browser, by alias (`"chrome-1"`), label (set in
+  the extension's Options), `instanceId`, or type (`"chrome"`, `"edge"` — matches only when
+  exactly one connected browser has that type; two is `AMBIGUOUS_BROWSER`, naming both). `new`
+  without `browser` opens in the session's target browser if one is set (or the browser a closed
+  target was in), else the bridge's own default (the sole connection, or last-focused).
+- `query` (`'list'`): keep only tabs whose title or URL contains this text, case-insensitive.
+- `activate` (`'select'`, `'new'`): make the tab the visible tab of its window (default `false` —
+  selecting or opening a tab does not raise it, so a background session does not disturb what the
+  user is looking at).
+
+`browser_tabs({action: "list"})` always fans out to every connected browser, even with one
+connected, and returns `{tabs, browsers, target}`: `tabs` (each carrying `browser`), `browsers`
+(every connected browser's alias, type, label and reachability), and `target` (the session's
+current `{browser, tabId}`, or `null`).
+
+Error codes from browser routing: `NEEDS_BROWSER` (no target and no focus to resolve one),
+`AMBIGUOUS_BROWSER` (a `browser` selector matches more than one connected browser),
+`AMBIGUOUS_TAB` (a `tabId` is open in more than one browser), `TARGET_CLOSED` (the session's
+target tab was closed — nothing falls back to another tab, and the session stays without a target
+until `browser_tabs` select or new), `BROWSER_DISCONNECTED` (the session's target browser
+disconnected — calls keep failing with it, and resume on the same tab when that browser
+reconnects), `UNKNOWN_BROWSER` (a
+`browser` selector matches none), `NO_BROWSER` (no browser is connected at all).
+
 ## Navigation & Tabs
 
 ### browser_navigate
@@ -54,8 +96,13 @@ where the old label can still be found, the error names the ref that replaced it
 
 ### browser_tabs
 - action: Tab operation ('list', 'new', 'select', 'close').
-- tabId: Which tab — required for 'select' and 'close'.
+- tabId: Which tab — for 'select' (or give `browser`) and required for 'close'.
 - url: URL for new tab when action is 'new'.
+- browser: Which browser, by alias, label, instanceId or type — for 'list', 'select' and 'new'.
+  'new' without `browser` opens in the session's current target browser if one is set, else the
+  bridge's own default (the sole connection, or last-focused).
+- query: For 'list', keep only tabs whose title or URL contains this text (case-insensitive).
+- activate: For 'select' and 'new', make the tab the visible tab of its window (default false).
 
 ## Inspection & Extraction
 
@@ -195,6 +242,10 @@ in `browser_snapshot` under `pageState.openDialogs` and close with a `browser_cl
 - target: Target element selector or ref to screenshot.
 - format: Image format ('jpeg', 'png').
 - quality: JPEG image quality (0-100).
+
+A tab that is not in front is captured through CDP. Chrome answers that; Edge does not paint a
+background tab, so the capture fails after 5 s with a hint to select the tab with
+`activate: true` first.
 
 ### browser_evaluate
 - expression: JavaScript expression to evaluate in page context.

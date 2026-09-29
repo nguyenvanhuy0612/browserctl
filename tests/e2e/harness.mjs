@@ -22,11 +22,32 @@ function envStr(name, fallback) {
   return raw !== undefined && raw !== "" ? raw : fallback;
 }
 
-export const BRIDGE = envStr("BROWSERCTL_BRIDGE_URL", envStr("BRIDGE_URL", "http://127.0.0.1:8765"));
+export const BRIDGE = envStr(
+  "BROWSERCTL_BRIDGE_URL",
+  envStr("BRIDGE_URL", "http://127.0.0.1:8765")
+);
 
 // Tags every command this run sends, so e2e traffic is distinguishable from an agent's in the
 // bridge call log. One daemon and one extension serve every client, so the runs share a log.
 const CLIENT = { session: `e2e-${process.pid}`, source: "e2e" };
+
+// The live suites drive one browser. With several connected, BROWSERCTL_E2E_BROWSER names it (any
+// bridge selector); otherwise the first Chrome, the browser the suites are written against.
+let e2eBrowserChoice = null;
+export function e2eBrowser() {
+  e2eBrowserChoice ||= (async () => {
+    if (process.env.BROWSERCTL_E2E_BROWSER) return process.env.BROWSERCTL_E2E_BROWSER;
+    try {
+      const s = await (await fetch(`${BRIDGE}/status`)).json();
+      const list = Array.isArray(s.browsers) ? s.browsers : [];
+      if (list.length <= 1) return null;
+      return (list.find((b) => b.browserType === "chrome") || list[0]).alias;
+    } catch {
+      return null;
+    }
+  })();
+  return e2eBrowserChoice;
+}
 
 export const used = new Set();
 const ledger = { tabs: new Set(), groups: new Set(), mainTab: null };
@@ -35,10 +56,11 @@ let reaperInstalled = false;
 
 export async function cmd(action, params = {}) {
   used.add(action);
+  const browser = await e2eBrowser();
   const res = await fetch(`${BRIDGE}/command`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action, params, client: CLIENT }),
+    body: JSON.stringify({ action, params, client: CLIENT, ...(browser ? { browser } : {}) }),
   });
   const data = await res.json().catch(() => ({}));
   if (!data.ok) throw new Error(`${action}: ${data.error || "HTTP " + res.status}`);
@@ -98,7 +120,8 @@ export async function pollFind(query, timeoutMs = 5000, intervalMs = 100) {
 }
 
 export async function openMainTab(url) {
-  if (ledger.mainTab != null) throw new Error("openMainTab called twice — this suite runs on ONE tab");
+  if (ledger.mainTab != null)
+    throw new Error("openMainTab called twice — this suite runs on ONE tab");
   const r = await cmd("new_tab", { url });
   if (r.id == null) throw new Error("new_tab returned no id");
   ledger.mainTab = r.id;
@@ -186,9 +209,17 @@ export async function teardown() {
 export async function verifyClean(urlMark) {
   const open = await cmd("list_tabs", {});
   const mine = (open.tabs || []).filter((t) => String(t.url || "").includes(urlMark));
-  assert(mine.length === 0, `left ${mine.length} tab(s) behind: ${mine.map((t) => t.url).join(", ")}`);
-  const grouped = (open.tabs || []).filter((t) => t.groupId != null && t.groupId !== -1 && String(t.url || "").includes(urlMark));
-  assert(grouped.length === 0, `left ${grouped.length} tab(s) in a group — Chrome syncs saved groups across machines`);
+  assert(
+    mine.length === 0,
+    `left ${mine.length} tab(s) behind: ${mine.map((t) => t.url).join(", ")}`
+  );
+  const grouped = (open.tabs || []).filter(
+    (t) => t.groupId != null && t.groupId !== -1 && String(t.url || "").includes(urlMark)
+  );
+  assert(
+    grouped.length === 0,
+    `left ${grouped.length} tab(s) in a group — Chrome syncs saved groups across machines`
+  );
 }
 
 // Teardown has to survive Ctrl-C too: a half-run that leaves a synced tab group behind is the
@@ -200,7 +231,9 @@ export function installReaper() {
   const reap = async (signal) => {
     if (reaping) return;
     reaping = true;
-    console.log(`\n[harness] ${signal} — closing ${ledger.tabs.size + (ledger.mainTab != null ? 1 : 0)} tab(s) before exit`);
+    console.log(
+      `\n[harness] ${signal} — closing ${ledger.tabs.size + (ledger.mainTab != null ? 1 : 0)} tab(s) before exit`
+    );
     try {
       await teardown();
     } catch {

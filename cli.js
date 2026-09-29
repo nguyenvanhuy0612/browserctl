@@ -35,6 +35,15 @@ const BRIDGE_PORT = (() => {
 // one command — there is no session to group.
 const CLIENT = { session: `cli-${process.pid}`, source: "cli" };
 
+// The bridge's selector-routing failures (which browser, not what to do on it) — a distinct
+// exit code from every other command error.
+const ROUTING_ERROR_CODES = new Set([
+  "NO_BROWSER",
+  "NEEDS_BROWSER",
+  "AMBIGUOUS_BROWSER",
+  "UNKNOWN_BROWSER",
+]);
+
 function printHelp() {
   console.log(`
 browserctl CLI — Fast, Ergonomic Browser Automation for AI Agents & Developers
@@ -118,6 +127,10 @@ Formatting & Global Flags:
   -c, --compact                         Output compact token-efficient representation
   -f, --full, --fullpage                Capture fullpage screenshot
   -t, --tab <id>                        Direct command to specific tab ID
+  -b, --browser <selector>               Target one connected browser: alias (edge-1), label,
+                                         instanceId, or type (only if exactly one of that type
+                                         is connected). Needed when more than one browser is
+                                         connected and none is focused (exits 2, NEEDS_BROWSER).
   --settle <ms>                         Auto-settle delay after action (default: 150ms)
   --no-daemon                           Do not auto-start bridge daemon if not running
   --auto-daemon                         Force auto-start even if previously stopped
@@ -126,6 +139,7 @@ Environment:
   BROWSERCTL_BRIDGE_URL                 Default: http://127.0.0.1:8765
   BROWSERCTL_AUTO_START                 'auto' (default) or 'manual'/'false'
   BROWSERCTL_MCP_PROFILE                'core' (default) or 'all'
+  BROWSERCTL_BROWSER                    Default browser selector, overridden by --browser/-b
 `);
 }
 
@@ -209,7 +223,7 @@ function stopBridgeDaemon() {
           execSync(`taskkill /F /PID ${pid}`);
         } catch {}
       }
-      markDaemonStopped({ stoppedBy: "cli_stop" });
+      markDaemonStopped({ stoppedBy: "cli_stop", port: BRIDGE_PORT });
       return true;
     } else {
       const pids = execSync(`lsof -ti :${BRIDGE_PORT} -sTCP:LISTEN`, { encoding: "utf8" })
@@ -219,11 +233,11 @@ function stopBridgeDaemon() {
       for (const pid of pids) {
         process.kill(parseInt(pid, 10), "SIGTERM");
       }
-      markDaemonStopped({ stoppedBy: "cli_stop" });
+      markDaemonStopped({ stoppedBy: "cli_stop", port: BRIDGE_PORT });
       return pids.length > 0;
     }
   } catch {
-    markDaemonStopped({ stoppedBy: "cli_stop" });
+    markDaemonStopped({ stoppedBy: "cli_stop", port: BRIDGE_PORT });
     return false;
   }
 }
@@ -238,7 +252,7 @@ async function ensureBridge(autoDaemon = true, forceAuto = false) {
     process.exit(1);
   }
 
-  if (isDaemonExplicitlyStopped() && !forceAuto) {
+  if (isDaemonExplicitlyStopped(BRIDGE_PORT) && !forceAuto) {
     process.stderr.write(
       "[browserctl] Error: Bridge daemon is currently stopped (stopped by user/agent).\n" +
         "             Run 'browserctl start' to restart the daemon, or pass --auto-daemon.\n"
@@ -354,21 +368,42 @@ function parseTarget(arg, params) {
   }
 }
 
-function formatTabsTable(tabs = []) {
+// The BROWSER column only earns its keep once there is more than one browser to tell apart —
+// `result.browsers` (the fan-out map) is present exactly when list_tabs reached more than one
+// connection, so its presence is what turns the column on.
+function formatTabsTable(tabs = [], { showBrowser = false } = {}) {
   if (!Array.isArray(tabs) || tabs.length === 0) return "No open tabs.";
-  const header = `ID         ACTIVE   TITLE                                          URL`;
-  const separator = `--------------------------------------------------------------------------------`;
+  const header = showBrowser
+    ? `ID         ACTIVE   BROWSER      TITLE                                          URL`
+    : `ID         ACTIVE   TITLE                                          URL`;
+  const separator = "-".repeat(header.length);
   const rows = tabs.map((t) => {
     const id = String(t.id || "").padEnd(10);
     const active = (t.active ? "*" : " ").padEnd(8);
+    const browser = showBrowser ? `${(t.browser || "").padEnd(12)} ` : "";
     let title = (t.title || "(untitled)").replace(/\n/g, " ");
     if (title.length > 44) title = title.slice(0, 41) + "...";
     title = title.padEnd(46);
     let url = t.url || "";
     if (url.length > 60) url = url.slice(0, 57) + "...";
-    return `${id} ${active} ${title} ${url}`;
+    return `${id} ${active} ${browser}${title} ${url}`;
   });
   return [header, separator, ...rows].join("\n");
+}
+
+// One line per connected browser for `browserctl status`'s human output, e.g.
+// `  chrome-1  chrome  "Test profile"  focused 12s ago`.
+function formatAgo(ms) {
+  const secs = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.round(secs / 60)}m`;
+  return `${Math.round(secs / 3600)}h`;
+}
+
+function formatBrowserLine(b) {
+  const label = b.label ? ` ${JSON.stringify(b.label)}` : "";
+  const focus = b.lastFocusedAt ? `focused ${formatAgo(b.lastFocusedAt)} ago` : "not focused yet";
+  return `  ${b.alias}  ${b.browserType}${label}  ${focus}`;
 }
 
 function readManifest(dir) {
@@ -440,6 +475,10 @@ async function main() {
   let forceAutoDaemon = false;
   let explicitTabId = null;
   let settleMs = null;
+  // A --browser/-b flag overrides BROWSERCTL_BROWSER; neither is set for most invocations, in
+  // which case the bridge picks a default itself (the sole connected browser, or the last
+  // focused one) and answers NEEDS_BROWSER when it can't.
+  let browserSelector = envStr("BROWSERCTL_BROWSER", null);
 
   const positionalArgs = [];
   for (let i = 0; i < rawArgs.length; i++) {
@@ -462,6 +501,10 @@ async function main() {
       explicitTabId = parseInt(rawArgs[++i], 10);
     } else if (a.startsWith("--tab=")) {
       explicitTabId = parseInt(a.slice(6), 10);
+    } else if (a === "-b" || a === "--browser") {
+      browserSelector = rawArgs[++i];
+    } else if (a.startsWith("--browser=")) {
+      browserSelector = a.slice(10);
     } else if (a === "--settle") {
       settleMs = parseInt(rawArgs[++i], 10);
     } else if (a.startsWith("--settle=")) {
@@ -561,7 +604,7 @@ async function main() {
   }
 
   if (action === "status") {
-    const stateInfo = getDaemonState();
+    const stateInfo = getDaemonState(BRIDGE_PORT);
     try {
       const res = await fetch(`${BRIDGE_URL}/status`, { signal: AbortSignal.timeout(1000) });
       const data = await res.json();
@@ -573,6 +616,10 @@ async function main() {
       } else {
         console.log(`Bridge: RUNNING (${BRIDGE_URL})`);
         console.log(`Extension: ${data.extensionConnected ? "CONNECTED" : "DISCONNECTED"}`);
+        if (Array.isArray(data.browsers) && data.browsers.length) {
+          console.log("Browsers:");
+          for (const b of data.browsers) console.log(formatBrowserLine(b));
+        }
         if (data.callLog) {
           const mb = (n) => (n / 1024 / 1024).toFixed(1);
           const size = data.callLogBytes != null ? `${mb(data.callLogBytes)}MB` : "?";
@@ -966,6 +1013,12 @@ async function main() {
         break;
 
       case "switch_tab":
+        if (args[0]) params.id = parseInt(args[0], 10);
+        // A person at a terminal switching tabs means to see it — unlike the MCP session
+        // target's own switch_tab, which only re-points the target without stealing focus.
+        params.activate = true;
+        break;
+
       case "close_tab":
         if (args[0]) params.id = parseInt(args[0], 10);
         break;
@@ -1021,10 +1074,12 @@ async function main() {
   }
 
   try {
+    const body = { action, params, client: CLIENT };
+    if (browserSelector) body.browser = browserSelector;
     const res = await fetch(`${BRIDGE_URL}/command`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, params, client: CLIENT }),
+      body: JSON.stringify(body),
     });
     const data = await res.json();
 
@@ -1033,9 +1088,12 @@ async function main() {
       if (data.code) errPayload.code = data.code;
       if (data.diagnostics) errPayload.diagnostics = data.diagnostics;
       if (data.recoveryHint) errPayload.recoveryHint = data.recoveryHint;
+      if (data.data?.browsers) errPayload.browsers = data.data.browsers;
       if (prettyOutput) console.error(JSON.stringify(errPayload, null, 2));
       else console.error(JSON.stringify(errPayload));
-      process.exit(1);
+      // A routing error (which browser to use, not what to do on it) is a distinct, scriptable
+      // failure mode from every other command error, so it gets its own exit code.
+      process.exit(ROUTING_ERROR_CODES.has(data.code) ? 2 : 1);
     }
 
     const result = data.result !== undefined ? data.result : data;
@@ -1104,7 +1162,7 @@ async function main() {
     }
 
     if (action === "list_tabs" && Array.isArray(result?.tabs)) {
-      console.log(formatTabsTable(result.tabs));
+      console.log(formatTabsTable(result.tabs, { showBrowser: !!result.browsers }));
       return;
     }
 

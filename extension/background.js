@@ -141,6 +141,47 @@ function stopConnecting() {
   chrome.storage.local.set({ giveUp: true });
 }
 
+async function getInstanceId() {
+  try {
+    const res = await chrome.storage.local.get(["instanceId"]);
+    if (res && res.instanceId) return res.instanceId;
+    const newId = "inst_" + Math.random().toString(36).slice(2, 10);
+    await chrome.storage.local.set({ instanceId: newId });
+    return newId;
+  } catch {
+    return "inst_" + Math.random().toString(36).slice(2, 10);
+  }
+}
+
+// The label (if the owner set one in Options) and whether this browser's last-focused window is
+// currently focused, both read fresh on every hello so a reconnect always carries the latest. A
+// failure to read either degrades that one piece of information rather than aborting the hello:
+// the bridge still needs instanceId/browserType even when label/focus can't be determined.
+async function helloExtras() {
+  let label;
+  try {
+    ({ label } = await chrome.storage.local.get(["label"]));
+  } catch {}
+  let focused = false;
+  try {
+    focused = (await chrome.windows.getLastFocused()).focused === true;
+  } catch {}
+  return {
+    ...(label ? { label } : {}),
+    focused,
+  };
+}
+
+function detectBrowserType() {
+  if (typeof navigator !== "undefined" && navigator.brave) return "brave";
+  const ua = (typeof navigator !== "undefined" && navigator.userAgent) || "";
+  if (ua.includes("Edg/")) return "edge";
+  if (ua.includes("OPR/") || ua.includes("Opera/")) return "opera";
+  if (ua.includes("Chrome/")) return "chrome";
+  if (ua.includes("Firefox/")) return "firefox";
+  return "chromium";
+}
+
 async function connect() {
   if (!wantConnect) return;
   if (
@@ -169,12 +210,18 @@ async function connect() {
   const ws = new WebSocket(url);
   socket = ws;
 
-  ws.addEventListener("open", () => {
+  ws.addEventListener("open", async () => {
     if (ws !== socket) return;
     attempts = 0;
     connState = "connected";
     console.log("[browserctl] bridge connected:", url);
     chrome.storage.local.set({ autoConnect: true, giveUp: false });
+    try {
+      const instanceId = await getInstanceId();
+      const browserType = detectBrowserType();
+      const extras = await helloExtras();
+      ws.send(JSON.stringify({ type: "hello", instanceId, browserType, ...extras }));
+    } catch {}
   });
 
   ws.addEventListener("message", async (event) => {
@@ -189,6 +236,10 @@ async function connect() {
       try {
         ws.send(JSON.stringify({ type: "pong" }));
       } catch {}
+      return;
+    }
+    if (msg.type === "welcome" && typeof msg.instanceId === "string") {
+      await chrome.storage.local.set({ instanceId: msg.instanceId });
       return;
     }
     const reply = await dispatch(msg).catch((err) => ({
@@ -224,6 +275,25 @@ async function connect() {
     } catch {}
   });
 }
+
+// Tells the bridge whether this browser's last-focused window is currently focused. Sent only
+// while the socket is open; a change while disconnected is simply carried by the next hello.
+function reportFocus(focused) {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    try {
+      socket.send(JSON.stringify({ type: "focus", focused }));
+    } catch {}
+  }
+}
+
+// Registered once, synchronously, at script load: an MV3 service worker only wakes for events
+// whose listener was added during this same top-level evaluation, not from inside a promise.
+function registerFocusListener() {
+  chrome.windows.onFocusChanged.addListener((windowId) => {
+    reportFocus(windowId !== chrome.windows.WINDOW_ID_NONE);
+  });
+}
+registerFocusListener();
 
 async function init() {
   const { autoConnect = true, giveUp = false } = await chrome.storage.local.get([
@@ -936,10 +1006,33 @@ async function getDevicePixelRatio(tabId) {
   }
 }
 
+// A browser may not paint a tab that is not in front (Edge does not), and CDP then never answers
+// Page.captureScreenshot. A background capture is bounded so the caller gets a hint, not a hang.
+const BACKGROUND_CAPTURE_MS = 5000;
+
+function captureBackground(tab, opts) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `tab ${tab.id} is not in front and this browser did not paint it for a capture. ` +
+              `Bring it to the front with browser_tabs({action: "select", tabId: ${tab.id}, activate: true}), ` +
+              `then take the screenshot again.`
+          )
+        ),
+      BACKGROUND_CAPTURE_MS
+    );
+  });
+  return Promise.race([captureViewport(tab.id, opts), timeout]).finally(() => clearTimeout(timer));
+}
+
 async function screenshot(params = {}) {
   const { format = "jpeg", quality = 55 } = params;
   const tab = await targetTab(params);
   if (isAttached(tab.id)) {
+    if (!tab.active) return await captureBackground(tab, { format, quality });
     return await captureViewport(tab.id, { format, quality });
   }
   if (tab.active) {
@@ -951,7 +1044,7 @@ async function screenshot(params = {}) {
     setLastCaptureScale(tab.id, await getDevicePixelRatio(tab.id));
     return { dataUrl };
   }
-  return await captureViewport(tab.id, { format, quality });
+  return await captureBackground(tab, { format, quality });
 }
 
 async function listTabs() {
@@ -960,12 +1053,21 @@ async function listTabs() {
     const { targetTabId: saved } = await chrome.storage.session.get("targetTabId");
     if (saved != null) targetTabId = saved;
   }
+  // A rejection here degrades to "no window known as focused" rather than failing the whole
+  // list: every tab is still listed, just with focusedWindow false.
+  let lastFocused = null;
+  try {
+    lastFocused = await chrome.windows.getLastFocused();
+  } catch {}
   return {
     tabs: tabs.map((t) => ({
       id: t.id,
       url: t.url,
       title: t.title,
       active: t.active,
+      windowId: t.windowId,
+      ...(t.incognito ? { incognito: true } : {}),
+      focusedWindow: !!(t.active && lastFocused && t.windowId === lastFocused.id),
       ...(t.groupId != null && t.groupId !== -1 ? { groupId: t.groupId } : {}),
       ...(t.id === targetTabId ? { pinned: true } : {}),
     })),
@@ -973,8 +1075,8 @@ async function listTabs() {
   };
 }
 
-async function newTab({ url, wait = true }) {
-  const tab = await chrome.tabs.create({ ...(url ? { url } : {}), active: false });
+async function newTab({ url, wait = true, activate = false }) {
+  const tab = await chrome.tabs.create({ ...(url ? { url } : {}), active: activate === true });
   pinTarget(tab.id);
   if (!url || wait === false) return { id: tab.id };
 
@@ -1013,12 +1115,14 @@ async function ungroupTab({ id } = {}) {
   return { ungrouped: tabId };
 }
 
-async function switchTab({ id, focus = false }) {
+// Pins the tab as the target. It becomes the visible tab of its window only with `activate`,
+// and its window is raised only with `focus`; without either, nothing changes on screen.
+async function switchTab({ id, activate = false, focus = false }) {
   if (id == null) throw new Error("switch_tab requires 'id'");
-  const tab = await chrome.tabs.update(id, { active: true });
+  const tab = activate ? await chrome.tabs.update(id, { active: true }) : await chrome.tabs.get(id);
   if (focus) await chrome.windows.update(tab.windowId, { focused: true });
   pinTarget(tab.id);
-  return { id: tab.id };
+  return { id: tab.id, url: tab.url, title: tab.title };
 }
 
 async function closeTab(params = {}) {
@@ -1442,7 +1546,7 @@ function mergeFrameResults(action, parts, params = {}, errors = []) {
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && (changes.bridgeHost || changes.bridgePort)) {
+  if (area === "local" && (changes.bridgeHost || changes.bridgePort || changes.label)) {
     if (!wantConnect) return;
     if (socket) {
       try {

@@ -1,4 +1,4 @@
-# Tool surface as it actually is — generated 2026-09-24, browserctl 0.9.0
+# Tool surface as it actually is — generated 2026-09-29, browserctl 0.9.1
 
 Generated from the running server (`server._registeredTools`), not written by hand — the last
 hand-written version of this list claimed `all` on a tool that did not have it.
@@ -29,8 +29,8 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 | `file_upload` | target, files, file, format | [ACT] Attach one or more local files to an <input type=file> and fire the page's change/input handlers, the way a human's file picker does. |
 | `wait_for` | for, selector, text, gone, timeoutMs, format | [WAIT] Wait for a selector or page text to appear, or to disappear with gone: true. |
 | `take_screenshot` | fullPage, target, format, quality | [WAIT] Capture the target tab as an image, without activating it. JPEG by default; format: 'png' for a lossless one. |
-| `navigate` | url, reload, format | [NAV] Navigate the pinned tab to a URL, or reload it. |
-| `tabs` | *action, url | [NAV] Manage browser tabs: list all tabs, open a new tab, select/re-pin a tab, or close a tab. |
+| `navigate` | url, reload, format | [NAV] Navigate your session's target tab to a URL, or reload it. |
+| `tabs` | *action, url, browser, query, activate | [NAV] List every connected browser's tabs, open a tab, select this session's target tab, or close a tab. |
 | `evaluate` | *expression, format | [EXTEND] Run a JavaScript expression in the target page and return its value. The value must be JSON-serializable. |
 | `action` | action, params, format | [EXTEND] Dispatch any protocol action by name, including ones whose tool is not loaded: browser_action({action, params}). |
 | `load_tools` | profile, tools, format | [EXTEND] Load a profile of tools that are not currently visible: network (capture every request, read response bodies, export a HAR, wait for network idle), cookies (read, set, delete), storage (localStorage, sessionStorage), console (console messages and page errors), cdp (raw CDP, coordinate input, audit), record (record and replay), tabs (windows, groups, visibility), advanced (a11y tree, PDF, history, element screenshots), system (a shell command on the bridge host, not the page), or all. |
@@ -109,7 +109,7 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 | `group_tab` | id, title, color | Put a tab into a labeled, colored tab group so you (and the user) can see which tab the agent drives. Defaults to the target tab; pass id to group a specific tab. Does NOT activate the tab (no focus steal) and pins the grouped tab as the target. |
 | `ungroup_tab` | id | Remove a tab from its tab group. Defaults to the target tab. |
 | `spoof_visibility` | restore, format | Make the target tab's page JS believe it's visible/focused (document.hidden=false, document.visibilityState='visible', fires a visibilitychange event), WITHOUT actually foregrounding the tab or stealing the user's focus. Use this when scrolling a backgrounded tab isn't loading new content — many sites (e.g. infinite-scroll feeds) deliberately pause lazy-loading via the Page Visibility API while a tab is hidden, as a resource-saving pattern. This is explicit and opt-in on purpose: call it once before scrolling a background tab that needs to lazy-load, not automatically on every scroll — visibility state is also used for other things a site might not want spoofed unconditionally (video autoplay, polling/websocket resume, analytics time-on-page). Attaches the CDP debugger if not already attached (shows the 'is being debugged' bar). KNOWN LIMITATION: this patches JS-visible state only — it does not lift Chrome's renderer-level throttling of a backgrounded tab (requestAnimationFrame doesn't fire, IntersectionObserver rides the same throttled pipeline). If a site's lazy-load is driven by rAF/IO rather than a visibilitychange or scroll listener, this may not help; there is no further automatic fallback (foregrounding the tab, even briefly, is a deliberate manual decision this tool will never make for you). The spoof lasts until the page navigates or reloads; call it again on the new page, or pass restore: true to undo it. |
-| `current_tab` | format | Report which tab commands currently act on (id, url, title, and whether a target is pinned). The target is pinned on your first command and held across user tab switches. Call this to confirm you're on the right page before snapshotting or reading sensitive content. |
+| `current_tab` | format | Report which tab commands currently act on (id, url, title, and whether the extension has a pinned tab). Your session's target is resolved on your first command and held across user tab switches. Call this to confirm you're on the right page before snapshotting or reading sensitive content. |
 
 ### advanced (9)
 

@@ -911,6 +911,43 @@ gate("end-to-end (live browser)", () => {
   return counts.join(", ");
 });
 
+// --------------------------------------------------------- 11. multi-browser live acceptance
+gate("multi-browser live acceptance", () => {
+  if (!RUN_E2E) return "SKIPPED — rerun with --e2e once the bridge and extension are up";
+
+  let status = null;
+  try {
+    status = JSON.parse(
+      execFileSync("sh", ["-c", "curl -s -m 3 http://127.0.0.1:8765/status"], { encoding: "utf8" })
+    );
+  } catch {}
+  if (!status || !status.extensionConnected) {
+    throw new Error(
+      "bridge unreachable or extension not connected — start it (npm start) and load the extension"
+    );
+  }
+  if (!Array.isArray(status.browsers) || status.browsers.length < 2) {
+    return "SKIPPED (one browser)";
+  }
+
+  let out;
+  try {
+    out = execFileSync("node", ["tests/e2e/multi_browser_live.mjs"], {
+      cwd: ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    out = String(err.stdout || "");
+    throw new Error(out || "multi_browser_live.mjs failed with no output");
+  }
+  const m = out.match(/RESULT: (\d+)\/(\d+) checks passed, (\d+) skipped, (\d+) failed/);
+  if (!m) {
+    throw new Error(`multi_browser_live.mjs did not report a clean result:\n${out.slice(-500)}`);
+  }
+  return `${m[1]}/${m[2]} passed, ${m[3]} skipped`;
+});
+
 // ----------------------------------------------------------------------- report
 let failed = 0;
 console.log("");

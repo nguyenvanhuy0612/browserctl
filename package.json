@@ -1,6 +1,6 @@
 {
   "name": "browserctl-mcp",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Universal Browser Control Protocol & MCP Server for AI Agents and Developers",
   "type": "module",
   "main": "cli.js",
@@ -13,7 +13,9 @@
     "cli.js",
     "bridge/server.js",
     "bridge/state.js",
+    "bridge/registry.js",
     "mcp/index.js",
+    "mcp/target.js",
     "extension/",
     "docs/INSTALL.md",
     "docs/REFERENCE.md",
