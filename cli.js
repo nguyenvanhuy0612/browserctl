@@ -31,9 +31,14 @@ const BRIDGE_PORT = (() => {
     return 8765;
   }
 })();
-// Names this invocation in the bridge call log. One id per command, because a CLI process is
-// one command — there is no session to group.
-const CLIENT = { session: `cli-${process.pid}`, source: "cli" };
+// Every invocation belongs to one CLI session, `cli` or BROWSERCTL_SESSION when set. A CLI
+// process runs one command, so the bridge keeps the session's target (sticky) and a command
+// naming no tab goes there; a tab another session holds is never taken.
+const CLIENT = {
+  session: envStr("BROWSERCTL_SESSION", "cli").slice(0, 32),
+  source: "cli",
+  sticky: true,
+};
 
 // The bridge's selector-routing failures (which browser, not what to do on it) — a distinct
 // exit code from every other command error.
@@ -42,6 +47,14 @@ const ROUTING_ERROR_CODES = new Set([
   "NEEDS_BROWSER",
   "AMBIGUOUS_BROWSER",
   "UNKNOWN_BROWSER",
+  "NEEDS_TAB",
+  "NEEDS_TARGET",
+  "AMBIGUOUS_TAB",
+  "TAB_NOT_FOUND",
+  "TAB_OWNED",
+  "TAB_BUSY",
+  "TAKE_CONFIRM",
+  "TARGET_TAKEN",
 ]);
 
 function printHelp() {
@@ -68,10 +81,14 @@ browser_get_property -> get text, browser_click -> click.
 Navigation & Tabs:
   browserctl open <url>                 Navigate target tab to url (alias: navigate)
   browserctl back | forward | reload    History navigation
-  browserctl tab [list]                 List open tabs and target tab (alias: tabs)
+  browserctl tab [list]                 List open tabs, and which another session holds (alias: tabs)
   browserctl tab new [url]              Open new tab (alias: new_tab)
-  browserctl tab switch <id>            Switch target to tab ID (alias: switch_tab)
+  browserctl tab switch <id> [--force]  Switch target to tab ID (alias: switch_tab). A tab another
+                                         session holds: refused while it acts (TAB_BUSY), else
+                                         TAKE_CONFIRM; --force takes it
   browserctl tab close [id]             Close tab (alias: close_tab)
+  browserctl tab release                Give this session's tab up
+  browserctl tab yield                  Keep working, but let any session take the tab
 
 Inspection & Query (get):
   browserctl snapshot [--all]           Capture interactive DOM elements (--all = everything in the DOM)
@@ -126,11 +143,15 @@ Formatting & Global Flags:
   --pretty                              Force 2-space indented pretty JSON output
   -c, --compact                         Output compact token-efficient representation
   -f, --full, --fullpage                Capture fullpage screenshot
-  -t, --tab <id>                        Direct command to specific tab ID
+  -t, --tab <id>                        Direct this one command to a tab ID, in whichever browser
+                                         has it (a tab another session holds can only be read,
+                                         else TAB_OWNED)
   -b, --browser <selector>               Target one connected browser: alias (edge-1), label,
                                          instanceId, or type (only if exactly one of that type
                                          is connected). Needed when more than one browser is
-                                         connected and none is focused (exits 2, NEEDS_BROWSER).
+                                         connected and the session has no target yet (without it:
+                                         exit 2, NEEDS_TARGET, listing the tabs). Naming another
+                                         browser moves the session's target to the tab you see there.
   --settle <ms>                         Auto-settle delay after action (default: 150ms)
   --no-daemon                           Do not auto-start bridge daemon if not running
   --auto-daemon                         Force auto-start even if previously stopped
@@ -139,7 +160,9 @@ Environment:
   BROWSERCTL_BRIDGE_URL                 Default: http://127.0.0.1:8765
   BROWSERCTL_AUTO_START                 'auto' (default) or 'manual'/'false'
   BROWSERCTL_MCP_PROFILE                'core' (default) or 'all'
-  BROWSERCTL_BROWSER                    Default browser selector, overridden by --browser/-b
+  BROWSERCTL_SESSION                    CLI session name (default 'cli'). The bridge keeps each
+                                         session's target tab: the tab you saw when it started,
+                                         or the last one switched to or opened
 `);
 }
 
@@ -386,7 +409,8 @@ function formatTabsTable(tabs = [], { showBrowser = false } = {}) {
     title = title.padEnd(46);
     let url = t.url || "";
     if (url.length > 60) url = url.slice(0, 57) + "...";
-    return `${id} ${active} ${browser}${title} ${url}`;
+    const held = t.heldBy ? `  [held by ${t.heldBy}]` : "";
+    return `${id} ${active} ${browser}${title} ${url}${held}`;
   });
   return [header, separator, ...rows].join("\n");
 }
@@ -472,13 +496,13 @@ async function main() {
   let compactMode = false;
   let fullpageMode = false;
   let autoDaemon = true;
+  let forceTake = false;
   let forceAutoDaemon = false;
   let explicitTabId = null;
   let settleMs = null;
-  // A --browser/-b flag overrides BROWSERCTL_BROWSER; neither is set for most invocations, in
-  // which case the bridge picks a default itself (the sole connected browser, or the last
-  // focused one) and answers NEEDS_BROWSER when it can't.
-  let browserSelector = envStr("BROWSERCTL_BROWSER", null);
+  // --browser/-b names a browser. Without it the bridge uses the session's target, or the sole
+  // connected browser; with several and no target it answers NEEDS_TARGET, listing the tabs.
+  let browserSelector = null;
 
   const positionalArgs = [];
   for (let i = 0; i < rawArgs.length; i++) {
@@ -493,6 +517,8 @@ async function main() {
       compactMode = true;
     } else if (a === "-f" || a === "--full" || a === "--fullpage") {
       fullpageMode = true;
+    } else if (a === "--force") {
+      forceTake = true;
     } else if (a === "--no-daemon") {
       autoDaemon = false;
     } else if (a === "--auto-daemon") {
@@ -667,6 +693,12 @@ async function main() {
     } else if (sub === "close") {
       action = "close_tab";
       args = args.slice(1);
+    } else if (sub === "release") {
+      action = "release_tab";
+      args = args.slice(1);
+    } else if (sub === "yield") {
+      action = "yield_tab";
+      args = args.slice(1);
     } else if (/^\d+$/.test(sub)) {
       action = "switch_tab";
     } else {
@@ -708,6 +740,7 @@ async function main() {
   let params = {};
   if (explicitTabId != null) params.tabId = explicitTabId;
   if (settleMs != null) params.settleMs = settleMs;
+  if (forceTake) params.force = true;
 
   if (args.length === 1 && args[0].trim().startsWith("{")) {
     try {

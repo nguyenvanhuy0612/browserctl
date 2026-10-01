@@ -3,6 +3,49 @@
 One entry per published version. The reasoning and measurements behind each change are in the
 commit history and on the GitHub release.
 
+## 0.9.3
+
+A session's tab is its own: no other agent, and no CLI call, can act on it, and a click in another
+window no longer decides where an agent's next command goes.
+
+- A session's target tab is held for it in the bridge. Another session (MCP or CLI) that acts on
+  it or closes it gets `TAB_OWNED`, naming the holder, and nothing is sent; it may still read the
+  tab by passing its `tabId`. The hold is renewed by every call and a 5 s
+  heartbeat, released at once when the session's process exits or the tab closes, and lapses
+  15 s after a session that hangs. `browser_tabs list` marks each held tab with `heldBy`.
+- A held tab can be taken on purpose: `browser_tabs select` on it is `TAB_BUSY` while its session
+  is acting there or did under 30 s ago, otherwise `TAKE_CONFIRM`; repeating it with
+  `force: true` (CLI `--force`) takes it, and the other session gets `TARGET_TAKEN` on its next
+  command. `browser_tabs` gains `release` (give your tab up) and `yield` (let anyone take it
+  without confirmation), and the CLI `tab release` and `tab yield`.
+- With several browsers or profiles connected, a session's first call no longer goes to the
+  last-focused window: it is `NEEDS_TARGET`, listing every open tab and who holds it, and the agent
+  selects one. A session moves freely between tabs in any browser; the tab it leaves is freed.
+  The CLI follows the same rule and no longer reads `BROWSERCTL_BROWSER`; `-b` still names a
+  browser.
+- A tab named by id alone reaches the browser that has it, for MCP and CLI alike: the bridge
+  finds the owner, so `browserctl -t <id>` needs no `-b`. An id open in two browsers is
+  `AMBIGUOUS_TAB`, one open nowhere `TAB_NOT_FOUND`.
+- The CLI keeps one session (`cli`, or `BROWSERCTL_SESSION`) whose target tab the bridge keeps
+  between commands, instead of sharing the extension's pin with every agent. The pin is gone: the
+  extension acts only on the tab id each command carries, and `pinned` is no longer in tab lists
+  or `current_tab`. The ownership and routing errors (`TAB_OWNED`, `TAB_BUSY`, `TAKE_CONFIRM`,
+  `TARGET_TAKEN`, `NEEDS_TARGET`, `NEEDS_TAB`, `AMBIGUOUS_TAB`, `TAB_NOT_FOUND`) exit the CLI with
+  code 2.
+- The call log is on by default, at `~/.browserctl/calls.jsonl`, and records each refusal with
+  the session holding the tab. `BROWSERCTL_CALL_LOG=0` turns it off.
+- A navigation stopped by a certificate warning is `CERT_INTERSTITIAL`, with a hint to ask the user
+  instead of driving the browser through the OS.
+- The recorder serves only the tab it records: starting, stopping, reading or replaying it from
+  another tab is `RECORDING_ELSEWHERE`; closing the recorded tab frees it. `reload_extension`
+  waits (`BROWSER_BUSY`) while another session is acting in that browser.
+- A browser that reconnects keeps the holds and CLI targets on tabs it still has, so a restarted
+  service worker loses nothing; a restarted browser's stale tab ids are dropped. `browserctl tab
+  list` marks tabs held by another session.
+- `switch_tab` and `close_tab` accept the tab as `tabId` too, so `browserctl tab close -t <id>`
+  closes that tab.
+- Errors the extension raises with a code now keep that code on the way to the agent.
+
 ## 0.9.2
 
 Several agents can now work on the same browser at the same time, and long-open background tabs

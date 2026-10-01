@@ -2,7 +2,7 @@
 // Live acceptance checks for several browsers on one bridge (docs/internal/tool-surface.md §3.9).
 // Drives the bridge named by --bridge-url / BROWSERCTL_BRIDGE_URL / BRIDGE_URL (default
 // http://127.0.0.1:8765) through real MCP sessions (mcp/index.js over stdio), the way an agent
-// does. Every check here is scripted; two checks need a person at the keyboard and run only
+// does. Every check here is scripted; one check needs a person at the keyboard and runs only
 // with --interactive, prompting on stdin. tests/e2e/multi_browser_probes.md covers the agent
 // probes this script cannot drive itself.
 //
@@ -300,39 +300,161 @@ async function check1_3(status, logPath) {
   }
 }
 
-// 1.4 (needs a person): after the owner focuses Chrome by hand, a fresh session's first
-// snapshot (no browser named) reports target.browser as a Chrome alias.
-async function check1_4() {
-  if (!INTERACTIVE) {
-    record(
-      "1.4",
-      "focus Chrome by hand, then snapshot with no browser named",
-      "SKIPPED (needs --interactive)"
-    );
+// 1.4: with several browsers connected, a fresh session's first call names no tab and is answered
+// NEEDS_TARGET, listing the tabs to choose from, whichever window the owner focused last.
+async function check1_4(status) {
+  const name = "several browsers: a first call naming no tab is NEEDS_TARGET, listing the tabs";
+  if ((status.browsers || []).length < 2) {
+    record("1.4", name, "SKIPPED (needs two browsers)");
     return;
   }
-  await prompt("Focus a Chrome window (click into it), then press Enter:");
   const A = await session();
   try {
     const snap = await A.call("browser_snapshot", {});
-    const alias = snap.json?.target?.browser;
-    if (snap.isError || !alias || !alias.startsWith("chrome")) {
+    if (!snap.isError || !/NEEDS_TARGET/.test(snap.text) || !/ tab \d+ /.test(snap.text)) {
+      record("1.4", name, "FAIL", snap.isError ? snap.text : "the snapshot was served");
+      return;
+    }
+    record("1.4", name, "PASS", "refused before acting, with the tabs listed");
+  } finally {
+    await A.close();
+  }
+}
+
+// 1.8: a second session can read another session's tab by its id but not act on it, and only
+// the holder can close it.
+async function check1_8(status) {
+  const name = "another session's tab can be read by id, never acted on";
+  const alias = (status.browsers || [])[0]?.alias;
+  if (!alias) {
+    record("1.8", name, "FAIL", "no browser connected");
+    return;
+  }
+  let scratchServer = null;
+  let A = null;
+  let B = null;
+  let tabId = null;
+  try {
+    A = await session();
+    B = await session();
+    scratchServer = await startScratchServer();
+    const created = await A.call("browser_tabs", {
+      action: "new",
+      url: `${scratchServer.base}/held`,
+      browser: alias,
+    });
+    if (created.isError) {
+      record("1.8", name, "FAIL", created.text);
+      return;
+    }
+    tabId = created.json?.id;
+    const click = await B.call("browser_click", { target: "body", tabId });
+    const read = await B.call("browser_snapshot", { tabId });
+    const close = await B.call("browser_tabs", { action: "close", tabId });
+    const owned = (r) => r.isError && /TAB_OWNED/.test(r.text);
+    if (!owned(click) || !owned(close) || read.isError) {
       record(
-        "1.4",
-        "focus Chrome by hand, then snapshot with no browser named",
+        "1.8",
+        name,
         "FAIL",
-        snap.isError ? snap.text : `target.browser was ${JSON.stringify(alias)}`
+        `click ${owned(click) ? "refused" : "NOT refused"}, close ${owned(close) ? "refused" : "NOT refused"}, read ${read.isError ? `failed: ${read.text}` : "served"}`
       );
       return;
     }
-    record(
-      "1.4",
-      "focus Chrome by hand, then snapshot with no browser named",
-      "PASS",
-      `target.browser=${alias}`
-    );
+    record("1.8", name, "PASS", `on ${alias}: click and close refused TAB_OWNED, snapshot served`);
+  } catch (err) {
+    record("1.8", name, "FAIL", err.message);
   } finally {
-    await A.close();
+    if (tabId != null && A) {
+      const closed = await A.call("browser_tabs", { action: "close", tabId }).catch((e) => ({
+        isError: true,
+        text: e.message,
+      }));
+      if (closed.isError) {
+        record(
+          "1.8",
+          name,
+          "FAIL",
+          `could not close tab ${tabId}: ${closed.text} — close it by hand`
+        );
+      }
+    }
+    if (scratchServer) await scratchServer.close();
+    if (A) await A.close().catch(() => {});
+    if (B) await B.close().catch(() => {});
+  }
+}
+
+// 1.9: a second session cannot take a tab while its holder is acting there (TAB_BUSY); once the
+// holder yields and has been idle long enough, the tab is taken, and the holder is told.
+async function check1_9(status) {
+  const name = "a tab is never taken mid-action; a yielded tab is taken and its holder told";
+  const alias = (status.browsers || [])[0]?.alias;
+  if (!alias) {
+    record("1.9", name, "FAIL", "no browser connected");
+    return;
+  }
+  let scratchServer = null;
+  let A = null;
+  let B = null;
+  let tabId = null;
+  let owner = null;
+  try {
+    A = await session();
+    B = await session();
+    scratchServer = await startScratchServer();
+    const created = await A.call("browser_tabs", {
+      action: "new",
+      url: `${scratchServer.base}/take`,
+      browser: alias,
+    });
+    if (created.isError) {
+      record("1.9", name, "FAIL", created.text);
+      return;
+    }
+    tabId = created.json?.id;
+    owner = A;
+    await A.call("browser_snapshot", {});
+    const busy = await B.call("browser_tabs", { action: "select", tabId, force: true });
+    if (!busy.isError || !/TAB_BUSY/.test(busy.text)) {
+      record("1.9", name, "FAIL", `a take right after A acted was not TAB_BUSY: ${busy.text}`);
+      return;
+    }
+    await A.call("browser_tabs", { action: "yield" });
+    const waitS = Number((busy.text.match(/Try again in (\d+)s/) || [])[1] || 30);
+    await new Promise((r) => setTimeout(r, (waitS + 1) * 1000));
+    const took = await B.call("browser_tabs", { action: "select", tabId });
+    if (took.isError) {
+      record("1.9", name, "FAIL", `the yielded tab was not taken: ${took.text}`);
+      return;
+    }
+    owner = B;
+    const told = await A.call("browser_snapshot", {});
+    if (!told.isError || !/TARGET_TAKEN/.test(told.text)) {
+      record("1.9", name, "FAIL", `A was not told: ${told.text}`);
+      return;
+    }
+    record("1.9", name, "PASS", `on ${alias}: TAB_BUSY, then taken after ${waitS}s, A told`);
+  } catch (err) {
+    record("1.9", name, "FAIL", err.message);
+  } finally {
+    if (tabId != null && owner) {
+      const closed = await owner.call("browser_tabs", { action: "close", tabId }).catch((e) => ({
+        isError: true,
+        text: e.message,
+      }));
+      if (closed.isError) {
+        record(
+          "1.9",
+          name,
+          "FAIL",
+          `could not close tab ${tabId}: ${closed.text} — close it by hand`
+        );
+      }
+    }
+    if (scratchServer) await scratchServer.close();
+    if (A) await A.close().catch(() => {});
+    if (B) await B.close().catch(() => {});
   }
 }
 
@@ -417,7 +539,7 @@ async function check1_7(status) {
         record("1.7", name, "FAIL", created.text);
         return;
       }
-      opened.push(created.json?.id);
+      opened.push({ tabId: created.json?.id, owner: s });
     }
     // One session's tab is in front and one is behind it: both capture paths run at once
     const jobs = [];
@@ -463,9 +585,10 @@ async function check1_7(status) {
   } catch (err) {
     record("1.7", name, "FAIL", err.message);
   } finally {
-    for (const tabId of opened) {
+    // Each scratch tab is its opener's target, so only that session may close it
+    for (const { tabId, owner } of opened) {
       try {
-        const closed = await A.call("browser_tabs", { action: "close", tabId });
+        const closed = await owner.call("browser_tabs", { action: "close", tabId });
         if (closed.isError) {
           record(
             "1.7",
@@ -547,12 +670,13 @@ async function check1_6(status, logPath) {
         record("1.6", "two sessions drive two Edge tabs concurrently", "FAIL", created.text);
         return;
       }
-      openedTabs.push(created.json?.id);
+      openedTabs.push({ tabId: created.json?.id, owner: A });
       edgeTabs = [...edgeTabs, { id: created.json?.id, browser: edgeAlias }];
     }
     const [tabA, tabB] = edgeTabs;
     const selA = await A.call("browser_tabs", { action: "select", tabId: tabA.id });
     const selB = await B.call("browser_tabs", { action: "select", tabId: tabB.id });
+    openedTabs[1].owner = B;
     if (selA.isError || selB.isError) {
       record(
         "1.6",
@@ -611,9 +735,10 @@ async function check1_6(status, logPath) {
       "40 snapshots, 2 sessions, each paired with one tabId throughout"
     );
   } finally {
-    for (const tabId of openedTabs) {
+    // Each scratch tab is the target of the session that selected it, which alone may close it
+    for (const { tabId, owner } of openedTabs) {
       try {
-        const closed = await A.call("browser_tabs", { action: "close", tabId });
+        const closed = await owner.call("browser_tabs", { action: "close", tabId });
         if (closed.isError) {
           record(
             "1.6",
@@ -664,10 +789,12 @@ async function main() {
   await check1_1(status);
   await check1_2(status);
   await check1_3(status, status.callLog);
-  await check1_4();
+  await check1_4(status);
   await check1_5(status);
   await check1_6(status, status.callLog);
   await check1_7(status);
+  await check1_8(status);
+  await check1_9(status);
 
   await Promise.all(sessions.map((c) => c.close().catch(() => {})));
 

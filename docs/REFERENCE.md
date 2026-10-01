@@ -1,4 +1,4 @@
-# browserctl Core Tool Reference — v0.9.2
+# browserctl Core Tool Reference — v0.9.3
 
 browserctl provides 25 core tools (69 tools across all profiles) for web automation and agent inspection.
 
@@ -51,15 +51,41 @@ One bridge serves every connected browser and profile at once — nothing to con
 session keeps a **target**: the browser and tab that session is driving. The agent never passes
 it; the server applies it to every call automatically.
 
-- The first call of a session resolves the target: the browser last focused by the user, or the
-  sole browser if only one is connected, and in it the tab the user sees (the active tab of its
-  focused window) — never a tab another session selected in the background. With several browsers connected and
-  none focused, the call fails with `NEEDS_BROWSER`, naming the connected browsers.
+- The first call of a session resolves the target. With one browser connected it is the tab the
+  user sees there (the active tab of its focused window), unless another session holds it: then
+  the call fails with `TAB_OWNED` and nothing is sent to it. With several browsers or profiles
+  connected nothing is guessed — which window the user focused last never decides: the call fails
+  with `NEEDS_TARGET`, listing every open tab (browser, id, title, URL, and who holds it), and the
+  agent selects the one it means.
+- A session holds one tab at a time, in any browser or profile. Selecting another tab, anywhere,
+  moves the session there and frees the tab it left.
 - The target is then sticky: later focus changes elsewhere do not move it. It changes only through
   `browser_tabs({action: "select", ...})` or `browser_tabs({action: "new", ...})`.
+- A target is the session's own. No other session, MCP or CLI, can act on it: a click, type,
+  navigation, script or close sent there by another session fails with `TAB_OWNED`, naming the
+  holder. Another session may read it (snapshot, find, get_property, extract, waits) by passing
+  its `tabId`; a read that would change it — a screenshot or accessibility tree, which attach the
+  debugger, or a log read with `clear` — is refused too. Reloading the extension waits while
+  another session is acting in that browser (`BROWSER_BUSY`). The hold lasts as long as the session
+  does: it is renewed by every call and by a heartbeat every 5 seconds, and released at once when
+  the session's process exits (cleanly or not) or the tab is closed (by anyone); a session that
+  stops answering loses it after 15 seconds. A browser that disconnects keeps its holds: when it
+  reconnects, holds on tabs it no longer has (a restarted browser) are dropped, and the rest (a
+  restarted service worker) stay. A CLI session's hold does not lapse; it moves with the CLI's
+  target.
+- Taking another session's tab is `browser_tabs({action: "select", tabId})` on it. While the
+  holder is acting there — a command in flight, or one finished under 30 seconds ago — it is
+  `TAB_BUSY` with the seconds to wait, and nothing takes it, `force` included. Once the holder is
+  idle it is `TAKE_CONFIRM`; the same select with `force: true` takes it, and the result carries
+  `took` and a `warning`. A holder that ran `browser_tabs({action: "yield"})` keeps working but
+  lets its tab be taken without confirmation. `browser_tabs({action: "release"})` gives the tab up
+  and leaves the session with no target. The session a tab was taken from gets `TARGET_TAKEN`,
+  naming the taker, on its next command, and has no target until it selects or opens one.
 - `tabId` (already documented above) is the per-call, cross-browser override: a call carrying it
-  acts on that tab once, without moving the session's target. The server finds which browser owns
-  the id; an id open in two browsers is `AMBIGUOUS_TAB`.
+  acts on that tab once, without moving the session's target. Tab ids are unique only within one
+  browser, so the bridge finds the browser that has the id (from its last listings, else a fresh
+  one): an id open in two browsers is `AMBIGUOUS_TAB` (name the browser), one open nowhere is
+  `TAB_NOT_FOUND`. The same holds for `select` and `close` by id, MCP and CLI (`-t`) alike.
 
 `browser_tabs` gains three parameters for this:
 
@@ -67,20 +93,24 @@ it; the server applies it to every call automatically.
   the extension's Options), `instanceId`, or type (`"chrome"`, `"edge"` — matches only when
   exactly one connected browser has that type; two is `AMBIGUOUS_BROWSER`, naming both). `new`
   without `browser` opens in the session's target browser if one is set (or the browser a closed
-  target was in), else the bridge's own default (the sole connection, or last-focused).
+  target was in), else in the sole connected browser. The new tab becomes the session's target.
 - `query` (`'list'`): keep only tabs whose title or URL contains this text, case-insensitive.
 - `activate` (`'select'`, `'new'`): make the tab the visible tab of its window (default `false` —
   selecting or opening a tab does not raise it, so a background session does not disturb what the
   user is looking at).
 
 `browser_tabs({action: "list"})` always fans out to every connected browser, even with one
-connected, and returns `{tabs, browsers, target}`: `tabs` (each carrying `browser`), `browsers`
-(every connected browser's alias, type, label and reachability), and `target` (the session's
-current `{browser, tabId}`, or `null`).
+connected, and returns `{tabs, browsers, target}`: `tabs` (each carrying `browser`, and
+`heldBy` — the holding session, e.g. `"mcp:1a2b3c4d"` — on a tab that is another session's
+target), `browsers` (every connected browser's alias, type, label and reachability), and `target`
+(the session's current `{browser, tabId}`, or `null`).
 
-Error codes from browser routing: `NEEDS_BROWSER` (no target and no focus to resolve one),
+Error codes from browser routing: `NEEDS_TARGET` (several browsers connected and the session has
+no tab yet; the error lists the tabs), `NEEDS_BROWSER` (a call that needs a browser, such as `new`,
+names none while several are connected), `TAB_OWNED` (the tab is another session's target: this call would act on it, or take it),
 `AMBIGUOUS_BROWSER` (a `browser` selector matches more than one connected browser),
-`AMBIGUOUS_TAB` (a `tabId` is open in more than one browser), `TARGET_CLOSED` (the session's
+`AMBIGUOUS_TAB` (a `tabId` is open in more than one browser), `TAB_NOT_FOUND` (a `tabId` is
+open in none), `TARGET_CLOSED` (the session's
 target tab was closed — nothing falls back to another tab, and the session stays without a target
 until `browser_tabs` select or new), `BROWSER_DISCONNECTED` (the session's target browser
 disconnected — calls keep failing with it, and resume on the same tab when that browser
@@ -99,10 +129,11 @@ reconnects), `UNKNOWN_BROWSER` (a
 - tabId: Which tab — for 'select' (or give `browser`) and required for 'close'.
 - url: URL for new tab when action is 'new'.
 - browser: Which browser, by alias, label, instanceId or type — for 'list', 'select' and 'new'.
-  'new' without `browser` opens in the session's current target browser if one is set, else the
-  bridge's own default (the sole connection, or last-focused).
+  'new' without `browser` opens in the session's current target browser if one is set, else in
+  the sole connected browser.
 - query: For 'list', keep only tabs whose title or URL contains this text (case-insensitive).
 - activate: For 'select' and 'new', make the tab the visible tab of its window (default false).
+- force: For 'select', take a tab another session holds and is not using (after `TAKE_CONFIRM`).
 
 In a `list` result, a tab the browser has frozen in the background carries `frozen: true`, and one it
 has discarded to save memory carries `discarded: true`. A command on a frozen tab wakes it first. A

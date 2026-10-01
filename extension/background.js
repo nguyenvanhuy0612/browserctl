@@ -167,9 +167,15 @@ async function helloExtras() {
   try {
     focused = (await chrome.windows.getLastFocused()).focused === true;
   } catch {}
+  // The open tabs: the bridge keeps holds and targets only on tabs in this list
+  let tabs = [];
+  try {
+    tabs = (await chrome.tabs.query({})).map((t) => t.id);
+  } catch {}
   return {
     ...(label ? { label } : {}),
     focused,
+    tabs,
   };
 }
 
@@ -246,6 +252,8 @@ async function connect() {
     const reply = await dispatch(msg).catch((err) => ({
       ok: false,
       error: String(err && err.message ? err.message : err),
+      ...(err && typeof err.code === "string" ? { code: err.code } : {}),
+      ...(err && typeof err.recoveryHint === "string" ? { recoveryHint: err.recoveryHint } : {}),
     }));
     reply.id = msg.id;
     if (ws !== socket) return;
@@ -283,6 +291,15 @@ function reportFocus(focused) {
   if (socket && socket.readyState === WebSocket.OPEN) {
     try {
       socket.send(JSON.stringify({ type: "focus", focused }));
+    } catch {}
+  }
+}
+
+// Tells the bridge a tab is gone, however it was closed, so no session keeps holding its id.
+function reportTabClosed(tabId) {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    try {
+      socket.send(JSON.stringify({ type: "tab_closed", tabId }));
     } catch {}
   }
 }
@@ -345,9 +362,6 @@ async function dispatch({ action, params = {} }) {
       code: "NOT_A_PAGE_ACTION",
     };
   }
-
-  const guard = await freshPinGuard(action, params);
-  if (guard) return guard;
 
   if (action === "upload") {
     const tab = await targetTab(params);
@@ -543,10 +557,12 @@ async function dispatch({ action, params = {} }) {
     case "reload_extension":
       return { ok: true, result: reloadExtension() };
     case "record_start":
-      return await recordStart(params);
+      return recorderRefusal(action, params.tabId) || (await recordStart(params));
     case "record_stop":
-      return await recordStop(params);
+      return recorderRefusal(action, params.tabId) || (await recordStop(params));
     case "record_get": {
+      const refused = recorderRefusal(action, params.tabId);
+      if (refused) return refused;
       if (!isRecording && recordingSteps.length === 0) {
         const { [RECORDING_KEY]: wasRecording } = await chrome.storage.session.get(RECORDING_KEY);
         if (wasRecording) {
@@ -559,7 +575,10 @@ async function dispatch({ action, params = {} }) {
       return { ok: true, result: { count: recordingSteps.length, steps: recordingSteps } };
     }
     case "replay":
-      return await replay(params);
+      // Replaying the recorded steps (no steps given) reads the recording
+      return (
+        (!params.steps && recorderRefusal("record_get", params.tabId)) || (await replay(params))
+      );
 
     default:
       throw new Error(`unknown action: ${action}`);
@@ -651,6 +670,30 @@ function reloadExtension() {
 }
 
 let recordingTabId = null;
+// The tab the current or last recording was made in: its steps belong to that tab's session
+let recordedTabId = null;
+
+// A closed tab frees the recorder: it is not being recorded and owns no recorded steps
+function forgetRecordingTab(tabId) {
+  if (tabId === recordingTabId) {
+    isRecording = false;
+    recordingTabId = null;
+    persistRecording(false);
+  }
+  if (tabId === recordedTabId) recordedTabId = null;
+}
+
+// The one recorder serves the tab it records. Starting over, stopping or reading it from another
+// tab would stop, wipe or hand over a recording another session made.
+function recorderRefusal(action, tabId) {
+  const owner = isRecording ? recordingTabId : action === "record_get" ? recordedTabId : null;
+  if (owner == null || owner === tabId) return null;
+  return {
+    ok: false,
+    code: "RECORDING_ELSEWHERE",
+    error: `the recorder is ${isRecording ? "recording" : "holding the steps of"} tab ${owner}, not tab ${tabId}; '${action}' was not run`,
+  };
+}
 
 async function recordStart(params) {
   const tab = await targetTab(params || {});
@@ -659,6 +702,7 @@ async function recordStart(params) {
   recordingSteps = [];
   isRecording = true;
   recordingTabId = tab.id;
+  recordedTabId = tab.id;
   persistRecording(true);
   return { ok: true, result: { recording: true } };
 }
@@ -724,8 +768,6 @@ async function waitFor(params) {
   return { ok: true, result: { waitedMs: ms } };
 }
 
-let targetTabId = null;
-
 const drivenTabIds = new Set();
 
 let clickCandidates = [];
@@ -736,22 +778,6 @@ function pruneClickCandidates() {
 }
 
 const pendingFocusRestores = new Map();
-
-function pinTarget(id) {
-  targetTabId = id;
-  chrome.storage.session.set({ targetTabId: id });
-}
-
-function unpinTarget() {
-  targetTabId = null;
-  chrome.storage.session.remove("targetTabId");
-}
-
-async function activeTab() {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tab) throw new Error("no active tab");
-  return tab;
-}
 
 function looksLikePdf(url) {
   if (!url) return false;
@@ -774,90 +800,28 @@ async function readPdf(params) {
   };
 }
 
-const CONTENT_RETURNING = new Set([
-  "snapshot",
-  "read_page",
-  "find",
-  "find_text",
-  "get_page_content",
-  "describe_element",
-  "a11y_snapshot",
-  "screenshot",
-  "capture_screenshot",
-  "element_screenshot",
-  "print_pdf",
-  "eval_js",
-  "read_pdf",
-  "get_cookies",
-  "storage_get",
-  "export_har",
-  "get_console_logs",
-  "get_network_requests",
-  "get_response_body",
-  "net_get",
-  "audit",
-]);
-
-async function freshPinGuard(action, params) {
-  if (!CONTENT_RETURNING.has(action)) return null;
-  if (params && params.tabId != null) return null;
-  if (targetTabId == null) {
-    const { targetTabId: saved } = await chrome.storage.session.get("targetTabId");
-    if (saved != null) targetTabId = saved;
-  }
-  if (targetTabId != null) {
-    try {
-      await chrome.tabs.get(targetTabId);
-      return null;
-    } catch {
-      unpinTarget();
-    }
-  }
-  const tab = await activeTab();
-  pinTarget(tab.id);
-  return {
-    ok: false,
-    error:
-      `no target tab was pinned, so '${action}' would have read whatever tab is focused ` +
-      `right now: ${tab.title || "(untitled)"} — ${tab.url}. That tab is NOW pinned, so ` +
-      `re-issue the same command to read it, or retarget first with switch_tab / navigate / ` +
-      `new_tab (or pass an explicit tabId). This guard fires only on the first ` +
-      `content-returning command after the pin was lost.`,
-  };
-}
-
+// The tab a command acts on: always the one it names. The bridge picks it and sends every tab
+// command with its id, so the extension never falls back to a tab of its own choosing.
 async function targetTab(params) {
-  if (params && params.tabId != null) {
-    const id = Number(params.tabId);
-    if (!Number.isInteger(id)) throw new Error(`invalid tabId: ${params.tabId}`);
-    try {
-      const tab = await chrome.tabs.get(id);
-      drivenTabIds.add(tab.id);
-      return tab;
-    } catch {
-      throw new Error(`tab ${id} not found`);
-    }
+  if (params?.tabId == null) {
+    const err = new Error("this command names no tab: every tab command must carry a tabId");
+    err.code = "NEEDS_TAB";
+    throw err;
   }
-  if (targetTabId == null) {
-    const { targetTabId: saved } = await chrome.storage.session.get("targetTabId");
-    if (saved != null) targetTabId = saved;
+  const id = Number(params.tabId);
+  if (!Number.isInteger(id)) throw new Error(`invalid tabId: ${params.tabId}`);
+  try {
+    const tab = await chrome.tabs.get(id);
+    drivenTabIds.add(tab.id);
+    return tab;
+  } catch {
+    throw new Error(`tab ${id} not found`);
   }
-  if (targetTabId != null) {
-    try {
-      const tab = await chrome.tabs.get(targetTabId);
-      drivenTabIds.add(tab.id);
-      return tab;
-    } catch {
-      unpinTarget();
-    }
-  }
-  const tab = await activeTab();
-  pinTarget(tab.id);
-  return tab;
 }
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (tabId === targetTabId) unpinTarget();
+  reportTabClosed(tabId);
+  forgetRecordingTab(tabId);
   drivenTabIds.delete(tabId);
   pendingFocusRestores.delete(tabId);
   cdpDropTab(tabId);
@@ -886,7 +850,6 @@ async function currentTab(params) {
     url: tab.url,
     title: tab.title,
     active: tab.active,
-    pinned: targetTabId != null,
   };
 }
 
@@ -898,7 +861,6 @@ async function navigate(params = {}) {
   const { url } = params;
   if (!url) throw new Error("navigate requires 'url'");
   const tab = await targetTab(params);
-  if (params.tabId == null) pinTarget(tab.id);
   const committed = waitForCommit(tab.id, NAV_COMMIT_MS);
   const done = waitForComplete(tab.id);
   await chrome.tabs.update(tab.id, { url });
@@ -924,11 +886,20 @@ async function navigate(params = {}) {
 }
 
 // Chrome reports a failed load either as a network error before the commit or, when its error
-// page commits instead, as errorOccurred on the frame afterwards; both read the same.
+// page commits instead, as errorOccurred on the frame afterwards; both read the same. A
+// certificate error is its own code: the warning page it leaves takes no script and no
+// debugger, so only the user can get past it.
 function navigationFailed(url, netError) {
-  return new Error(
+  const err = new Error(
     `navigation to ${url} failed${netError ? `: ${netError}` : ""} — the tab shows Chrome's error page`
   );
+  if (/^net::ERR_CERT_/.test(netError || "")) {
+    err.code = "CERT_INTERSTITIAL";
+    err.message = `${err.message}: a certificate warning, which no browserctl tool can get past`;
+    err.recoveryHint =
+      "Stop and ask the user to trust the site's certificate or click through the warning, then navigate again. Do not drive the browser with OS keystrokes.";
+  }
+  return err;
 }
 
 // Resolves when the tab's top frame commits a document (or changes in place, for a fragment or
@@ -1136,10 +1107,6 @@ async function screenshot(params = {}) {
 
 async function listTabs() {
   const tabs = await chrome.tabs.query({});
-  if (targetTabId == null) {
-    const { targetTabId: saved } = await chrome.storage.session.get("targetTabId");
-    if (saved != null) targetTabId = saved;
-  }
   // A rejection here degrades to "no window known as focused" rather than failing the whole
   // list: every tab is still listed, just with focusedWindow false.
   let lastFocused = null;
@@ -1158,15 +1125,12 @@ async function listTabs() {
       ...(t.groupId != null && t.groupId !== -1 ? { groupId: t.groupId } : {}),
       ...(t.frozen ? { frozen: true } : {}),
       ...(t.discarded ? { discarded: true } : {}),
-      ...(t.id === targetTabId ? { pinned: true } : {}),
     })),
-    ...(targetTabId == null ? { pinned: null } : { pinned: targetTabId }),
   };
 }
 
 async function newTab({ url, wait = true, activate = false }) {
   const tab = await chrome.tabs.create({ ...(url ? { url } : {}), active: activate === true });
-  pinTarget(tab.id);
   if (!url || wait === false) return { id: tab.id };
 
   try {
@@ -1182,9 +1146,8 @@ async function newTab({ url, wait = true, activate = false }) {
 }
 
 async function groupTab({ id, title = "bctl", color = "blue" } = {}) {
-  const tabId = id != null ? id : (await targetTab()).id;
+  const tabId = (await targetTab({ tabId: id })).id;
   const groupId = await chrome.tabs.group({ tabIds: [tabId] });
-  pinTarget(tabId);
   try {
     await chrome.tabGroups.update(groupId, { title, color });
   } catch (e) {
@@ -1199,30 +1162,30 @@ async function groupTab({ id, title = "bctl", color = "blue" } = {}) {
 }
 
 async function ungroupTab({ id } = {}) {
-  const tabId = id != null ? id : (await targetTab()).id;
+  const tabId = (await targetTab({ tabId: id })).id;
   await chrome.tabs.ungroup(tabId);
   return { ungrouped: tabId };
 }
 
-// Pins the tab as the target. It becomes the visible tab of its window only with `activate`,
-// and its window is raised only with `focus`; without either, nothing changes on screen.
+// Reports the tab a session switches its target to. It becomes the visible tab of its window
+// only with `activate`, and its window is raised only with `focus`; without either, nothing
+// changes on screen.
 async function switchTab({ id, activate = false, focus = false }) {
   if (id == null) throw new Error("switch_tab requires 'id'");
   const tab = activate ? await chrome.tabs.update(id, { active: true }) : await chrome.tabs.get(id);
   if (focus) await chrome.windows.update(tab.windowId, { focused: true });
-  pinTarget(tab.id);
   return { id: tab.id, url: tab.url, title: tab.title };
 }
 
 async function closeTab(params = {}) {
-  let id = params.id;
+  const id = params.id ?? params.tabId;
   if (id == null) {
-    const tab = await targetTab(params);
-    id = tab.id;
+    const err = new Error("close_tab names no tab: pass its id");
+    err.code = "NEEDS_TAB";
+    throw err;
   }
   // Closing a tab that is already gone is the state the caller asked for, so it succeeds and
-  // says so. A failure with the tab still open is a real failure and throws, leaving the pin
-  // alone because the tab it points at is still there.
+  // says so. A failure with the tab still open is a real failure and throws.
   let alreadyClosed = false;
   try {
     await chrome.tabs.remove(id);
@@ -1234,7 +1197,6 @@ async function closeTab(params = {}) {
     if (stillOpen) throw err;
     alreadyClosed = true;
   }
-  if (id === targetTabId) unpinTarget();
   return { id, alreadyClosed };
 }
 

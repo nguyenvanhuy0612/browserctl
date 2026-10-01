@@ -118,9 +118,9 @@ async function main() {
       assert(tabId != null, "no tab id");
     });
     await cmd("wait_settle", {});
-    await test("current_tab pinned", async () => {
+    await test("current_tab is the tab new_tab made this run's target", async () => {
       const r = await cmd("current_tab", {});
-      assert(r.pinned && r.id === tabId, "target not pinned to test tab");
+      assert(r.id === tabId, "the run's target is not the test tab");
       assert(/127\.0\.0\.1/.test(r.url), "wrong url");
     });
     await test("list_tabs includes test tab", async () => {

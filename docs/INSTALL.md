@@ -371,14 +371,18 @@ second bridge running for it), set it back: extension settings
 `BROWSERCTL_BRIDGE_URL=http://127.0.0.1:8766 browserctl stop` (macOS/Linux shell; in PowerShell,
 set `$env:BROWSERCTL_BRIDGE_URL` first, then run `browserctl stop`).
 
-An agent session picks up a target the first time it acts (the browser it last focused, or the
-sole browser when only one is connected) and stays on it for the rest of the session. `--browser`
-(CLI) picks one explicitly; see [REFERENCE.md](REFERENCE.md#several-browsers) for the full
-resolution rules.
+An agent session picks up a target the first time it acts. With one browser connected that is
+the tab you are looking at. With several, the agent is shown every open tab (`NEEDS_TARGET`) and
+selects the one you mean — tell it which ("the SAC tab in Edge"); which window you clicked last
+never decides. A session holds one tab at a time, in any browser or profile, and moving to
+another tab frees the one it left. A session's tab is its own: no other agent, and no CLI call,
+can act on it. `--browser` (CLI) picks a browser explicitly. See
+[REFERENCE.md](REFERENCE.md#several-browsers) for the full rules.
 
-Two errors are specific to this: `NEEDS_BROWSER` (several browsers connected, none focused —
-name the browser, for example "in Edge", or focus that browser once) and `AMBIGUOUS_BROWSER` (two
-profiles of the same type — use the alias, or set a label so they read apart).
+Errors specific to this: `NEEDS_TARGET` (several browsers connected and the session has no tab
+yet — the error lists the tabs to choose from), `AMBIGUOUS_BROWSER` (two profiles of the same type
+— use the alias, or set a label so they read apart) and `TAB_OWNED` (the tab is another
+session's target — work in a tab of your own).
 
 ## Environment variables
 
@@ -388,10 +392,10 @@ daemon is started by whichever of them runs first and keeps that environment unt
 | Variable | Default | Used by | Meaning |
 |---|---|---|---|
 | `BROWSERCTL_BRIDGE_URL` | `http://127.0.0.1:8765` | MCP, CLI | Where to reach the bridge. An auto-started bridge listens on this URL's port. |
-| `BROWSERCTL_BROWSER` | unset | CLI | Default `--browser` selector (alias, label, instanceId or type) for CLI commands that reach a browser. Overridden by `--browser`/`-b` when given. |
+| `BROWSERCTL_SESSION` | `cli` | CLI | CLI session name. The bridge keeps each CLI session's target tab between commands; two names keep two targets. |
 | `BROWSERCTL_MCP_PROFILE` | `core` | MCP | `core` exposes 25 tools and loads the rest on demand; `all` (or `full`) exposes all 69. |
 | `BROWSERCTL_AUTO_START` | `auto` | MCP, CLI | `manual` (or `false`) never starts the bridge; start it with `browserctl start`. |
-| `BROWSERCTL_CALL_LOG` | off | bridge | `1`/`true` logs every call to `bridge/calls.jsonl` inside the package; a path logs there instead. The log holds page content — keep it off unless debugging. |
+| `BROWSERCTL_CALL_LOG` | on | bridge | Logs every call to `~/.browserctl/calls.jsonl`: which session sent which action to which browser and tab, and whether a tab hold refused it. Parameter values and page content are never written. A path logs there instead; `0`/`false` turns it off. |
 | `BROWSERCTL_CALL_LOG_MAX_MB` | `8` | bridge | Size at which the call log rotates to `.1`. |
 | `HOST` | `0.0.0.0` | bridge | Interface the bridge listens on. |
 | `PORT` | `8765` | bridge | Port, when the bridge is started directly (`npm start` from source). An auto-started bridge takes its port from `BROWSERCTL_BRIDGE_URL`. |
@@ -405,9 +409,21 @@ daemon is started by whichever of them runs first and keeps that environment unt
   1. `BROWSERCTL_BRIDGE_URL=http://127.0.0.1:8766` in the MCP entry and your shell, then
      `browserctl restart`.
   2. The extension's settings (icon > Open settings): port `8766`, **Save & reconnect**.
-- **`NEEDS_BROWSER`** — several browsers are connected and none was focused since the bridge
-  started, so there is nothing to default to. Name the browser (for example "in Edge"), or
-  focus that browser once and retry.
+- **`NEEDS_TARGET`** — several browsers are connected and the session has no tab yet. The error
+  lists every tab; tell the agent which one you mean.
+- **`NEEDS_BROWSER`** — a command that acts on a browser rather than a tab (a new tab, a window
+  command) names none while several are connected. Name the browser, or pass `--browser` to the
+  CLI.
+- **`TAB_OWNED`** — the tab is another session's target, so this session may read it but not act
+  on it. Open a tab of your own (`browser_tabs` new, `browserctl tab new <url>`), or select it to
+  take it. A session whose process exits frees its tab at once; one that hangs, within 15
+  seconds. The CLI holds its tab until it switches, opens, closes or releases one
+  (`browserctl tab release`), or the tab is closed.
+- **`TAB_BUSY`** — you asked to take a tab whose session is acting in it, or did under 30
+  seconds ago (`LEASE_BUSY_MS` on the bridge). Wait the seconds it names; `force` does not help.
+- **`TAKE_CONFIRM`** — the tab's session is idle, so the tab can be taken: repeat the select
+  with `force: true` (CLI: `--force`). The other session is told on its next command.
+- **`TARGET_TAKEN`** — another session took this session's tab. Open or select another one.
 - **`AMBIGUOUS_BROWSER`** — two connected profiles share a browser type (for example two Chrome
   profiles), so a type name such as `"chrome"` does not pick one. Use the alias (`chrome-2`), or
   set a label in that profile's extension settings.

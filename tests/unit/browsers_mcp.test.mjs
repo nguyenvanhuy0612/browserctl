@@ -24,6 +24,11 @@ const CASES = [
   "uc-fb-two-profiles",
   "uc-no-browser-single",
   "uc-no-browser-focus",
+  "uc-any-free-tab-across-browsers",
+  "uc-incident-second-agent",
+  "uc-lease-released-on-exit",
+  "uc-take-tab",
+  "uc-yield-and-release",
   "uc-no-browser-no-focus",
   "uc-sticky-target",
   "uc-ambiguous-type",
@@ -61,7 +66,13 @@ describe("session target across browsers", { concurrency: 6 }, () => {
       const home = mkdtempSync(join(tmpdir(), "browserctl-browsers-"));
       homes.push(home);
       const env = { ...process.env, HOME: home, USERPROFILE: home };
-      for (const k of ["BROWSERCTL_BRIDGE_URL", "BRIDGE_URL", "PORT", "BROWSERCTL_CALL_LOG"]) {
+      for (const k of [
+        "BROWSERCTL_BRIDGE_URL",
+        "BRIDGE_URL",
+        "PORT",
+        "BROWSERCTL_CALL_LOG",
+        "BROWSERCTL_BROWSER",
+      ]) {
         delete env[k];
       }
       let stdout;

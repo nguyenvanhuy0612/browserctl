@@ -22,6 +22,8 @@ process.env.PORT = "0";
 process.env.HOST = "127.0.0.1";
 process.env.FANOUT_TIMEOUT_MS = "500";
 process.env.COMMAND_TIMEOUT_MS = "5000";
+// Check 1.9 waits out the busy window, so it is kept short here
+process.env.LEASE_BUSY_MS = "1000";
 const CALL_LOG = join(mkdtempSync(join(tmpdir(), "browserctl-live-script-")), "calls.jsonl");
 process.env.BROWSERCTL_CALL_LOG = CALL_LOG;
 
@@ -230,10 +232,12 @@ const CASES = {
     assert.match(stdout, /\[PASS\] 1\.1 /);
     assert.match(stdout, /\[PASS\] 1\.2 .*matched chrome-1 tab \d+ only/);
     assert.match(stdout, /\[PASS\] 1\.3 .*served by edge-1/);
-    assert.match(stdout, /\[SKIP\] 1\.4 /);
+    assert.match(stdout, /\[PASS\] 1\.4 .*refused before acting, with the tabs listed/);
     assert.match(stdout, /\[SKIP\] 1\.5 /);
     assert.match(stdout, /\[PASS\] 1\.6 /);
-    assert.match(stdout, /RESULT: 5\/7 checks passed, 2 skipped, 0 failed/);
+    assert.match(stdout, /\[PASS\] 1\.8 .*click and close refused TAB_OWNED, snapshot served/);
+    assert.match(stdout, /\[PASS\] 1\.9 .*TAB_BUSY, then taken/);
+    assert.match(stdout, /RESULT: 8\/9 checks passed, 1 skipped, 0 failed/);
     assert.match(stdout, /\[PASS\] 1\.7 .*6 concurrent screenshots on chrome-1, none refused/);
     // The owner's tabs were neither driven nor closed, and every opened tab is gone again
     for (const f of fakes) {
@@ -275,7 +279,7 @@ const CASES = {
       stdout,
       /\[FAIL\] 1\.6 .*could not close the scratch tab.*tabId \d+.*close it by hand/
     );
-    assert.match(stdout, /RESULT: 5\/10 checks passed, 2 skipped, 3 failed/);
+    assert.match(stdout, /RESULT: 8\/12 checks passed, 1 skipped, 3 failed/);
   },
 
   // Only one browser connected: the whole script reports the top-level skip and exits clean,

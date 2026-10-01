@@ -7,6 +7,7 @@ import { WebSocket } from "ws";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { TABLESS_ACTIONS } from "../../bridge/routing.js";
 
 const TEST_HOME = mkdtempSync(join(tmpdir(), "browserctl-multi-"));
 process.env.HOME = TEST_HOME;
@@ -78,11 +79,21 @@ async function aliasOf(instanceId) {
   return e ? e.alias : null;
 }
 
+// A tab command must name its tab, so one that names none here is sent to tab 1: these tests are
+// about which browser a command reaches, not which tab.
+const withTab = (action, params) =>
+  TABLESS_ACTIONS.has(action) || params.tabId != null || params.id != null
+    ? params
+    : { ...params, tabId: 1 };
+
 function command(action, params = {}, browser) {
+  const p = withTab(action, params);
   return fetch(`${BASE}/command`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(browser === undefined ? { action, params } : { action, params, browser }),
+    body: JSON.stringify(
+      browser === undefined ? { action, params: p } : { action, params: p, browser }
+    ),
   }).then((r) => r.json());
 }
 
@@ -167,14 +178,14 @@ test("no selector, many browsers, no focus info", async () => {
     hello: { instanceId: i2, browserType: "edge", focused: false },
   });
   await sleep(30);
-  const reply = await command("current_tab");
+  const reply = await command("list_windows");
   assert.equal(reply.ok, false);
   assert.equal(reply.code, "NEEDS_BROWSER");
   assert.equal(reply.data.browsers.length, 2);
   await closeAll(a, b);
 });
 
-test("no selector, many browsers, last focused wins", async () => {
+test("no selector, many browsers: a focused window never routes the call", async () => {
   const i1 = freshId(),
     i2 = freshId();
   const a = await fakeExtension("A", {
@@ -184,16 +195,13 @@ test("no selector, many browsers, last focused wins", async () => {
     hello: { instanceId: i2, browserType: "edge", focused: false },
   });
   await sleep(30);
-  b.send(JSON.stringify({ type: "focus", focused: true }));
-  await sleep(20);
   a.send(JSON.stringify({ type: "focus", focused: true }));
   await sleep(20);
-  const reply1 = await command("current_tab");
-  assert.equal(reply1.result.by, "A");
-  b.send(JSON.stringify({ type: "focus", focused: true }));
-  await sleep(20);
-  const reply2 = await command("current_tab");
-  assert.equal(reply2.result.by, "B");
+  const reply = await command("list_windows");
+  assert.equal(reply.ok, false);
+  assert.equal(reply.code, "NEEDS_BROWSER");
+  assert.equal(a.received.length, 0, "the focused browser received nothing");
+  assert.equal(b.received.length, 0);
   await closeAll(a, b);
 });
 
@@ -667,10 +675,11 @@ test("a fan-out list_tabs call logs one call-log entry per browser reached", asy
 // ---- final-review fixes ----
 
 function post(body) {
+  const params = body.params ? withTab(body.action, body.params) : body.params;
   return fetch(`${BASE}/command`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, params }),
   }).then(async (r) => ({ status: r.status, ...(await r.json()) }));
 }
 
@@ -770,7 +779,7 @@ test("an internal command is logged with internal:true, and an agent command wit
   await closeAll(a);
 });
 
-test("list_tabs with fanOut:false and no browser goes to the default browser only", async () => {
+test("list_tabs with fanOut:false and no browser, several connected, is NEEDS_BROWSER", async () => {
   const i1 = freshId(),
     i2 = freshId();
   const a = await fakeExtension("A", { hello: { instanceId: i1, browserType: "chrome" } });
@@ -779,10 +788,10 @@ test("list_tabs with fanOut:false and no browser goes to the default browser onl
   });
   await sleep(30);
   const reply = await post({ action: "list_tabs", params: {}, fanOut: false });
-  assert.equal(reply.ok, true);
-  assert.equal(reply.browser, await aliasOf(i2));
+  assert.equal(reply.ok, false);
+  assert.equal(reply.code, "NEEDS_BROWSER");
   assert.equal(a.received.length, 0);
-  assert.equal(b.received.length, 1);
+  assert.equal(b.received.length, 0);
   await closeAll(a, b);
 });
 

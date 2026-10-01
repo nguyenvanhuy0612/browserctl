@@ -29,7 +29,8 @@ export const BRIDGE = envStr(
 
 // Tags every command this run sends, so e2e traffic is distinguishable from an agent's in the
 // bridge call log. One daemon and one extension serve every client, so the runs share a log.
-const CLIENT = { session: `e2e-${process.pid}`, source: "e2e" };
+// Sticky: the bridge keeps this run's target, the tab new_tab or switch_tab last gave it
+const CLIENT = { session: `e2e-${process.pid}`, source: "e2e", sticky: true };
 
 // The live suites drive one browser. With several connected, BROWSERCTL_E2E_BROWSER names it (any
 // bridge selector); otherwise the first Chrome, the browser the suites are written against.

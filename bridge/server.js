@@ -1,14 +1,14 @@
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, statSync, renameSync, existsSync } from "node:fs";
-import { dirname, join, isAbsolute } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, isAbsolute } from "node:path";
 import { execa } from "execa";
 import { WebSocketServer } from "ws";
 import { markDaemonRunning, getStateDir } from "./state.js";
 import { createRegistry } from "./registry.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { createLeases } from "./leases.js";
+import { createOwners } from "./owners.js";
+import { TABLESS_ACTIONS, ID_ACTIONS, isRead, tabOf, tabChoices } from "./routing.js";
 
 function envNum(name, fallback) {
   const raw = process.env[name];
@@ -45,6 +45,25 @@ function computeTimeoutMs(action, params) {
 
 const registry = createRegistry({ aliasFile: join(getStateDir(), "browsers.json") });
 const sockets = new Map();
+
+// Which session holds which tab as its target (see leases.js)
+const leases = createLeases({
+  ttlMs: envNum("LEASE_TTL_MS", 15_000),
+  busyMs: envNum("LEASE_BUSY_MS", 30_000),
+  isAlive: (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      return err.code === "EPERM";
+    }
+  },
+});
+// Which browser has which tab id, learned from every tab listing (see owners.js)
+const owners = createOwners();
+// The target of each sticky session (the CLI): session -> {browser, tabId}. A CLI process runs
+// one command, so the bridge keeps the tab its next command goes to.
+const stickyTargets = new Map();
 
 const pending = new Map();
 
@@ -86,9 +105,24 @@ const server = http.createServer((req, res) => {
     return sendJson(res, 200, statusPayload());
   }
 
+  // A session's heartbeat renews its lease; a release gives its tab up at once
+  if (req.method === "POST" && (req.url === "/heartbeat" || req.url === "/release")) {
+    return readBody(req)
+      .then((body) => {
+        const { session } = clientTag(body?.client);
+        if (session && req.url === "/heartbeat") leases.touch(session);
+        if (session && req.url === "/release") {
+          leases.release(session);
+          stickyTargets.delete(session);
+        }
+        sendJson(res, 200, { ok: true });
+      })
+      .catch((err) => sendJson(res, 400, { ok: false, error: String(err.message || err) }));
+  }
+
   if (req.method === "POST" && req.url === "/command") {
     return readBody(req)
-      .then((body) => handleCommand(body, res))
+      .then((body) => handleCommand(body, res, isLoopback(req)))
       .catch((err) => sendJson(res, 400, { ok: false, error: String(err.message || err) }));
   }
 
@@ -165,6 +199,17 @@ async function handleHello(ws, msg) {
     } catch {}
   }
 
+  // The tabs the browser has open now: a hold or CLI target on any other tab of it is stale (the
+  // browser restarted and its tab ids are gone), while a service-worker restart keeps them all
+  if (Array.isArray(msg.tabs)) {
+    const open = new Set(msg.tabs.filter(Number.isInteger).slice(0, 10_000));
+    owners.noteListing(entry.alias, [...open]);
+    leases.retainIn(entry.alias, open);
+    for (const [session, t] of stickyTargets) {
+      if (t.browser === entry.alias && !open.has(t.tabId)) stickyTargets.delete(session);
+    }
+  }
+
   log(
     `extension instance '${entry.instanceId}' registered as ${entry.alias} (${entry.browserType})`
   );
@@ -195,6 +240,13 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    // A tab closed in the browser, by anyone, is no one's target any more
+    if (msg.type === "tab_closed" && Number.isInteger(msg.tabId)) {
+      const entry = registry.byConn(ws.connId);
+      if (entry) forgetTab(entry.alias, msg.tabId);
+      return;
+    }
+
     if (msg.type === "pong") {
       ws.isAlive = true;
       const waiters = cloneProbes.get(ws.connId);
@@ -210,6 +262,8 @@ wss.on("connection", (ws) => {
 
   ws.on("close", () => {
     sockets.delete(ws.connId);
+    // Holds and CLI targets in this browser stay: the tabs it reports when it reconnects decide
+    // which of them still exist
     registry.remove(ws.connId);
     const reason = ws.bctlOversized ? "payload too large" : "extension disconnected";
     rejectPendingFor(ws.connId, reason);
@@ -240,12 +294,14 @@ const heartbeat = setInterval(() => {
 
 wss.on("close", () => clearInterval(heartbeat));
 
+// On unless BROWSERCTL_CALL_LOG is 0 or false: it is the only record of which session sent a
+// command, and several agents share one bridge.
 const CALL_LOG_ENV = process.env.BROWSERCTL_CALL_LOG || "";
 const CALL_LOG_PATH =
-  !CALL_LOG_ENV || CALL_LOG_ENV === "0" || CALL_LOG_ENV === "false"
+  CALL_LOG_ENV === "0" || CALL_LOG_ENV === "false"
     ? null
-    : CALL_LOG_ENV === "1" || CALL_LOG_ENV === "true"
-      ? join(__dirname, "calls.jsonl")
+    : !CALL_LOG_ENV || CALL_LOG_ENV === "1" || CALL_LOG_ENV === "true"
+      ? join(getStateDir(), "calls.jsonl")
       : CALL_LOG_ENV;
 const RUN_ID = randomUUID().slice(0, 8);
 const RUN_STARTED_AT = new Date().toISOString();
@@ -356,14 +412,29 @@ function sendToEntry(entry, action, params, timeoutMs) {
   });
 }
 
-// Adds `browser` to every tab of a list_tabs reply, leaving every other field (including
-// `pinned`) untouched.
-function tagTabs(reply, alias) {
+// The name a lease holder is reported under: its surface and session, e.g. "mcp:1a2b3c4d".
+function holderName(holder) {
+  return `${holder.source || "unknown"}:${holder.session}`;
+}
+
+// Adds `browser` to every tab of a list_tabs reply, and `heldBy` to each tab another live
+// session (not `session`) holds, leaving every other field untouched. The listing is also what
+// the bridge knows about which tab ids that browser has.
+function tagTabs(reply, alias, session) {
   if (!reply.ok || !reply.result || !Array.isArray(reply.result.tabs)) return reply;
-  return {
-    ...reply,
-    result: { ...reply.result, tabs: reply.result.tabs.map((t) => ({ ...t, browser: alias })) },
+  owners.noteListing(
+    alias,
+    reply.result.tabs.map((t) => t.id)
+  );
+  const tag = (t) => {
+    const holder = leases.holderOf(alias, t.id);
+    return {
+      ...t,
+      browser: alias,
+      ...(holder && holder.session !== session ? { heldBy: holderName(holder) } : {}),
+    };
   };
+  return { ...reply, result: { ...reply.result, tabs: reply.result.tabs.map(tag) } };
 }
 
 // list_tabs fanned out to every connected browser in parallel: every tab carries the alias that
@@ -379,14 +450,13 @@ function respondFanOutListTabs(params, res, logCtx) {
     const tabs = [];
     const browsers = {};
     for (const { entry, reply } of results) {
-      const tagged = tagTabs(reply, entry.alias);
+      const tagged = tagTabs(reply, entry.alias, logCtx.who.session);
       const entryTabs = tagged.ok && Array.isArray(tagged.result?.tabs) ? tagged.result.tabs : [];
       tabs.push(...entryTabs);
       browsers[entry.alias] = {
         type: entry.browserType,
         label: entry.label,
         ok: !!reply.ok,
-        pinned: reply.ok && reply.result ? (reply.result.pinned ?? null) : null,
         ...(reply.ok ? null : { error: reply.error || "error" }),
       };
       recordCall({
@@ -432,16 +502,73 @@ function recordCall({ who, seq, startedAt, action, params, instanceId, browser, 
 // Who is calling, as declared by the caller: a session id that lasts one client process, and a
 // source naming the surface it came through. Both are optional and both are free text, so they
 // are clamped and never trusted for anything but reading the log back.
-function clientTag(client) {
+function clientTag(client, local = false) {
   const pick = (v, max) => (typeof v === "string" && v ? v.slice(0, max) : null);
   return {
+    // The caller's process, when it runs on this machine: its lease ends when that process does
+    pid: local && Number.isInteger(client?.pid) && client.pid > 0 ? client.pid : null,
     session: pick(client && client.session, 32),
     source: pick(client && client.source, 16),
     internal: client?.internal === true,
+    // The call acts on the tab it names as its session's target, and takes that tab's lease
+    lease: client?.lease === true,
+    // The bridge keeps this session's target (the CLI): a call naming no tab goes to it
+    sticky: client?.sticky === true,
   };
 }
 
-function handleCommand(body, res) {
+// Every connected browser's tabs, tagged, from a fresh listing of each
+async function listEverywhere(session) {
+  const replies = await Promise.all(
+    registry
+      .list()
+      .map((e) =>
+        sendToEntry(e, "list_tabs", {}, FANOUT_TIMEOUT_MS).then((r) => tagTabs(r, e.alias, session))
+      )
+  );
+  return replies.flatMap((r) => (r.ok && Array.isArray(r.result?.tabs) ? r.result.tabs : []));
+}
+
+// The connected browsers that have this tab id: from what the bridge knows, and when that is not
+// exactly one, from a fresh listing of every browser.
+async function ownersOfTab(tabId, session) {
+  const connected = () => {
+    const aliases = new Set(registry.list().map((e) => e.alias));
+    return owners.ownersOf(tabId).filter((a) => aliases.has(a));
+  };
+  let found = connected();
+  if (found.length !== 1) {
+    await listEverywhere(session);
+    found = connected();
+  }
+  return found;
+}
+
+// The tab the user sees in one browser: the active tab of its focused window, else its first
+// active tab.
+async function visibleTab(entry) {
+  const reply = await sendToEntry(entry, "list_tabs", {}, computeTimeoutMs("list_tabs", {}));
+  if (!reply.ok) return { error: { status: 502, code: reply.code || null, message: reply.error } };
+  const tabs = Array.isArray(reply.result?.tabs) ? reply.result.tabs : [];
+  owners.noteListing(
+    entry.alias,
+    tabs.map((t) => t.id)
+  );
+  const tab = tabs.find((t) => t.focusedWindow) || tabs.find((t) => t.active);
+  if (!tab || !Number.isInteger(tab.id)) {
+    return {
+      error: { status: 409, code: "NEEDS_TAB", message: `${entry.alias} has no open tab` },
+    };
+  }
+  return { tabId: tab.id };
+}
+
+function isLoopback(req) {
+  const a = req.socket?.remoteAddress || "";
+  return a === "127.0.0.1" || a === "::1" || a === "::ffff:127.0.0.1";
+}
+
+async function handleCommand(body, res, local = false) {
   const { action, params, client, browser, fanOut } = body || {};
   if (!action || typeof action !== "string") {
     return sendJson(res, 400, { ok: false, error: "missing 'action'" });
@@ -519,10 +646,28 @@ function handleCommand(body, res) {
 
   const seq = ++callSeq;
   const startedAt = Date.now();
-  const who = clientTag(client);
+  const who = clientTag(client, local);
+
+  // A session gives its tab up (release), or lets any session take it without asking (yield)
+  if (action === "release_tab" || action === "yield_tab") {
+    if (!who.session) {
+      return sendJson(res, 400, { ok: false, error: `'${action}' needs a session` });
+    }
+    const had = leases.leaseOf(who.session);
+    let result;
+    if (action === "release_tab") {
+      leases.release(who.session);
+      stickyTargets.delete(who.session);
+      result = { released: had ? { browser: had.browser, tabId: had.tabId } : null };
+    } else {
+      result = { yielding: leases.yieldTab(who.session) };
+    }
+    recordCall({ who, seq, startedAt, action, params, ok: true });
+    return sendJson(res, 200, { ok: true, result });
+  }
 
   // list_tabs naming no browser fans out when several are connected, unless the caller asks
-  // for the default browser alone with fanOut: false
+  // with fanOut: false for one browser only (the sole connected one; several is NEEDS_BROWSER)
   const fanOutList =
     action === "list_tabs" &&
     (browser === "*" || (!browser && fanOut !== false && registry.list().length > 1));
@@ -530,12 +675,61 @@ function handleCommand(body, res) {
     return respondFanOutListTabs(params, res, { who, seq, startedAt });
   }
 
+  if (who.session) leases.touch(who.session);
+  // A sticky session naming no browser stays in the browser its target is in
+  const sticky = who.sticky && who.session ? stickyTargets.get(who.session) || null : null;
+  // A tab named by id goes to the browser that has it; one named by nothing goes to the sticky
+  // session's target browser
+  const namedTab = TABLESS_ACTIONS.has(action) ? null : tabOf(action, params);
+  let selector = browser || (namedTab == null ? sticky?.browser : undefined);
+  if (!selector && namedTab != null && registry.list().length > 1) {
+    const found = await ownersOfTab(namedTab, who.session);
+    if (found.length !== 1) {
+      const code = found.length ? "AMBIGUOUS_TAB" : "TAB_NOT_FOUND";
+      recordCall({ who, seq, startedAt, action, params, ok: false, extra: { code } });
+      return sendJson(res, 409, {
+        ok: false,
+        code,
+        error: found.length
+          ? `tab id ${namedTab} is open in ${found.join(" and ")}; tab ids repeat across browsers, so name the browser. '${action}' was not sent`
+          : `tab ${namedTab} not found in any connected browser; '${action}' was not sent`,
+        ...(found.length
+          ? {
+              recoveryHint: `Name the browser: browser_tabs({action: "select", tabId: ${namedTab}, browser: "${found[0]}"}) (CLI: -b ${found[0]}).`,
+            }
+          : {}),
+        diagnostics: { tabId: namedTab, browsers: found },
+      });
+    }
+    selector = found[0];
+  }
+
+  // A CLI command naming no tab and no browser, with no target yet and several browsers
+  // connected: nothing is guessed. It is NEEDS_TARGET, listing every tab to choose from.
+  if (
+    who.sticky &&
+    !selector &&
+    !TABLESS_ACTIONS.has(action) &&
+    namedTab == null &&
+    registry.list().length > 1
+  ) {
+    const tabs = await listEverywhere(who.session);
+    recordCall({ who, seq, startedAt, action, params, ok: false, extra: { code: "NEEDS_TARGET" } });
+    return sendJson(res, 409, {
+      ok: false,
+      code: "NEEDS_TARGET",
+      error:
+        `several browsers are connected and this session has no tab yet; '${action}' was not sent. ` +
+        `Choose one with 'tab switch <id>' (or -b <browser>). Open tabs:\n${tabChoices(tabs)}`,
+    });
+  }
+
   // An entry whose socket is gone is treated as disconnected: it leaves the registry and the
   // selector is resolved again, exactly as if that browser had never been there
-  let route = registry.resolve(fanOutList ? null : browser);
+  let route = registry.resolve(fanOutList ? null : selector);
   while (route.entry && sockets.get(route.entry.connId)?.readyState !== 1) {
     registry.remove(route.entry.connId);
-    route = registry.resolve(browser);
+    route = registry.resolve(selector);
   }
   if (route.error) {
     return sendJson(res, 409, {
@@ -546,22 +740,174 @@ function handleCommand(body, res) {
     });
   }
   const entry = route.entry;
-  const ws = sockets.get(entry.connId);
-
-  const id = randomUUID();
-  const message = { id, action, params: params || {} };
+  // The params as sent, once the bridge has filled in the tab, so the log names the real tab
+  let loggedParams = params;
   const record = (ok, extra) =>
     recordCall({
       who,
       seq,
       startedAt,
       action,
-      params,
+      params: loggedParams,
       instanceId: entry.instanceId,
       browser: entry.alias,
       ok,
       extra,
     });
+
+  // Reloading the extension drops every session's debugger, capture and recording in that
+  // browser, so it waits while another session is acting there
+  if (action === "reload_extension") {
+    const busy = leases.busyIn(entry.alias, who.session);
+    if (busy) {
+      record(false, { code: "BROWSER_BUSY", holder: holderName(busy.holder) });
+      return sendJson(res, 409, {
+        ok: false,
+        code: "BROWSER_BUSY",
+        error: `${holderName(busy.holder)} is acting in ${entry.alias}; reloading the extension now would break its work. '${action}' was not sent`,
+        recoveryHint: `Try again in ${Math.ceil(busy.retryInMs / 1000)}s.`,
+        browser: entry.alias,
+      });
+    }
+  }
+
+  // Every tab command leaves the bridge naming its tab, and never lands in a tab another
+  // session holds unless it only reads it.
+  let sendParams = params || {};
+  let claimed = null;
+  let took = null;
+  let tracking = false;
+  const done = () => {
+    if (tracking) leases.end(who.session);
+  };
+  // What the session held, and the tab's previous holder when this call takes it, taken just
+  // before the claim so a failed send can put both back
+  let previous = null;
+  let tookFrom = null;
+  if (!TABLESS_ACTIONS.has(action)) {
+    let tabId = tabOf(action, sendParams);
+    if (tabId != null && ID_ACTIONS.has(action) && sendParams.id == null) {
+      sendParams = { ...sendParams, id: tabId };
+    }
+    let claiming = who.lease;
+    if (tabId == null) {
+      if (!who.sticky) {
+        record(false, { code: "NEEDS_TAB" });
+        return sendJson(res, 400, {
+          ok: false,
+          code: "NEEDS_TAB",
+          error: `'${action}' names no tab: send the tab id it acts on`,
+          browser: entry.alias,
+        });
+      }
+      if (sticky && sticky.browser === entry.alias) {
+        tabId = sticky.tabId;
+      } else {
+        const picked = await visibleTab(entry);
+        if (picked.error) {
+          record(false, { code: picked.error.code });
+          return sendJson(res, picked.error.status, {
+            ok: false,
+            code: picked.error.code,
+            error: picked.error.message,
+            browser: entry.alias,
+          });
+        }
+        tabId = picked.tabId;
+      }
+      sendParams = ID_ACTIONS.has(action) ? { ...sendParams, id: tabId } : { ...sendParams, tabId };
+      loggedParams = sendParams;
+      claiming = true;
+    } else if (who.sticky && action === "switch_tab") {
+      claiming = true;
+    }
+    // Selecting a tab is how a session asks to take one another session holds; `force` confirms
+    const taking = claiming && action === "switch_tab";
+    const force = sendParams.force === true;
+    if ("force" in sendParams) {
+      const { force: _force, ...rest } = sendParams;
+      sendParams = rest;
+    }
+    if (claiming && who.session) {
+      // This session's own tab was taken from it: it is told once, and nothing is sent
+      const notice = leases.takeNotice(who.session, entry.alias, tabId);
+      if (notice) {
+        if (who.sticky) stickyTargets.delete(who.session);
+        return refuseTaken(res, record, { action, alias: entry.alias, tabId, notice });
+      }
+      previous = {
+        lease: leases.leaseOf(who.session),
+        sticky: stickyTargets.get(who.session) || null,
+      };
+      const heldBy = leases.holderOf(entry.alias, tabId);
+      const heldLease =
+        heldBy && heldBy.session !== who.session ? leases.leaseOf(heldBy.session) : null;
+      const got = leases.claim(who.session, who.source, entry.alias, tabId, {
+        keep: who.sticky,
+        pid: who.pid,
+        take: taking,
+        force,
+      });
+      if (!got.ok) {
+        const refusal = { action, alias: entry.alias, tabId, holder: got.holder };
+        if (got.reason === "busy") return refuseBusy(res, record, { ...refusal, got });
+        if (got.reason === "confirm") return refuseConfirm(res, record, { ...refusal, got });
+        return refuseOwned(res, record, refusal);
+      }
+      if (got.took) {
+        took = { from: holderName(got.took), forced: got.forced };
+        tookFrom = { session: got.took.session, lease: heldLease };
+      }
+      if (who.sticky) stickyTargets.set(who.session, { browser: entry.alias, tabId });
+      claimed = tabId;
+    } else {
+      const holder = leases.holderOf(entry.alias, tabId);
+      if (holder && holder.session !== who.session && !isRead(action, sendParams)) {
+        return refuseOwned(res, record, { action, alias: entry.alias, tabId, holder });
+      }
+    }
+    // A command on the session's own tab keeps it busy, so no one takes it mid-action
+    const own = who.session ? leases.holderOf(entry.alias, tabId) : null;
+    if (own && own.session === who.session) {
+      leases.begin(who.session);
+      tracking = true;
+    }
+  }
+
+  // Puts back what this call's claim changed: the session's own lease and target, and the lease
+  // of the session it took the tab from, whose notice is withdrawn.
+  const restorePrevious = () => {
+    leases.restore(who.session, previous.lease);
+    if (previous.sticky) stickyTargets.set(who.session, previous.sticky);
+    else stickyTargets.delete(who.session);
+    if (tookFrom) {
+      leases.restore(tookFrom.session, tookFrom.lease);
+      leases.takeNotice(tookFrom.session, entry.alias, claimed);
+    }
+  };
+  // A claim whose tab turned out not to exist is taken back: a session whose own target died
+  // is left with none, and one that tried to move to a missing tab keeps the target it had.
+  const undoClaim = () => {
+    if (claimed == null) return;
+    const hadIt =
+      previous.lease && previous.lease.browser === entry.alias && previous.lease.tabId === claimed;
+    if (hadIt) {
+      leases.release(who.session);
+      stickyTargets.delete(who.session);
+      return;
+    }
+    restorePrevious();
+  };
+
+  loggedParams = sendParams;
+  const ws = sockets.get(entry.connId);
+  const id = randomUUID();
+  const message = { id, action, params: sendParams };
+  const leaseLog = took
+    ? { lease: took.forced ? "forced" : "taken", from: took.from }
+    : claimed != null
+      ? { lease: "claimed" }
+      : {};
 
   const timeoutMs = computeTimeoutMs(action, params);
   const wait = new Promise((resolve, reject) => {
@@ -580,6 +926,8 @@ function handleCommand(body, res) {
       clearTimeout(pendingEntry.timer);
       pending.delete(id);
     }
+    done();
+    if (claimed != null) restorePrevious();
     record(false, { failure: "send" });
     return sendJson(res, 502, {
       ok: false,
@@ -590,7 +938,23 @@ function handleCommand(body, res) {
 
   wait
     .then((reply) => {
-      const outgoing = action === "list_tabs" ? tagTabs(reply, entry.alias) : reply;
+      done();
+      let outgoing = action === "list_tabs" ? tagTabs(reply, entry.alias, who.session) : reply;
+      if (outgoing.ok && took) {
+        outgoing = {
+          ...outgoing,
+          result: {
+            ...outgoing.result,
+            took,
+            warning:
+              `took tab ${claimed} from ${took.from}` +
+              (took.forced ? " by force" : ", which had yielded it") +
+              "; that session is told on its next command",
+          },
+        };
+      }
+      if (outgoing.ok) afterReply(action, sendParams, outgoing.result, entry.alias, who);
+      else if (TAB_GONE.test(outgoing.error || "")) undoClaim();
       const bytes = (() => {
         try {
           return JSON.stringify(outgoing.result ?? outgoing).length;
@@ -598,10 +962,19 @@ function handleCommand(body, res) {
           return null;
         }
       })();
-      record(!!outgoing.ok, { bytes, ...(outgoing.ok ? null : { code: outgoing.code || null }) });
+      record(!!outgoing.ok, {
+        bytes,
+        ...leaseLog,
+        // A new tab's id exists only in the reply; the log names it like any other tab
+        ...(action === "new_tab" && Number.isInteger(outgoing.result?.id)
+          ? { tabId: outgoing.result.id }
+          : {}),
+        ...(outgoing.ok ? null : { code: outgoing.code || null }),
+      });
       return sendJson(res, outgoing.ok ? 200 : 400, { ...outgoing, browser: entry.alias });
     })
     .catch((err) => {
+      done();
       record(false, { failure: "timeout" });
       return sendJson(res, 504, {
         ok: false,
@@ -609,6 +982,100 @@ function handleCommand(body, res) {
         browser: entry.alias,
       });
     });
+}
+
+// The extension's and Chrome's ways of saying a tab id names no open tab
+const TAB_GONE = /^(tab \d+ not found|No tab with id)/;
+
+// TAB_OWNED: the command would act on, or take, a tab another live session holds. Nothing is sent.
+function refuseOwned(res, record, { action, alias, tabId, holder }) {
+  const seenS = Math.round((Date.now() - holder.lastSeen) / 1000);
+  record(false, { code: "TAB_OWNED", lease: "refused", holder: holderName(holder) });
+  return sendJson(res, 409, {
+    ok: false,
+    code: "TAB_OWNED",
+    error:
+      `tab ${tabId} in ${alias} is the target of another session ` +
+      `(${holderName(holder)}, active ${seenS}s ago); '${action}' was not sent`,
+    recoveryHint:
+      'Work in a tab of your own: browser_tabs({action: "new", url}) (CLI: browserctl tab new <url>). ' +
+      'If the user wants this tab, browser_tabs({action: "select", tabId}) asks to take it. ' +
+      "Reading it by its tab id is allowed. Do not work around this.",
+    diagnostics: { tabId, heldBy: holderName(holder) },
+    browser: alias,
+  });
+}
+
+// TAB_BUSY: the holder is mid-action, or finished one moments ago. Not even force takes it.
+function refuseBusy(res, record, { action, alias, tabId, holder, got }) {
+  const waitS = Math.ceil(got.retryInMs / 1000);
+  record(false, { code: "TAB_BUSY", lease: "refused", holder: holderName(holder) });
+  return sendJson(res, 409, {
+    ok: false,
+    code: "TAB_BUSY",
+    error:
+      `tab ${tabId} in ${alias} is in use by ${holderName(holder)}: it is acting there now or ` +
+      `did moments ago; '${action}' was not sent`,
+    recoveryHint: `Try again in ${waitS}s. A tab is never taken mid-action, with or without force.`,
+    diagnostics: { tabId, heldBy: holderName(holder), retryInMs: got.retryInMs },
+    browser: alias,
+  });
+}
+
+// TAKE_CONFIRM: the holder is idle, so the tab can be taken, but only when asked again with force.
+function refuseConfirm(res, record, { alias, tabId, holder, got }) {
+  const idleS = Math.round(got.idleMs / 1000);
+  record(false, { code: "TAKE_CONFIRM", lease: "refused", holder: holderName(holder) });
+  return sendJson(res, 409, {
+    ok: false,
+    code: "TAKE_CONFIRM",
+    error:
+      `tab ${tabId} in ${alias} is held by ${holderName(holder)}, idle for ${idleS}s; ` +
+      `taking it ends that session's hold`,
+    recoveryHint:
+      "Take it only if the user asked for this tab: send the same select again with force: true " +
+      "(CLI: --force). Otherwise open a tab of your own.",
+    diagnostics: { tabId, heldBy: holderName(holder), idleMs: got.idleMs },
+    browser: alias,
+  });
+}
+
+// TARGET_TAKEN: another session took this session's tab. Told once; nothing is sent.
+function refuseTaken(res, record, { action, alias, tabId, notice }) {
+  const by = `${notice.bySource || "unknown"}:${notice.by}`;
+  record(false, { code: "TARGET_TAKEN", lease: "taken", holder: by });
+  return sendJson(res, 409, {
+    ok: false,
+    code: "TARGET_TAKEN",
+    error:
+      `your target tab ${tabId} in ${alias} was taken by ${by}` +
+      (notice.forced ? " by force" : " after you yielded it") +
+      `; '${action}' was not sent, and you have no target`,
+    recoveryHint:
+      'browser_tabs({action: "new", url}) or select another tab. Tell the user the tab was taken.',
+    diagnostics: { tabId, takenBy: by, forced: notice.forced },
+    browser: alias,
+  });
+}
+
+function forgetTab(alias, tabId) {
+  owners.remove(alias, tabId);
+  leases.releaseTab(alias, tabId);
+  for (const [session, t] of stickyTargets) {
+    if (t.browser === alias && t.tabId === tabId) stickyTargets.delete(session);
+  }
+}
+
+// A new tab becomes the target of the session that opened it; a closed tab is held by no one.
+function afterReply(action, params, result, alias, who) {
+  if (action === "new_tab" && Number.isInteger(result?.id)) owners.add(alias, result.id);
+  if (action === "new_tab" && (who.lease || who.sticky) && who.session) {
+    if (Number.isInteger(result?.id)) {
+      leases.claim(who.session, who.source, alias, result.id, { keep: who.sticky, pid: who.pid });
+      if (who.sticky) stickyTargets.set(who.session, { browser: alias, tabId: result.id });
+    }
+  }
+  if (action === "close_tab" && Number.isInteger(params.id)) forgetTab(alias, params.id);
 }
 
 function readBody(req) {
@@ -683,7 +1150,7 @@ server.listen(PORT, HOST, () => {
     const mb = (n) => (n / 1024 / 1024).toFixed(1);
     log(
       `call log ON -> ${CALL_LOG_PATH} (${mb(callLogSize())}MB, rotates at ${mb(CALL_LOG_MAX_BYTES)}MB, ` +
-        `keeps one .1 file; parameter values are never written). Unset BROWSERCTL_CALL_LOG to stop.`
+        `keeps one .1 file; parameter values are never written). Set BROWSERCTL_CALL_LOG=0 to stop.`
     );
   }
   if (PORT !== 0) {

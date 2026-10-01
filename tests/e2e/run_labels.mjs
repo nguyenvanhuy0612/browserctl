@@ -12,7 +12,8 @@ import {
   BRIDGE,
 } from "./harness.mjs";
 
-const CLIENT = { session: `e2e-${process.pid}`, source: "e2e" };
+// Sticky: the bridge keeps this run's target, the tab new_tab or switch_tab last gave it
+const CLIENT = { session: `e2e-${process.pid}`, source: "e2e", sticky: true };
 
 installReaper();
 

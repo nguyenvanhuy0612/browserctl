@@ -20,6 +20,8 @@ process.env.PORT = "0";
 process.env.HOST = "127.0.0.1";
 process.env.FANOUT_TIMEOUT_MS = String(FANOUT_TIMEOUT_MS);
 process.env.COMMAND_TIMEOUT_MS = "5000";
+// A tab counts as busy for this long after its holder's last command
+process.env.LEASE_BUSY_MS = "300";
 // The call log goes to the temp HOME the parent made for this case
 const CALL_LOG = join(process.env.HOME, "calls.jsonl");
 process.env.BROWSERCTL_CALL_LOG = CALL_LOG;
@@ -231,7 +233,7 @@ async function browsers(...specs) {
 
 const sessions = [];
 
-async function session() {
+async function session(extraEnv = {}) {
   const env = { ...process.env };
   for (const k of [
     "PORT",
@@ -239,8 +241,10 @@ async function session() {
     "FANOUT_TIMEOUT_MS",
     "COMMAND_TIMEOUT_MS",
     "BROWSERCTL_CALL_LOG",
+    "BROWSERCTL_BROWSER",
   ])
     delete env[k];
+  Object.assign(env, extraEnv);
   env.BROWSERCTL_BRIDGE_URL = BASE;
   env.BROWSERCTL_AUTO_START = "manual";
   const transport = new StdioClientTransport({
@@ -253,6 +257,7 @@ async function session() {
   await client.connect(transport);
   sessions.push(client);
   return {
+    close: () => client.close(),
     async call(name, args = {}) {
       const res = await client.callTool({ name, arguments: args });
       const text = res.content?.[0]?.text ?? "";
@@ -397,25 +402,123 @@ const CASES = {
   },
 
   async "uc-no-browser-focus"() {
-    const [chrome, edge] = await browsers(
+    const fakes = await browsers(
       { type: "chrome", tabs: [tab(61, "https://c/", "C")] },
       { type: "edge", tabs: [tab(62, "https://e/", "E")] }
     );
-    edge.focus();
+    fakes[1].focus();
     await sleep(50);
     const A = await session();
-    const snap = ok(await A.call("browser_snapshot", {}), "snapshot");
-    ok(await A.call("browser_click", { target: "x" }), "click");
-    assert.equal(snap.target.browser, "edge-1");
-    assert.equal(snap.target.tabId, 62);
-    assert.deepEqual(
-      pageCalls(edge).map((c) => [c.action, c.params.tabId]),
-      [
-        ["snapshot", 62],
-        ["click", 62],
-      ]
+    const text = failed(await A.call("browser_snapshot", {}), "NEEDS_TARGET", "snapshot");
+    assert.match(text, /chrome-1 tab 61 "C"/);
+    assert.match(text, /edge-1 tab 62 "E"/);
+    for (const f of fakes) assert.deepEqual(pageCalls(f), []);
+    assert.equal(await targetOf(A), null);
+  },
+
+  // One session moves across browsers and profiles: it holds one tab at a time, any free tab in
+  // any browser, and the tab it leaves is free for the next session.
+  async "uc-any-free-tab-across-browsers"() {
+    const [chrome1, , edge] = await browsers(
+      { type: "chrome", tabs: [tab(63, "https://c1/", "C1")] },
+      { type: "chrome", label: "Work", tabs: [tab(163, "https://c2/", "C2")] },
+      { type: "edge", tabs: [tab(64, "https://e/", "E")] }
     );
-    assert.deepEqual(chrome.received, []);
+    const [A, B] = await Promise.all([session(), session()]);
+    ok(await B.call("browser_tabs", { action: "select", tabId: 64 }), "B takes the edge tab");
+    const listed = failed(await A.call("browser_snapshot", {}), "NEEDS_TARGET", "A first call");
+    assert.match(listed, /edge-1 tab 64 "E" https:\/\/e\/ \[held by mcp:/);
+    ok(await A.call("browser_tabs", { action: "select", tabId: 63 }), "A: chrome profile 1");
+    ok(await A.call("browser_click", { target: "x" }), "A click in chrome-1");
+    ok(await A.call("browser_tabs", { action: "select", tabId: 163 }), "A: chrome profile 2");
+    ok(await A.call("browser_click", { target: "x" }), "A click in chrome-2");
+    ok(await B.call("browser_tabs", { action: "select", tabId: 63 }), "B: the tab A left");
+    ok(await B.call("browser_click", { target: "x" }), "B click in chrome-1");
+    assert.deepEqual(
+      chrome1.served("click").map((c) => c.params.tabId),
+      [63, 63]
+    );
+    assert.deepEqual(pageCalls(edge), []);
+  },
+
+  // The 2026-09-30 incident: agent A works in a tab, the user focuses that browser, and a second
+  // agent starts. B can neither be routed there by focus nor act in A's tab; it can read it.
+  async "uc-incident-second-agent"() {
+    const [chrome] = await browsers(
+      { type: "chrome", tabs: [tab(65, "https://sac/form", "SAC")] },
+      { type: "brave", tabs: [tab(66, "https://b/", "B")] }
+    );
+    const A = await session();
+    ok(await A.call("browser_tabs", { action: "select", tabId: 65 }), "A select");
+    ok(await A.call("browser_snapshot", {}), "A snapshot");
+    chrome.focus();
+    await sleep(50);
+    const B = await session();
+    failed(await B.call("browser_navigate", { url: "https://sac/users" }), "NEEDS_TARGET", "B");
+    failed(await B.call("browser_click", { target: "x", tabId: 65 }), "TAB_OWNED", "B click");
+    ok(await B.call("browser_snapshot", { tabId: 65 }), "B reads A's tab by id");
+    assert.deepEqual(chrome.served("navigate"), []);
+    assert.deepEqual(chrome.served("click"), []);
+    ok(await A.call("browser_click", { target: "x" }), "A click");
+    assert.deepEqual(
+      chrome.served("click").map((c) => c.params.tabId),
+      [65]
+    );
+  },
+
+  // Session 2 takes session 1's tab: refused while session 1 is acting, asked to confirm once it
+  // is idle, taken with force. Session 1 is told once and then has no target.
+  async "uc-take-tab"() {
+    const [chrome] = await browsers({
+      type: "chrome",
+      tabs: [tab(68, "https://one/", "One", { active: true }), tab(69, "https://two/", "Two")],
+    });
+    const [A, B] = await Promise.all([session(), session()]);
+    ok(await A.call("browser_tabs", { action: "select", tabId: 68 }), "A select");
+    ok(await B.call("browser_tabs", { action: "select", tabId: 69 }), "B select");
+    ok(await A.call("browser_click", { target: "x" }), "A click");
+    failed(await B.call("browser_tabs", { action: "select", tabId: 68, force: true }), "TAB_BUSY", "B");
+    await sleep(350);
+    failed(await B.call("browser_tabs", { action: "select", tabId: 68 }), "TAKE_CONFIRM", "B ask");
+    const took = ok(
+      await B.call("browser_tabs", { action: "select", tabId: 68, force: true }),
+      "B take"
+    );
+    assert.match(took.warning, /took tab 68/);
+    failed(await A.call("browser_click", { target: "x" }), "TARGET_TAKEN", "A after take");
+    failed(await A.call("browser_click", { target: "x" }), "TARGET_TAKEN", "A still has none");
+    ok(await B.call("browser_click", { target: "x" }), "B click");
+    assert.deepEqual(
+      chrome.served("click").map((c) => c.params.tabId),
+      [68, 68]
+    );
+    ok(await A.call("browser_tabs", { action: "select", tabId: 69 }), "A moves to the free tab");
+  },
+
+  async "uc-yield-and-release"() {
+    await browsers({
+      type: "chrome",
+      tabs: [tab(70, "https://one/", "One", { active: true }), tab(71, "https://two/", "Two")],
+    });
+    const [A, B, C] = await Promise.all([session(), session(), session()]);
+    ok(await A.call("browser_tabs", { action: "select", tabId: 70 }), "A select");
+    ok(await A.call("browser_tabs", { action: "yield" }), "A yields");
+    await sleep(350);
+    ok(await B.call("browser_tabs", { action: "select", tabId: 70 }), "B takes, no confirm");
+    ok(await B.call("browser_tabs", { action: "release" }), "B releases");
+    assert.equal(await targetOf(B), null);
+    ok(await C.call("browser_tabs", { action: "select", tabId: 70 }), "C selects the free tab");
+  },
+
+  async "uc-lease-released-on-exit"() {
+    await browsers({ type: "chrome", tabs: [tab(67, "https://c/", "C")] });
+    const A = await session();
+    ok(await A.call("browser_snapshot", {}), "A snapshot");
+    const B = await session();
+    failed(await B.call("browser_snapshot", {}), "TAB_OWNED", "B while A holds the tab");
+    await A.close();
+    await sleep(300);
+    ok(await B.call("browser_snapshot", {}), "B after A left");
   },
 
   async "uc-no-browser-no-focus"() {
@@ -424,21 +527,22 @@ const CASES = {
       { type: "edge", tabs: [tab(72, "https://e/", "E")] }
     );
     const A = await session();
-    const text = failed(await A.call("browser_snapshot", {}), "NEEDS_BROWSER", "snapshot");
+    const text = failed(await A.call("browser_snapshot", {}), "NEEDS_TARGET", "snapshot");
     assert.match(text, /chrome-1/);
     assert.match(text, /edge-1/);
-    for (const f of fakes) assert.deepEqual(f.received, []);
+    for (const f of fakes) assert.deepEqual(actionsOf(f), ["list_tabs"], "only the lookup");
     assert.equal(await targetOf(A), null);
   },
 
   async "uc-sticky-target"() {
     const [chrome, edge] = await browsers(
-      { type: "chrome", focused: true, tabs: [tab(81, "https://c/", "C")] },
+      { type: "chrome", tabs: [tab(81, "https://c/", "C")] },
       { type: "edge", tabs: [tab(82, "https://e/", "E")] }
     );
     const A = await session();
+    ok(await A.call("browser_tabs", { action: "select", browser: "chrome" }), "select");
     const snap = ok(await A.call("browser_snapshot", {}), "snapshot");
-    assert.equal(snap.target.browser, "chrome-1");
+    assert.equal(snap.browser, "chrome-1");
     edge.focus();
     await sleep(50);
     ok(await A.call("browser_click", { target: "x" }), "click");
@@ -547,10 +651,11 @@ const CASES = {
 
   async "uc-other-session-switch"() {
     const [chrome, edge] = await browsers(
-      { type: "chrome", focused: true, tabs: [tab(131, "https://c/", "C")] },
+      { type: "chrome", tabs: [tab(131, "https://c/", "C")] },
       { type: "edge", tabs: [tab(132, "https://e/", "E")] }
     );
     const [A, B] = await Promise.all([session(), session()]);
+    ok(await A.call("browser_tabs", { action: "select", browser: "chrome" }), "A select");
     ok(await A.call("browser_snapshot", {}), "A snapshot");
     ok(await B.call("browser_tabs", { action: "select", browser: "edge" }), "B select");
     ok(await A.call("browser_click", { target: "x" }), "A click");
@@ -780,19 +885,20 @@ const CASES = {
 
   async "uc-first-call-one-agent-entry"() {
     await browsers(
-      { type: "chrome", focused: true, tabs: [tab(311, "https://c/", "C")] },
+      { type: "chrome", tabs: [tab(311, "https://c/", "C")] },
       { type: "edge", tabs: [tab(312, "https://e/", "E")] }
     );
     const A = await session();
     const since = callLogSize();
-    ok(await A.call("browser_snapshot", {}), "first snapshot");
-    ok(await A.call("browser_tabs", { action: "select", browser: "edge" }), "select");
+    ok(await A.call("browser_tabs", { action: "select", browser: "chrome" }), "select chrome");
+    ok(await A.call("browser_snapshot", {}), "snapshot");
+    ok(await A.call("browser_tabs", { action: "select", browser: "edge" }), "select edge");
     const entries = callLogSince(since);
     const agentSeqs = new Set(entries.filter((e) => !e.internal).map((e) => e.seq));
-    assert.equal(agentSeqs.size, 2, JSON.stringify(entries));
+    assert.equal(agentSeqs.size, 3, JSON.stringify(entries));
     assert.deepEqual(
       entries.filter((e) => !e.internal).map((e) => e.action),
-      ["snapshot", "switch_tab"]
+      ["switch_tab", "snapshot", "switch_tab"]
     );
     assert.deepEqual(
       entries.filter((e) => e.internal).map((e) => e.action),
@@ -965,17 +1071,19 @@ const CASES = {
       edge.served("snapshot").map((c) => c.params.tabId),
       [251, 252]
     );
-    // A session with no target resolves its default first, then groups that tab by id
+    // A session with no target would start on the tab the user sees, but that is A's target:
+    // it is refused, and nothing but the lookup reaches the browser
     const before = edge.received.length;
-    ok(await C.call("browser_action", { action: "group_tab", params: {} }), "C group");
-    assert.deepEqual(
-      edge.received.slice(before).map((c) => [c.action, c.params.id ?? c.params.tabId ?? null]),
-      [
-        ["list_tabs", null],
-        ["group_tab", 251],
-      ]
+    failed(
+      await C.call("browser_action", { action: "group_tab", params: {} }),
+      "TAB_OWNED",
+      "C group"
     );
-    assert.deepEqual(await targetOf(C), { browser: "edge-1", tabId: 251 });
+    assert.deepEqual(
+      edge.received.slice(before).map((c) => c.action),
+      ["list_tabs"]
+    );
+    assert.equal(await targetOf(C), null);
   },
 
   async "uc-raw-tab-actions"() {
@@ -1006,7 +1114,7 @@ const CASES = {
 
   async "uc-select-during-resolution"() {
     const [chrome, edge] = await browsers(
-      { type: "chrome", focused: true, tabs: [tab(271, "https://c/", "C")] },
+      { type: "chrome", tabs: [tab(271, "https://c/", "C")] },
       { type: "edge", tabs: [tab(272, "https://e/", "E")] }
     );
     chrome.holdList = true;
@@ -1045,8 +1153,7 @@ const CASES = {
     );
     assert.match(text, /chrome-1/);
     assert.match(text, /edge-1/);
-    assert.match(text, /moves your session target/);
-    assert.match(text, /subagent/);
+    assert.match(text, /name the browser/i);
     assert.deepEqual(chrome.served("snapshot"), []);
     assert.deepEqual(edge.served("snapshot"), []);
     assert.deepEqual(await targetOf(A), { browser: "edge-1", tabId: 8 });

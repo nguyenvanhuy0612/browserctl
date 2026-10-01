@@ -2,7 +2,8 @@
 // the tools an agent would actually use to act on it.
 import http from "node:http";
 
-const CLIENT = { session: `e2e-${process.pid}`, source: "e2e" };
+// Sticky: the bridge keeps this run's target, the tab new_tab or switch_tab last gave it
+const CLIENT = { session: `e2e-${process.pid}`, source: "e2e", sticky: true };
 const BRIDGE = "http://127.0.0.1:8765";
 const [, , URL_, LABEL] = process.argv;
 

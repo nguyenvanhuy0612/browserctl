@@ -8,7 +8,7 @@ prompt from the bridge call log, never from the agent's own report of what it di
 
 ## Setup
 
-- The bridge running with `BROWSERCTL_CALL_LOG=<path>` set before it starts, so every command
+- The bridge's call log (on by default at `~/.browserctl/calls.jsonl`), so every command
   through it is recorded. `GET /status` on the bridge reports the same path back as `callLog`.
 - The browsers for the run: Chrome with two profiles (one has facebook.com open), Edge
   with https://en.wikipedia.org/wiki/Main_Page open.
@@ -50,7 +50,8 @@ To score a prompt:
 | "mở tab facebook đang mở và click Home" (facebook open in one Chrome profile) | at most 4 agent calls (`list`, `select`, `snapshot`, `click`); the `click` line's `tabId` is that profile's tab |
 | "click Home trên facebook" (facebook open in two Chrome profiles) | the agent asks which profile, or names both, before any call whose `action` is `click`; no click line appears in the log before it does |
 | "mở example.com trên edge" | the `new_tab` line's `browser` is the Edge alias |
-| "click abc" (Edge focused last, no browser named in the prompt) | every line's `browser` (internal ones included) is the Edge alias, and the first result the agent read back carries `target.browser` equal to that alias |
+| "click abc" (Edge focused last, no browser named in the prompt) | no `click` line appears before the agent picks a tab: its first attempt is `NEEDS_TARGET` with the tabs listed, and it then selects one or asks which |
+| Session A works in a tab; session B, told "click Home on that same page" | B's click is refused `TAB_OWNED`; no `click` line from B carries A's `tabId`, and B opens its own tab or asks |
 | Two sessions at once: "làm trên chrome" / "làm trên edge", each doing 10 steps | grouping the log by `session` shows each session's lines other than `list_tabs` carrying only its own browser's alias — no such line from session A carries session B's browser, or vice versa (a `list_tabs` fan-out reaches every browser by design) |
 
 ## Recording a result

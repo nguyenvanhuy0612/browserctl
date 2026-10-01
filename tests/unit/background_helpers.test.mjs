@@ -325,14 +325,12 @@ test("an element's frame is named by origin and path, without the iframe's query
   assert.equal(ctx.__fn(""), "");
 });
 
-// switch_tab and new_tab set the target without changing what the user sees; only an explicit
-// activate makes the tab the visible one.
+// switch_tab and new_tab change nothing the user sees unless asked, and keep no target of their
+// own: the context has no pin to set, so any attempt to set one throws.
 function loadTabOps() {
   const calls = [];
-  const pins = [];
   const tab = { id: 9, windowId: 3, url: "https://t/", title: "T" };
   const ctx = vm.createContext({
-    pinTarget: (id) => pins.push(id),
     chrome: {
       tabs: {
         async get(id) {
@@ -362,23 +360,21 @@ function loadTabOps() {
       "\nglobalThis.__switch = switchTab; globalThis.__new = newTab;",
     ctx
   );
-  return { switchTab: ctx.__switch, newTab: ctx.__new, calls, pins };
+  return { switchTab: ctx.__switch, newTab: ctx.__new, calls };
 }
 
-test("switch_tab pins the tab without activating it", async () => {
-  const { switchTab, calls, pins } = loadTabOps();
+test("switch_tab reports the tab without activating it", async () => {
+  const { switchTab, calls } = loadTabOps();
   const res = await switchTab({ id: 9 });
-  assert.deepEqual(pins, [9]);
   assert.ok(!calls.some((c) => c[0] === "update"), JSON.stringify(calls));
   assert.deepEqual({ ...res }, { id: 9, url: "https://t/", title: "T" });
 });
 
 test("switch_tab with activate makes the tab visible", async () => {
-  const { switchTab, calls, pins } = loadTabOps();
+  const { switchTab, calls } = loadTabOps();
   await switchTab({ id: 9, activate: true });
   const update = calls.find((c) => c[0] === "update");
   assert.equal(JSON.stringify(update), JSON.stringify(["update", 9, { active: true }]));
-  assert.deepEqual(pins, [9]);
 });
 
 test("new_tab opens in the background unless activate is given", async () => {
@@ -906,4 +902,96 @@ test("a tab switch during the visible capture itself is caught, not returned as 
   );
   await assert.rejects(capture(50, 1, {}), (err) => err.code === "TAB_LEFT_FRONT");
   assert.equal(reads, 2, "checked before and after the capture");
+});
+
+function loadNavigationFailed() {
+  const ctx = vm.createContext({});
+  vm.runInContext(
+    extractFunction("navigationFailed") + "\nglobalThis.__fn = navigationFailed;",
+    ctx
+  );
+  return ctx.__fn;
+}
+
+test("a certificate error on navigation is CERT_INTERSTITIAL, with a hint to ask the user", () => {
+  const err = loadNavigationFailed()("https://172.16.1.8:2443", "net::ERR_CERT_AUTHORITY_INVALID");
+  assert.equal(err.code, "CERT_INTERSTITIAL");
+  assert.match(err.message, /certificate/i);
+  assert.match(err.recoveryHint, /ask the user/i);
+});
+
+test("any other network error on navigation carries no certificate code", () => {
+  const nav = loadNavigationFailed();
+  assert.equal(nav("https://nope.invalid", "net::ERR_NAME_NOT_RESOLVED").code, undefined);
+  assert.equal(nav("https://x.test").code, undefined);
+});
+
+// The recorder is one per browser: a session may start, stop or read it only in the tab it is
+// recording (or last recorded), so one session never stops, wipes or reads another's recording.
+function loadRecorderGuard(state) {
+  const ctx = vm.createContext({ ...state });
+  vm.runInContext(
+    extractFunction("recorderRefusal") + "\nglobalThis.__fn = recorderRefusal;",
+    ctx
+  );
+  return ctx.__fn;
+}
+
+test("a recording in one tab cannot be started over, stopped or read from another tab", () => {
+  const guard = loadRecorderGuard({ isRecording: true, recordingTabId: 5, recordedTabId: 5 });
+  for (const action of ["record_start", "record_stop", "record_get"]) {
+    const r = guard(action, 6);
+    assert.equal(r.ok, false, action);
+    assert.equal(r.code, "RECORDING_ELSEWHERE", action);
+    assert.match(r.error, /tab 5/);
+    assert.equal(guard(action, 5), null, `${action} in the recording tab`);
+  }
+});
+
+test("a finished recording is read only from its tab; a new one may start anywhere", () => {
+  const guard = loadRecorderGuard({ isRecording: false, recordingTabId: null, recordedTabId: 5 });
+  assert.equal(guard("record_get", 6).code, "RECORDING_ELSEWHERE");
+  assert.equal(guard("record_get", 5), null);
+  assert.equal(guard("record_start", 6), null);
+  const fresh = loadRecorderGuard({ isRecording: false, recordingTabId: null, recordedTabId: null });
+  assert.equal(fresh("record_get", 6), null);
+});
+
+// A closed tab that was being recorded (or held the last recording) leaves the recorder free for
+// any tab, instead of refusing every tab forever.
+test("closing the recorded tab frees the recorder", () => {
+  const ctx = vm.createContext({
+    isRecording: true,
+    recordingTabId: 5,
+    recordedTabId: 5,
+    persistRecording: () => {},
+  });
+  vm.runInContext(
+    extractFunction("recorderRefusal") +
+      "\n" +
+      extractFunction("forgetRecordingTab") +
+      "\nglobalThis.__forget = forgetRecordingTab; globalThis.__guard = recorderRefusal;",
+    ctx
+  );
+  ctx.__forget(6);
+  assert.equal(ctx.__guard("record_start", 6).code, "RECORDING_ELSEWHERE", "another tab closing changes nothing");
+  ctx.__forget(5);
+  assert.equal(ctx.__guard("record_start", 6), null);
+  assert.equal(ctx.__guard("record_get", 6), null);
+});
+
+// The hello names the tabs the browser has open, so the bridge can tell a restarted browser (its
+// tab ids gone) from a restarted service worker (all still open).
+test("the hello lists the ids of the open tabs", async () => {
+  const ctx = vm.createContext({
+    chrome: {
+      storage: { local: { get: async () => ({}) } },
+      windows: { getLastFocused: async () => ({ focused: true }) },
+      tabs: { query: async () => [{ id: 4 }, { id: 9 }] },
+    },
+  });
+  vm.runInContext(extractFunction("helloExtras") + "\nglobalThis.__fn = helloExtras;", ctx);
+  const extras = await ctx.__fn();
+  assert.deepEqual([...extras.tabs], [4, 9]);
+  assert.equal(extras.focused, true);
 });

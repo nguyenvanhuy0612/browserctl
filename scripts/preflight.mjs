@@ -836,8 +836,29 @@ gate("npm tarball is clean", () => {
   if (hit) {
     throw new Error(`the tarball would ship an internal working document: ${hit.trim()}`);
   }
+  // Every module a shipped file imports must ship too. bridge/leases.js, routing.js and owners.js
+  // were once imported by server.js while missing from package.json files: the tarball was clean
+  // and the published bridge would not have started.
+  const shipped = new Set(
+    out
+      .split("\n")
+      .map((l) => l.match(/^npm notice\s+[\d.]+[kKMG]?B\s+(\S+)$/)?.[1])
+      .filter(Boolean)
+  );
+  const missing = [];
+  for (const f of shipped) {
+    if (!/\.(m?js)$/.test(f)) continue;
+    const src = read(f);
+    for (const m of src.matchAll(/(?:from\s+|import\s*\()\s*["'](\.{1,2}\/[^"']+)["']/g)) {
+      const target = join(dirname(f), m[1]).replace(/\\/g, "/");
+      if (!shipped.has(target)) missing.push(`${f} imports ${target}`);
+    }
+  }
+  if (missing.length) {
+    throw new Error(`the tarball would ship without files it imports: ${missing.join(", ")}`);
+  }
   const files = out.match(/total files:\s*(\d+)/)?.[1];
-  return `${files} files`;
+  return `${files} files, every relative import shipped`;
 });
 
 // --------------------------------------------------------------- 10. live end-to-end

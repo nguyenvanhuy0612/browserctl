@@ -1942,12 +1942,24 @@ test("CLI: -b is the short form of --browser", async () => {
   await runCliBrowserCase("short-flag-reaches-only-that-browser");
 });
 
-test("CLI: BROWSERCTL_BROWSER supplies the default selector", async () => {
-  await runCliBrowserCase("env-var-selects-default-browser");
+test("CLI: BROWSERCTL_BROWSER is not a default browser", async () => {
+  await runCliBrowserCase("env-var-is-not-a-default-browser");
 });
 
-test("CLI: no selector, two browsers, no focus: exits 2 with NEEDS_BROWSER and lists the aliases", async () => {
-  await runCliBrowserCase("no-flag-two-browsers-no-focus-needs-browser");
+test("CLI: no selector, two browsers, no target: exits 2 with NEEDS_TARGET listing the tabs", async () => {
+  await runCliBrowserCase("no-flag-two-browsers-needs-target");
+});
+
+test("CLI: a session keeps its tab across invocations, and another session cannot take it", async () => {
+  await runCliBrowserCase("cli-session-keeps-its-tab-and-never-takes-another-sessions");
+});
+
+test("CLI: asks before taking an agent's tab, takes it with --force, and releases it", async () => {
+  await runCliBrowserCase("cli-take-with-force-and-release");
+});
+
+test("CLI: -t alone reaches the browser that has the tab", async () => {
+  await runCliBrowserCase("tab-id-alone-reaches-its-browser");
 });
 
 test("CLI: status prints one line per connected browser, aliases included", async () => {

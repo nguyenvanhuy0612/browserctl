@@ -17,6 +17,7 @@ const CLI_PATH = join(HERE, "..", "..", "..", "cli.js");
 process.env.PORT = "0";
 process.env.HOST = "127.0.0.1";
 delete process.env.BROWSERCTL_CALL_LOG;
+process.env.LEASE_BUSY_MS = "200";
 
 const { server: bridge } = await import("../../../bridge/server.js");
 if (!bridge.listening) await new Promise((r) => bridge.once("listening", r));
@@ -39,7 +40,7 @@ async function waitFor(pred, what) {
 
 // A stand-in extension: answers ping, and every routed command with its own type/action so a
 // case can see exactly what reached it.
-function fake({ type, focused = false }) {
+function fake({ type, focused = false, tabId = 1 }) {
   const f = { type, received: [], instanceId: `${type}-${Math.random().toString(36).slice(2)}` };
   f.connect = () =>
     new Promise((resolve, reject) => {
@@ -52,7 +53,7 @@ function fake({ type, focused = false }) {
         f.received.push({ action: msg.action, params: msg.params || {} });
         const result =
           msg.action === "list_tabs"
-            ? { tabs: [{ id: 1, url: "https://example.com/", title: f.type, active: true }] }
+            ? { tabs: [{ id: tabId, url: "https://example.com/", title: f.type, active: true }] }
             : { by: f.type, action: msg.action };
         ws.send(JSON.stringify({ id: msg.id, ok: true, result }));
       });
@@ -97,7 +98,14 @@ async function runCli(args, extraEnv = {}) {
     BROWSERCTL_BRIDGE_URL: BASE,
     BROWSERCTL_AUTO_START: "manual",
   };
-  for (const k of ["PORT", "HOST", "BROWSERCTL_CALL_LOG", "BROWSERCTL_BROWSER"]) delete env[k];
+  for (const k of [
+    "PORT",
+    "HOST",
+    "BROWSERCTL_CALL_LOG",
+    "BROWSERCTL_BROWSER",
+    "BROWSERCTL_SESSION",
+  ])
+    delete env[k];
   Object.assign(env, extraEnv);
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, [CLI_PATH, ...args], {
@@ -132,28 +140,91 @@ const CASES = {
     assert.equal(edge.received.filter((c) => c.action === "click").length, 0);
   },
 
-  // BROWSERCTL_BROWSER supplies the default selector when no flag is given.
-  async "env-var-selects-default-browser"() {
+  // BROWSERCTL_BROWSER is not read: with two browsers and no target the CLI still has to choose.
+  async "env-var-is-not-a-default-browser"() {
     const chrome = fake({ type: "chrome" });
     const edge = fake({ type: "edge" });
     await connectAll(chrome, edge);
     const res = await runCli(["click", "abc"], { BROWSERCTL_BROWSER: "edge" });
-    assert.equal(res.code, 0, res.stderr);
-    assert.equal(edge.received.filter((c) => c.action === "click").length, 1);
-    assert.equal(chrome.received.filter((c) => c.action === "click").length, 0);
+    assert.equal(res.code, 2, res.stderr);
+    assert.match(res.stderr, /NEEDS_TARGET/);
+    assert.equal(edge.received.filter((c) => c.action === "click").length, 0);
   },
 
-  // No selector, two browsers connected, neither focused: the bridge cannot pick a default and
-  // the CLI must surface that as a distinct, scriptable exit code with both aliases named.
-  async "no-flag-two-browsers-no-focus-needs-browser"() {
+  // No selector, two browsers connected, no target yet: nothing is guessed. The CLI exits 2 with
+  // NEEDS_TARGET, listing every browser's tabs to choose from, and nothing is clicked.
+  async "no-flag-two-browsers-needs-target"() {
     const chrome = fake({ type: "chrome" });
     const edge = fake({ type: "edge" });
     await connectAll(chrome, edge);
     const res = await runCli(["click", "abc"]);
     assert.equal(res.code, 2, `stdout=${res.stdout} stderr=${res.stderr}`);
-    assert.match(res.stderr, /NEEDS_BROWSER/);
-    assert.match(res.stderr, new RegExp(chrome.alias));
-    assert.match(res.stderr, new RegExp(edge.alias));
+    assert.match(res.stderr, /NEEDS_TARGET/);
+    assert.match(res.stderr, new RegExp(`${chrome.alias} tab 1`));
+    assert.match(res.stderr, new RegExp(`${edge.alias} tab 1`));
+    for (const f of [chrome, edge]) {
+      assert.equal(f.received.filter((c) => c.action === "click").length, 0);
+    }
+  },
+
+  // The bridge keeps the CLI session's target: the first command looks up the tab the user sees,
+  // later ones go straight to it. Another CLI session (BROWSERCTL_SESSION) cannot take that tab:
+  // it exits 2 with TAB_OWNED and nothing reaches the browser.
+  async "cli-session-keeps-its-tab-and-never-takes-another-sessions"() {
+    const chrome = fake({ type: "chrome" });
+    await connectAll(chrome);
+    assert.equal((await runCli(["click", "abc"])).code, 0);
+    assert.equal((await runCli(["click", "def"])).code, 0);
+    const clicks = chrome.received.filter((c) => c.action === "click");
+    assert.deepEqual(
+      clicks.map((c) => c.params.tabId),
+      [1, 1]
+    );
+    assert.equal(chrome.received.filter((c) => c.action === "list_tabs").length, 1);
+    const other = await runCli(["click", "ghi"], { BROWSERCTL_SESSION: "second" });
+    assert.equal(other.code, 2, `stdout=${other.stdout} stderr=${other.stderr}`);
+    assert.match(other.stderr, /TAB_OWNED/);
+    assert.equal(chrome.received.filter((c) => c.action === "click").length, 2);
+  },
+
+  // The CLI asks before taking a tab an agent holds, takes it with --force, and can give it up.
+  async "cli-take-with-force-and-release"() {
+    const chrome = fake({ type: "chrome" });
+    await connectAll(chrome);
+    const agent = { session: "agent1", source: "mcp", lease: true };
+    await fetch(`${BASE}/command`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "click", params: { tabId: 1 }, client: agent }),
+    });
+    await sleep(250);
+    const listed = await runCli(["tab", "list"]);
+    assert.match(listed.stdout, /\[held by mcp:agent1\]/);
+    const ask = await runCli(["tab", "switch", "1"]);
+    assert.equal(ask.code, 2, ask.stderr);
+    assert.match(ask.stderr, /TAKE_CONFIRM/);
+    const take = await runCli(["tab", "switch", "1", "--force"]);
+    assert.equal(take.code, 0, take.stderr);
+    assert.match(take.stdout, /took tab 1/);
+    assert.equal((await runCli(["click", "abc"])).code, 0);
+    assert.equal((await runCli(["tab", "release"])).code, 0);
+    const back = await fetch(`${BASE}/command`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "click", params: { tabId: 1 }, client: agent }),
+    }).then((r) => r.json());
+    assert.equal(back.code, "TARGET_TAKEN", "the agent is told its tab was taken");
+  },
+
+  // -t names a tab by id alone: the bridge finds the browser that has it, no -b needed.
+  async "tab-id-alone-reaches-its-browser"() {
+    const chrome = fake({ type: "chrome", tabId: 1 });
+    const edge = fake({ type: "edge", tabId: 2 });
+    await connectAll(chrome, edge);
+    const res = await runCli(["click", "abc", "-t", "2"]);
+    assert.equal(res.code, 0, res.stderr);
+    assert.equal(edge.received.filter((c) => c.action === "click").length, 1);
+    assert.equal(chrome.received.filter((c) => c.action === "click").length, 0);
   },
 
   // `status` (default, human output) lists a line per connected browser, aliases included.

@@ -145,12 +145,12 @@ test("default: single", () => {
   assert.equal(reg.resolve(null).entry.alias, "chrome-1");
 });
 
-test("default: last focused", () => {
+test("default: several browsers is NEEDS_BROWSER even after one was focused", () => {
   reg.admit({ connId: "c1", instanceId: "i1", browserType: "chrome", focused: false });
   reg.admit({ connId: "c2", instanceId: "i2", browserType: "edge", focused: false });
   reg.touchFocus("c1", true, 1);
   reg.touchFocus("c2", true, 2);
-  assert.equal(reg.resolve(null).entry.alias, "edge-1");
+  assert.equal(reg.resolve(null).error.code, "NEEDS_BROWSER");
 });
 
 test("default: none focused", () => {

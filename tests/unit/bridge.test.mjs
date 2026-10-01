@@ -7,6 +7,7 @@
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { TABLESS_ACTIONS } from "../../bridge/routing.js";
 import { WebSocket } from "ws";
 import { readFileSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -48,11 +49,19 @@ const PORT = server.address().port;
 const BASE = `http://127.0.0.1:${PORT}`;
 const WS_URL = `ws://127.0.0.1:${PORT}/extension`;
 
+// A tab command must name its tab, so one that names none here is sent to tab 1: these tests are
+// about the transport, not which tab.
 async function post(action, params, client) {
+  const p =
+    TABLESS_ACTIONS.has(action) || !params || params.tabId != null || params.id != null
+      ? params
+      : { ...params, tabId: 1 };
   const res = await fetch(`${BASE}/command`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(client === undefined ? { action, params } : { action, params, client }),
+    body: JSON.stringify(
+      client === undefined ? { action, params: p } : { action, params: p, client }
+    ),
   });
   const data = await res.json().catch(() => ({}));
   return { status: res.status, data };
@@ -284,8 +293,8 @@ test("a second legacy socket coexists: it never disturbs the first one's in-flig
   assert.equal(data.result.value, 1);
   assert.equal(extB.readyState, WebSocket.OPEN);
 
-  // with two connections and no focus info, a command naming no browser is rejected
-  const { status, data: data2 } = await post("eval_js", {});
+  // with two connections, a command naming no browser (and no tab to find one by) is rejected
+  const { status, data: data2 } = await post("list_windows", {});
   assert.equal(status, 409);
   assert.equal(data2.code, "NEEDS_BROWSER");
 

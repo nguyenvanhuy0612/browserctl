@@ -23,7 +23,9 @@ export function createRegistry({ aliasFile }) {
   }
 
   // Matches a caller-given selector (alias, label, instanceId or browser type) against the
-  // connected entries, and picks a default when no selector is given at all.
+  // connected entries. With no selector, the sole connected browser is the default; with
+  // several there is none, because which window the user focused last says nothing about which
+  // browser a caller meant.
   function resolve(selector) {
     const all = list();
     if (!all.length) {
@@ -31,14 +33,10 @@ export function createRegistry({ aliasFile }) {
     }
     if (selector == null || selector === "") {
       if (all.length === 1) return { entry: all[0] };
-      const focused = all
-        .filter((e) => e.lastFocusedAt != null)
-        .sort((a, b) => b.lastFocusedAt - a.lastFocusedAt);
-      if (focused.length) return { entry: focused[0] };
       return selectorError(
         all,
         "NEEDS_BROWSER",
-        "several browsers are connected and none was focused yet; name one with 'browser'",
+        "several browsers are connected and the call names none; name one with 'browser'",
         all
       );
     }
@@ -66,8 +64,7 @@ export function createRegistry({ aliasFile }) {
         alias: legacy ? `legacy-${++legacySeq}` : aliasFor(instanceId, browserType || "chromium"),
         connectedAt: now,
         // A reconnect (same instanceId, a fresh service-worker) keeps whichever focus timestamp
-        // is more recent, so a restart never silently hands the "last focused" default to
-        // another browser.
+        // is more recent; it is reported by status and routes nothing.
         lastFocusedAt: legacy ? newFocusedAt : maxTimestamp(previousFocusedAt, newFocusedAt),
         legacy,
       };
