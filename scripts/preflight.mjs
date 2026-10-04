@@ -50,10 +50,8 @@ const paramsOf = (name) =>
 // skipped a missing path in silence, each reported a file count larger than what it actually read.
 // A guarded path that disappears shrinks the guard, so GUARDED_PATHS gets a gate of its own
 // instead of a quiet `continue`.
-// The spec states what is true now, so it is scanned like any shipping document in the source
-// repo. In the public clone, docs/internal/ is excluded by sync-public.sh, so SPEC only applies
-// where it exists (or in the source repo where its presence is mandatory).
-const IS_SOURCE_REPO = existsSync(join(ROOT, "scripts/sync-public.sh"));
+// The spec states what is true now, so it is scanned like any shipping document. docs/internal/ is
+// git-ignored and exists only on the owner's machine, so SPEC applies only where it exists.
 const SPEC = "docs/internal/tool-surface.md";
 const SURFACE_SOURCE = [
   "mcp/index.js",
@@ -68,7 +66,7 @@ const SURFACE_DOCS = [
   "docs/REFERENCE.md",
   "docs/INSTALL.md",
   "docs/TOOLS.md",
-  ...(IS_SOURCE_REPO || existsSync(join(ROOT, SPEC)) ? [SPEC] : []),
+  ...(existsSync(join(ROOT, SPEC)) ? [SPEC] : []),
 ];
 const GUARDED_PATHS = [...SURFACE_SOURCE, ...SURFACE_DOCS];
 

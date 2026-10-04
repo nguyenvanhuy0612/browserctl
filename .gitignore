@@ -24,3 +24,6 @@ improvements/
 
 # session case study: quotes a real person's contact details from the mail it read
 docs/history/case-study-gmail-*.md
+
+# design spec and backlog: private, kept on this machine only (not tracked); backup in ~/Backups
+docs/internal/

@@ -53,8 +53,8 @@ code within the scope of the task you were given.
 or removing an npm dependency, raising `AGENT_TEXT_BUDGET`, renaming or removing anything
 already public (a tool, a parameter, a result field).
 
-**Owner only, never on your own judgement:** `git commit`, `git push`, publishing, syncing
-to the public mirror, and choosing a release number. Approving a plan is not approving the
+**Owner only, never on your own judgement:** `git commit`, `git push`, publishing, and
+choosing a release number. Approving a plan is not approving the
 version number inside it.
 
 ## 5. Ground truth
