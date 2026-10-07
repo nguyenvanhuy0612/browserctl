@@ -264,16 +264,59 @@ VS Code uses a `servers` key, not `mcpServers`. In `.vscode/mcp.json` (workspace
 </details>
 
 <details>
-<summary>Windsurf</summary>
+<summary>Devin Desktop (formerly Windsurf)</summary>
 
-`~/.codeium/windsurf/mcp_config.json`. Add the standard entry.
+```bash
+devin mcp add -s user browserctl -- browserctl-mcp
+```
+
+Without `-s user` the entry goes to `.devin/mcp_config.local.json` in the current project.
+
+</details>
+
+<details>
+<summary>Gemini CLI</summary>
+
+```bash
+gemini mcp add -s user browserctl browserctl-mcp
+```
+
+Or add the standard entry to `~/.gemini/settings.json` (user) or `.gemini/settings.json`
+(project). Without `-s user`, `gemini mcp add` writes the project file.
+
+</details>
+
+<details>
+<summary>pi</summary>
+
+pi 0.99 and later support MCP natively:
+
+```bash
+pi mcp add browserctl -- browserctl-mcp
+```
+
+This writes `~/.pi/agent/mcp.json` (the standard entry); `-l` writes `.pi/mcp.json` in the
+project, read once the project is trusted. Check with `pi mcp list`, and run `/reload` in an open
+session. By default pi exposes MCP tools through its script sandbox ("codemode") rather than as
+tools the model calls directly; `"exposure": "direct"` in the entry changes that.
 
 </details>
 
 <details>
 <summary>Antigravity</summary>
 
-Agent panel > ... > MCP Servers > Manage MCP Servers > View raw config. Add the standard entry.
+Antigravity 2.0, Antigravity IDE and the Antigravity CLI (`agy`) share one config file, so one
+setup covers all three. From a terminal:
+
+```bash
+agy mcp add browserctl -- npx -y -p browserctl-mcp browserctl-mcp
+```
+
+This writes `~/.gemini/config/mcp_config.json` (`%USERPROFILE%\.gemini\config\mcp_config.json`
+on Windows). Without the CLI, add the standard entry to that file by hand; the MCP Store and the
+MCP Servers panel in the apps do not take a custom command. Check with `agy mcp list`, and
+refresh the MCP servers in an app that is already open. For one project only, add the entry to
+`.agents/mcp_config.json` in that project instead.
 
 </details>
 
