@@ -1270,7 +1270,9 @@ async function focusWindow({ id }) {
   return { id };
 }
 
-async function confirmNothingHappened(reply, tabId, urlBefore) {
+// A navigation that has not committed shows only in pendingUrl; one that was already pending
+// before the action (pendingBefore) is not the action's.
+async function confirmNothingHappened(reply, tabId, urlBefore, pendingBefore) {
   const eff = reply && reply.ok && reply.result && reply.result.effect;
   if (!eff || !eff.measured || eff.domMutated || eff.urlChanged || !urlBefore) return reply;
   const deadline = Date.now() + 800;
@@ -1279,6 +1281,22 @@ async function confirmNothingHappened(reply, tabId, urlBefore) {
     try {
       after = await chrome.tabs.get(tabId);
     } catch {}
+    const pending =
+      after &&
+      after.pendingUrl &&
+      after.pendingUrl !== urlBefore &&
+      after.pendingUrl !== pendingBefore &&
+      after.pendingUrl;
+    if (pending) {
+      eff.urlChanged = true;
+      eff.navigatedTo = pending;
+      delete reply.result.warning;
+      reply.result.note =
+        `this action started a navigation (${urlBefore} -> ${pending}) that had not committed ` +
+        `when it answered, so its mutation count describes the old document. Refs from before ` +
+        `it are gone once it loads — wait for the new page, then read it.`;
+      return reply;
+    }
     if (after && after.url && after.url !== urlBefore) {
       eff.urlChanged = true;
       eff.navigatedTo = after.url;
@@ -1409,12 +1427,14 @@ async function toContent(action, params, frameId = 0) {
   const tab = await targetTab(params);
   await wakeIfAsleep(tab);
   const urlBefore = tab.url;
+  const pendingBefore = tab.pendingUrl;
   const opts = { frameId };
   try {
     return await confirmNothingHappened(
       await chrome.tabs.sendMessage(tab.id, { action, params }, opts),
       tab.id,
-      urlBefore
+      urlBefore,
+      pendingBefore
     );
   } catch (_err) {
     let after = null;
@@ -1423,11 +1443,12 @@ async function toContent(action, params, frameId = 0) {
     } catch {}
     // A navigation the action started shows as a changed url, a pending url that has not
     // committed yet, or a tab that was loaded and is loading again.
-    const pendingBefore = tab.pendingUrl || urlBefore;
     const navigatedTo =
       after &&
       ((after.url && urlBefore && after.url !== urlBefore && after.url) ||
-        (after.pendingUrl && after.pendingUrl !== pendingBefore && after.pendingUrl) ||
+        (after.pendingUrl &&
+          after.pendingUrl !== (pendingBefore || urlBefore) &&
+          after.pendingUrl) ||
         (tab.status === "complete" &&
           after.status === "loading" &&
           (after.pendingUrl || after.url)));
@@ -1454,7 +1475,8 @@ async function toContent(action, params, frameId = 0) {
     return await confirmNothingHappened(
       await chrome.tabs.sendMessage(tab.id, { action, params }, opts),
       tab.id,
-      urlBefore
+      urlBefore,
+      pendingBefore
     );
   }
 }

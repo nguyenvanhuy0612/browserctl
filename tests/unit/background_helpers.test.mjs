@@ -76,6 +76,32 @@ test("a click that answered before its navigation committed is corrected, not le
   assert.match(out.result.note, /refs from before it are gone/i);
 });
 
+test("a click whose navigation has not committed yet is reported as navigating, not as nothing", async () => {
+  // A slow server (httpbin.org/delay/2): the tab stays 'loading' on the old url for the whole
+  // poll, with the new address only in pendingUrl.
+  const { fn } = load([
+    {
+      status: "loading",
+      url: "https://example.com/",
+      pendingUrl: "https://httpbin.org/delay/2",
+    },
+  ]);
+  const out = await fn(nothingHappened(), 1, "https://example.com/");
+  assert.equal(out.result.effect.urlChanged, true);
+  assert.equal(out.result.effect.navigatedTo, "https://httpbin.org/delay/2");
+  assert.ok(!out.result.warning, "a started navigation is not 'NOT confirmed'");
+  assert.match(out.result.note, /not committed/i);
+});
+
+test("a pendingUrl that was already there before the click is not credited to it", async () => {
+  const { fn } = load([
+    { status: "loading", url: "https://example.com/", pendingUrl: "https://slow.test/" },
+  ]);
+  const out = await fn(nothingHappened(), 1, "https://example.com/", "https://slow.test/");
+  assert.equal(out.result.effect.urlChanged, false);
+  assert.match(out.result.warning, /NOT confirmed/);
+});
+
 test("a click that really did nothing keeps its warning, and costs one tab read", async () => {
   const { fn, seen } = load([{ status: "complete", url: "https://example.com/" }]);
   const out = await fn(nothingHappened(), 1, "https://example.com/");
