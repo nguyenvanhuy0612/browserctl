@@ -37,7 +37,18 @@ test("CLI: prints help text when invoked with --help", async () => {
   assert.ok(stdout.includes("browserctl CLI"));
   assert.ok(stdout.includes("browserctl click"));
   assert.ok(stdout.includes("browserctl snapshot"));
-  assert.ok(stdout.includes("--compact"));
+  assert.ok(stdout.includes("--elements"));
+  assert.ok(!stdout.includes("--compact"), "the help must not offer the removed --compact");
+});
+
+test("CLI: --compact is refused with a pointer to --elements, before any bridge call", async () => {
+  for (const flag of ["--compact", "-c"]) {
+    const err = await execFileAsync(process.execPath, [cliPath, "snapshot", flag, "--no-daemon"], {
+      env: { ...process.env, BROWSERCTL_BRIDGE_URL: "http://127.0.0.1:1" },
+    }).catch((e) => e);
+    assert.equal(err.code, 2, `${flag} must exit 2, got ${err.code}`);
+    assert.match(err.stderr, /--elements/);
+  }
 });
 
 test("CLI: status supports --json and default human output", async () => {

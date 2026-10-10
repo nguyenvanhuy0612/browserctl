@@ -246,7 +246,7 @@
       !ownStateChanged
     ) {
       addWarning(
-        "the page did not change at all (0 mutations, same URL): treat this click as NOT confirmed and verify before continuing"
+        "the page did not change at all (0 mutations, same URL, control state unchanged): this click is NOT confirmed. Read the page again with browser_snapshot before repeating it; a handler that sends a request shows its result later (browser_wait_for)"
       );
     }
   }
@@ -1058,6 +1058,45 @@
     return { hoisted: elements.filter(isInput), listed: elements.filter((e) => !isInput(e)) };
   }
 
+  // The text a reader of the viewport sees: visible text nodes whose box meets the viewport, in
+  // document order, whitespace collapsed, up to MAX characters. A subtree whose box lies wholly
+  // outside the viewport is skipped without visiting its text.
+  function viewportText(max) {
+    if (!document.body || max <= 0) return "";
+    const vh = window.innerHeight || document.documentElement.clientHeight;
+    const vw = window.innerWidth || document.documentElement.clientWidth;
+    const meets = (r) => r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw;
+    const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
+    const walker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          if (node.nodeType === 3) return NodeFilter.FILTER_ACCEPT;
+          if (SKIP.has(node.tagName)) return NodeFilter.FILTER_REJECT;
+          const r = node.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0 && !meets(r)) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_SKIP;
+        },
+      }
+    );
+    const range = document.createRange();
+    const parts = [];
+    let length = 0;
+    for (let node = walker.nextNode(); node && length < max; node = walker.nextNode()) {
+      const value = node.textContent.replace(/\s+/g, " ").trim();
+      const parent = node.parentElement;
+      if (!value || !parent) continue;
+      if (!parent.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
+      range.selectNodeContents(node);
+      const r = range.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0 || !meets(r)) continue;
+      parts.push(value);
+      length += value.length + 1;
+    }
+    return parts.join(" ").slice(0, max);
+  }
+
   function snapshot(params = {}) {
     const maxText = params.maxText ?? 4000;
     const compact = !!params.compact;
@@ -1190,7 +1229,9 @@
       },
       elements,
       text: fromPage(
-        (document.body ? document.body.innerText : "").trim().replace(/\s+/g, " ")
+        scope === "viewport"
+          ? viewportText(maxText)
+          : (document.body ? document.body.innerText : "").trim().replace(/\s+/g, " ")
       ).slice(0, maxText),
     };
 
@@ -1850,7 +1891,7 @@
         `no element found with text matching "${q}"`,
         "ELEMENT_NOT_FOUND",
         { text: q },
-        "Run snapshot --compact to inspect available visible element labels or use a CSS selector."
+        "Run snapshot to inspect the visible element labels or use a CSS selector."
       );
     }
 
@@ -1891,7 +1932,7 @@
         `no input found with placeholder matching "${ph}"`,
         "ELEMENT_NOT_FOUND",
         { placeholder: ph },
-        "Run snapshot --compact to view available input placeholder attributes."
+        "Run snapshot to view the input placeholders."
       );
     }
 
@@ -2636,6 +2677,77 @@
     };
   }
 
+  // An autocomplete field: a combobox, a field inside one, or a field that declares a list of
+  // completions with aria-autocomplete. Typing into one opens a popup of [role=option] entries.
+  function suggestsCompletions(el) {
+    const ac = (el.getAttribute("aria-autocomplete") || "").toLowerCase();
+    if (ac === "list" || ac === "both") return true;
+    return !!el.closest('[role="combobox"]');
+  }
+
+  // The popups a field names through aria-controls or aria-owns, on itself or on the combobox
+  // that wraps it.
+  function suggestionRoots(el) {
+    const host = el.closest('[role="combobox"]');
+    const ids = [el, host]
+      .filter(Boolean)
+      .flatMap((n) => [n.getAttribute("aria-controls"), n.getAttribute("aria-owns")])
+      .join(" ")
+      .split(/\s+/)
+      .filter(Boolean);
+    return [...new Set(ids)].map((id) => document.getElementById(id)).filter(Boolean);
+  }
+
+  // The visible options offered for EL: every visible option inside the popup it names, or,
+  // when it names none, the visible options that were not in BEFORE (the options visible before
+  // the text went in), so a listbox already on the page is not taken for the field's suggestions.
+  function visibleSuggestions(el, before) {
+    const roots = suggestionRoots(el);
+    const pool = roots.length
+      ? roots.flatMap((r) => [...r.querySelectorAll('[role="option"]')])
+      : deepQueryAll('[role="option"]').filter((o) => !before.has(o));
+    return pool.filter((o) => isVisible(o) && !o.closest('[aria-hidden="true"]'));
+  }
+
+  // Resolves with the options an autocomplete field offers once the typed text has produced
+  // them: at once if a visible option is already one that was not there before, otherwise 30 ms
+  // after the first mutation that shows one, so the rest of the list can arrive, and at MAXMS
+  // with whatever is visible then — the earlier list, or nothing.
+  function awaitSuggestions(el, before, maxMs) {
+    const fresh = (list) => list.some((o) => !before.has(o));
+    const now = visibleSuggestions(el, before);
+    if (fresh(now) || maxMs <= 0) return Promise.resolve(now);
+    return new Promise((resolve) => {
+      let observer = null;
+      let debounce = null;
+      let cap = null;
+      const finish = () => {
+        if (observer) observer.disconnect();
+        observer = null;
+        clearTimeout(cap);
+        clearTimeout(debounce);
+        resolve(visibleSuggestions(el, before));
+      };
+      cap = setTimeout(finish, maxMs);
+      try {
+        observer = new MutationObserver(() => {
+          if (!debounce && fresh(visibleSuggestions(el, before))) debounce = setTimeout(finish, 30);
+        });
+        observer.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ["style", "class", "hidden", "aria-hidden", "aria-expanded"],
+        });
+      } catch {
+        finish();
+      }
+    });
+  }
+
+  const SUGGESTION_WAIT_MS = 300;
+  const SUGGESTIONS_LISTED = 8;
+
   function wait_settle({ timeoutMs = 150 } = {}) {
     const start = Date.now();
     return new Promise((resolve) => {
@@ -2681,6 +2793,39 @@
     });
   }
 
+  // The element that shows a click affordance for EL: EL itself or the nearest ancestor whose
+  // computed cursor is 'pointer', within MAXDEPTH levels and below <body>. A page that attaches
+  // its handler with addEventListener (React, Vue) leaves no attribute to find, but it almost
+  // always styles the clickable box with a pointer cursor.
+  function pointerAffordance(el, maxDepth = 8) {
+    let node = el;
+    for (let depth = 0; node && depth < maxDepth; depth++) {
+      if (node === document.body || node === document.documentElement) return null;
+      try {
+        if (getComputedStyle(node).cursor === "pointer") return node;
+      } catch {}
+      node = node.parentElement || (node.getRootNode && node.getRootNode().host) || null;
+    }
+    return null;
+  }
+
+  // Visible controls ordered by the gap between their box and EL's box, nearest first. The gap
+  // is 0 for boxes that touch or overlap, so a wide block of text is near the control under it.
+  function nearestControls(el, max = 3) {
+    const a = el.getBoundingClientRect();
+    const gap = (b) =>
+      Math.hypot(
+        Math.max(0, a.left - b.right, b.left - a.right),
+        Math.max(0, a.top - b.bottom, b.top - a.bottom)
+      );
+    return deepQueryAll(INTERACTIVE_SELECTOR)
+      .filter(isVisible)
+      .map((cand) => ({ cand, d: gap(cand.getBoundingClientRect()) }))
+      .sort((a, b) => a.d - b.d)
+      .slice(0, max)
+      .map(({ cand }) => cand);
+  }
+
   async function click({
     target,
     index,
@@ -2694,20 +2839,27 @@
     settleMs = 150,
   } = {}) {
     const el = resolveTarget({ target, index, ref, selector, text });
-    if (lastTextOnlyMatch === el) {
-      const nearby = deepQueryAll(INTERACTIVE_SELECTOR)
-        .filter(isVisible)
-        .slice(0, 3)
-        .map(
-          (cand) =>
-            `@${getOrAssignRef(cand)} (${cand.tagName.toLowerCase()}: ${elementText(cand).slice(0, 40)})`
-        );
+    // Text with no control around it is clicked where a pointer cursor marks a clickable box: the
+    // click goes to the text itself and bubbles to that box's handler, as a real one would.
+    const affordance = lastTextOnlyMatch === el ? pointerAffordance(el) : null;
+    if (affordance && el._resolved) {
+      el._resolved.clickableAncestor = {
+        ref: "@" + getOrAssignRef(affordance),
+        tag: affordance.tagName.toLowerCase(),
+        via: "cursor:pointer",
+      };
+    }
+    if (lastTextOnlyMatch === el && !affordance) {
+      const nearby = nearestControls(el).map(
+        (cand) =>
+          `@${getOrAssignRef(cand)} (${cand.tagName.toLowerCase()}: ${elementText(cand).slice(0, 40)})`
+      );
       throw createStructuredError(
-        `"${text || target}" was found only as plain text inside <${el.tagName.toLowerCase()}>, which has no click handler — clicking it would do nothing`,
+        `"${text || target}" was found only as plain text inside <${el.tagName.toLowerCase()}>, with no control, handler or pointer cursor around it — clicking it would do nothing`,
         "ELEMENT_NOT_INTERACTIVE",
         { text: text || target, tagName: el.tagName.toLowerCase(), ref: getOrAssignRef(el) },
         nearby.length > 0
-          ? `Use get_text on @${getOrAssignRef(el)} to read it, or click a real control such as: ${nearby.join(", ")}`
+          ? `Use get_text on @${getOrAssignRef(el)} to read it, or click the control nearest to it: ${nearby.join(", ")}`
           : `Use get_text on @${getOrAssignRef(el)} to read it. Run find_text to see the nearest interactive ancestor of this text.`
       );
     }
@@ -2796,7 +2948,7 @@
     }
     if (coveredInfo && coveredInfo.covered) {
       addWarning(
-        `element is covered by <${coveredInfo.coveredBy}> (@${coveredInfo.topRef}) — click event dispatched, but overlay may have intercepted it`
+        `element is covered at its centre by <${coveredInfo.coveredBy}> (@${coveredInfo.topRef}). The click was dispatched to the element itself, past it; if the click had no effect, the page is waiting on that overlay — close or answer @${coveredInfo.topRef} first, then click again`
       );
     } else if (warning) {
       addWarning(
@@ -2945,7 +3097,7 @@
     const hint =
       candidateInputs.length > 0
         ? `Target <${el.tagName.toLowerCase()}> is not an editable field. Try editable inputs in viewport: ${candidateInputs.join(", ")}`
-        : `Target <${el.tagName.toLowerCase()}> does not accept text input. Inspect snapshot --compact for input elements.`;
+        : `Target <${el.tagName.toLowerCase()}> does not accept text input. Inspect snapshot for input elements.`;
 
     throw createStructuredError(
       `target element is not editable (<${el.tagName.toLowerCase()}>)`,
@@ -2981,6 +3133,10 @@
     const urlBefore = location.href;
     el.scrollIntoView({ block: "center", inline: "center" });
     const mutations = startMutationCounter();
+    const completes = !submit && suggestsCompletions(el);
+    const optionsBefore = completes
+      ? new Set(deepQueryAll('[role="option"]').filter(isVisible))
+      : null;
     if (method !== "type" || !typeKeystrokes(el, text)) {
       insertIntoEditable(el, text, { paste: method === "paste" });
     }
@@ -3007,6 +3163,9 @@
     if (autoSettle && settleMs > 0) {
       await wait_settle({ timeoutMs: settleMs });
     }
+    const options = completes
+      ? await awaitSuggestions(el, optionsBefore, autoSettle ? SUGGESTION_WAIT_MS : 0)
+      : [];
     const typeMutations = mutations.stop();
     const out = {
       typed: target != null ? target : ref != null ? ref : selector || placeholder || index,
@@ -3020,6 +3179,15 @@
     };
     if ("value" in el) out.effect.valueNow = String(el.value ?? "").slice(0, 200);
     else if (el.isContentEditable) out.effect.textNow = String(el.textContent ?? "").slice(0, 200);
+    // The completions the field now offers, each a ref to click: picking one is what commits
+    // the value on most autocomplete widgets, and typed text alone often does not.
+    if (completes) {
+      out.effect.suggestions = options.slice(0, SUGGESTIONS_LISTED).map((o) => ({
+        ref: getOrAssignRef(o),
+        text: fullElementText(o).slice(0, 80),
+      }));
+      if (options.length > SUGGESTIONS_LISTED) out.effect.suggestionCount = options.length;
+    }
     if (warning)
       out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
     return out;

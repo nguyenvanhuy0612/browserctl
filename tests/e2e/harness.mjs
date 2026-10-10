@@ -68,7 +68,11 @@ export async function cmd(action, params = {}) {
     body: JSON.stringify({ action, params, client: CLIENT, ...(browser ? { browser } : {}) }),
   });
   const data = await res.json().catch(() => ({}));
-  if (!data.ok) throw new Error(`${action}: ${data.error || "HTTP " + res.status}`);
+  if (!data.ok) {
+    const err = new Error(`${action}: ${data.error || "HTTP " + res.status}`);
+    err.reply = data;
+    throw err;
+  }
   const r = data.result;
   if (r && typeof r === "object") {
     if (action === "new_tab" && r.id != null) ledger.tabs.add(r.id);
@@ -86,6 +90,16 @@ export async function cmdFail(action, params = {}) {
     await cmd(action, params);
   } catch (e) {
     return e.message;
+  }
+  throw new Error(`${action}: expected failure, but it succeeded`);
+}
+
+// The whole refusal of an action expected to fail: its code, error and recoveryHint.
+export async function cmdFailReply(action, params = {}) {
+  try {
+    await cmd(action, params);
+  } catch (e) {
+    return e.reply || { error: e.message };
   }
   throw new Error(`${action}: expected failure, but it succeeded`);
 }

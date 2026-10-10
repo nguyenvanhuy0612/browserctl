@@ -959,7 +959,9 @@ const TARGET_REDIRECT = {
 
 const PARAM_REDIRECTS = {
   browser_snapshot: {
-    mode: "browser_snapshot has no 'mode'. Use scope='viewport'|'all' for how much of the page, compact for how terse.",
+    mode: "browser_snapshot has no 'mode'. Use scope='viewport'|'all' for how much of the page, elements:true for the structured list.",
+    compact:
+      "the census is always compact. elements:true returns every element as structured JSON instead.",
   },
   browser_click: TARGET_REDIRECT,
   browser_type: TARGET_REDIRECT,
@@ -1294,7 +1296,7 @@ server.registerTool(
       "Every capability this server has, loaded or not, with its parameters.\n" +
       "Use it before assuming something is missing; browser_load_tools turns any of it on.",
     inputSchema: {
-      format: z.enum(["smart", "json", "pretty"]).optional().describe("Output format"),
+      format: z.enum(["json", "pretty", "smart"]).optional().describe("Output format."),
     },
   },
   async ({ format } = {}) => {
@@ -1458,7 +1460,7 @@ server.registerTool(
       "Whether the bridge is reachable, the daemon's state, and whether the Chrome extension is connected.\n" +
       "Call it when a command failed for a reason that sounds like infrastructure rather than the page; browser_start brings the daemon back.",
     inputSchema: {
-      format: z.enum(["smart", "json", "pretty"]).optional().describe("Output format"),
+      format: z.enum(["json", "pretty", "smart"]).optional().describe("Output format."),
     },
   },
   async ({ format } = {}) => {
@@ -1545,7 +1547,7 @@ server.registerTool(
     description:
       "A text census of the page's controls: one line per element with a stable 'ref' to act on, in reading order. Start here to see what is on a page.\n" +
       "scope: 'viewport' (default) or 'all' \u2014 every element currently in the DOM, worth it whenever a COUNT or a COMPLETE list is the answer. 'all' is not everything the page can show: feeds and virtualised lists keep most rows out of the DOM until something is clicked, and 'hiddenContent' names the control that loads them.\n" +
-      "In compact mode key inputs and search fields are hoisted to the top, and dense repetitive runs are folded; each folded control comes back in 'folded' as {ref, text, href}. What it withheld comes back as data: window/next (paging), offscreenCount, foldedCount, duplicateCount, structure (a ref per region), pageState.openDialogs, hiddenContent.\n" +
+      "The census hoists key inputs and search fields to the top, and dense repetitive runs are folded; each folded control comes back in 'folded' as {ref, text, href}. What it withheld comes back as data: window/next (paging), offscreenCount, foldedCount, duplicateCount, structure (a ref per region), pageState.openDialogs, hiddenContent.\n" +
       "It does NOT carry pixel geometry, class names or attributes: browser_extract({selector, fields}) returns those for every match.",
     inputSchema: {
       scope: z
@@ -1554,16 +1556,13 @@ server.registerTool(
         .describe(
           "'viewport' (default) = on-screen elements only. 'all' = every element currently in the DOM (NOT every row the page could load). Use 'all' for counts and complete lists; it typically costs only 3-35% more than viewport."
         ),
-      compact: z
+      elements: z
         .boolean()
         .optional()
         .describe(
-          "Compact census (default true). Passing false returns every element as structured JSON in 'elements' instead — it is not a larger census."
+          "true returns every element as structured JSON in 'elements' instead of the census (default false) — it is not a larger census."
         ),
-      format: z
-        .enum(["smart", "compact", "json", "pretty", "raw"])
-        .optional()
-        .describe("Output formatting: 'smart' (default, compact tree), 'json', 'pretty', or 'raw'"),
+      format: z.enum(["json", "pretty", "smart", "raw"]).optional().describe("Output format."),
       maxText: z
         .number()
         .int()
@@ -1581,11 +1580,8 @@ server.registerTool(
         .describe("Continue a paged census: pass the 'next' value the previous response returned."),
     },
   },
-  tool("snapshot", async ({ scope, compact, format, maxText, limit, cursor }) => {
-    const isCompact =
-      format === "compact" || format === "smart" || format === undefined
-        ? compact !== false
-        : compact;
+  tool("snapshot", async ({ scope, elements, format, maxText, limit, cursor }) => {
+    const isCompact = elements !== true;
     const res = await callBridge("snapshot", {
       scope: scope || "viewport",
       compact: isCompact,
@@ -1737,6 +1733,7 @@ server.registerTool(
     description:
       "Put text into any editable target — input, textarea, contenteditable, or rich-text editor.\n" +
       "method: 'set' (default, native setters so React and Vue see it) | 'type' | 'paste' (for large payloads and AST editors).\n" +
+      "On an autocomplete field, effect.suggestions lists the options the text opened, each with a ref to click: picking one is what commits the value.\n" +
       "For a <select> dropdown, use browser_select_option.",
     inputSchema: z
       .object({
@@ -1786,7 +1783,7 @@ server.registerTool(
   {
     title: "Fill multiple form fields",
     description:
-      "Fill several form fields in one round-trip. On failure, stops and reports the failed index and which fields were already written.\n" +
+      "Set several form controls in one round-trip: text fields, checkboxes, radios and <select>s. On failure, stops and reports the failed index and which fields were already written.\n" +
       "Optionally clicks submitTarget afterwards.",
     inputSchema: {
       fields: z
@@ -1795,7 +1792,11 @@ server.registerTool(
             target: z
               .union([z.string(), z.number().int()])
               .describe("Field target (ref, CSS selector, placeholder, or text)"),
-            value: z.string().describe("Text value to fill into this field"),
+            value: z
+              .string()
+              .describe(
+                "Text for a text field; 'true' or 'false' for a checkbox or radio; an option's value or visible text for a <select>"
+              ),
             method: z
               .enum(["set", "type", "paste"])
               .optional()
@@ -2232,10 +2233,7 @@ server.registerTool(
       "For reading text or attributes without writing JS, prefer 'browser_get_property' or 'browser_extract'.",
     inputSchema: {
       expression: z.string().describe("JavaScript expression to evaluate"),
-      format: z
-        .enum(["smart", "json", "pretty", "raw"])
-        .optional()
-        .describe("Output formatting: 'json' (default), 'smart', 'pretty', or 'raw'"),
+      format: z.enum(["json", "pretty", "smart", "raw"]).optional().describe("Output format."),
     },
   },
   tool("evaluate", async ({ expression, format }) =>

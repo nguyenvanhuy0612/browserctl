@@ -1,4 +1,4 @@
-# Tool surface as it actually is — generated 2026-09-30, browserctl 0.9.3
+# Tool surface as it actually is — generated 2026-10-10, browserctl 0.9.3
 
 Generated from the running server (`server._registeredTools`), not written by hand — the last
 hand-written version of this list claimed `all` on a tool that did not have it.
@@ -13,7 +13,7 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 | `status` | format | [SESSION] Whether the bridge is reachable, the daemon's state, and whether the Chrome extension is connected. |
 | `start` | (none) | [SESSION] Start the bridge daemon if it is not running. It starts itself on demand, so this is rarely needed. |
 | `stop` | (none) | [SESSION] Stop the local browserctl bridge daemon. DO NOT call this to tidy up when a task is finished — |
-| `snapshot` | scope, compact, format, maxText, limit, cursor | [READ] A text census of the page's controls: one line per element with a stable 'ref' to act on, in reading order. Start here to see what is on a page. |
+| `snapshot` | scope, elements, format, maxText, limit, cursor | [READ] A text census of the page's controls: one line per element with a stable 'ref' to act on, in reading order. Start here to see what is on a page. |
 | `read_page` | mode, depth, target, maxChars, format | [READ] The accessibility tree as indented text — which control sits inside which group, form or region — with a ref on each interactive element. Structure, not prose. |
 | `find` | query, selector, in, regex, contextChars, max, format | [READ] Find things on the page and get a ref back for each. in: 'controls' (default) matches interactive elements by accessible name, text, placeholder, aria-label or title, and 'matchedBy' says which of those hit; in: 'text' searches the page's prose instead and each match carries 'nearestInteractive'. |
 | `extract` | *selector, fields, max, format | [READ] Extract structured rows from repeating containers without writing JavaScript. |
@@ -21,7 +21,7 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 | `get_property` | target, property, attr, format | [READ] Read an element's text, value, HTML, box, an attribute, or how many match. |
 | `click` | *target, doubleClick, button, waitFor, autoSettle, settleMs, format | [ACT] Click an element by 'target' (ref '@ref_1', CSS selector, visible text, or snapshot index). |
 | `type` | *target, *text, method, submit, waitFor, autoSettle, settleMs, format | [ACT] Put text into any editable target — input, textarea, contenteditable, or rich-text editor. |
-| `fill_form` | *fields, submitTarget, format | [ACT] Fill several form fields in one round-trip. On failure, stops and reports the failed index and which fields were already written. |
+| `fill_form` | *fields, submitTarget, format | [ACT] Set several form controls in one round-trip: text fields, checkboxes, radios and <select>s. On failure, stops and reports the failed index and which fields were already written. |
 | `select_option` | *target, values, value, option, label, format | [ACT] Select one or more options in a <select> element. Values are matched by value first, then by visible label. |
 | `press_key` | *key, target, modifiers, allowSynthetic, format | [ACT] Send a key, or a chord with modifiers, to an element or to whatever has focus. |
 | `scroll` | direction, amount, target, format | [ACT] Scroll the page, or a specific container when the window itself does not move — a drawer, a table, an overflow:auto div. |

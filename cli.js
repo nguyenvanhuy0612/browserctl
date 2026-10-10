@@ -141,7 +141,8 @@ Formatting & Global Flags:
   -r, --raw                             Output raw unformatted value (for piping)
   --json                                Force compact valid JSON output
   --pretty                              Force 2-space indented pretty JSON output
-  -c, --compact                         Output compact token-efficient representation
+  --elements                            snapshot: every element as structured JSON instead of
+                                         the census
   -f, --full, --fullpage                Capture fullpage screenshot
   -t, --tab <id>                        Direct this one command to a tab ID, in whichever browser
                                          has it (a tab another session holds can only be read,
@@ -493,7 +494,7 @@ async function main() {
   let jsonOutput = false;
   let prettyOutput = false;
   let rawOutput = false;
-  let compactMode = false;
+  let elementsMode = false;
   let fullpageMode = false;
   let autoDaemon = true;
   let forceTake = false;
@@ -513,8 +514,13 @@ async function main() {
       prettyOutput = true;
     } else if (a === "-r" || a === "--raw") {
       rawOutput = true;
+    } else if (a === "--elements") {
+      elementsMode = true;
     } else if (a === "-c" || a === "--compact") {
-      compactMode = true;
+      console.error(
+        `${a}: the snapshot census is always compact; --elements returns every element as structured JSON instead`
+      );
+      process.exit(2);
     } else if (a === "-f" || a === "--full" || a === "--fullpage") {
       fullpageMode = true;
     } else if (a === "--force") {
@@ -757,7 +763,7 @@ async function main() {
         break;
 
       case "snapshot":
-        if (compactMode || (!jsonOutput && !prettyOutput)) params.compact = true;
+        params.compact = !elementsMode;
         if (rawArgs.includes("--all")) params.scope = "all";
         if (args[0] && /^\d+$/.test(args[0])) params.maxText = parseInt(args[0], 10);
         for (let i = 0; i < rawArgs.length; i++) {

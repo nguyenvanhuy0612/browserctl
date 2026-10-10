@@ -1,6 +1,8 @@
-// browser_snapshot against a stub bridge that answers with a fixed snapshot: a compact answer
-// drops 'elements' and passes on the 'folded' list the extension built; compact:false keeps
-// 'elements'.
+// browser_snapshot against a stub bridge that answers with a fixed snapshot: the default answer
+// is the census, drops 'elements' and passes on the 'folded' list the extension built;
+// elements:true keeps 'elements'. The output format never decides which: format 'json' (the
+// default) and 'pretty' answer the same census as no format at all. 'compact' is not a parameter
+// and is refused, never read as elements:false.
 import http from "node:http";
 
 const census = [
@@ -28,11 +30,16 @@ const snap = {
     { ref: "f2:ref_9", text: "In frame", href: "/f", frame: "https://ads.test/frame" },
   ],
 };
+const sent = [];
 const stub = http.createServer((req, res) => {
   res.writeHead(200, { "content-type": "application/json" });
   if (req.url === "/status") return res.end(JSON.stringify({ ok: true }));
-  req.resume();
-  req.on("end", () => res.end(JSON.stringify({ ok: true, result: snap })));
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", () => {
+    sent.push(JSON.parse(body).params);
+    res.end(JSON.stringify({ ok: true, result: snap }));
+  });
 });
 await new Promise((r) => stub.listen(0, "127.0.0.1", r));
 process.env.BROWSERCTL_BRIDGE_URL = "http://127.0.0.1:" + stub.address().port;
@@ -54,8 +61,24 @@ const one = compact.folded[0];
 if (one.text !== "Story one" || one.href !== "/item?id=1") fail("a folded entry lost its fields: " + JSON.stringify(one));
 if (compact.folded[1].frame !== "https://ads.test/frame") fail("a folded control keeps its frame");
 
-const full = JSON.parse((await call({ compact: false })).content[0].text);
-if (!Array.isArray(full.elements) || full.elements.length !== 4) fail("compact:false must keep every element");
+const full = JSON.parse((await call({ elements: true })).content[0].text);
+if (!Array.isArray(full.elements) || full.elements.length !== 4) fail("elements:true must keep every element");
+
+if (sent.at(-1).compact !== false) fail("elements:true must ask the extension for the full list");
+
+for (const format of ["json", "pretty"]) {
+  const out = JSON.parse((await call({ format })).content[0].text);
+  if ("elements" in out) fail(`format '${format}' must not change compactness: 'elements' came back`);
+  if (sent.at(-1).compact !== true) fail(`format '${format}' must ask the extension for a compact census`);
+}
+const fullJson = JSON.parse((await call({ format: "json", elements: true })).content[0].text);
+if (!Array.isArray(fullJson.elements)) fail("format 'json' with elements:true must keep every element");
+
+const sentBefore = sent.length;
+const refused = await call({ compact: false });
+if (!refused.isError || !/elements/.test(refused.content[0].text))
+  fail("'compact' must be refused with a pointer to 'elements': " + JSON.stringify(refused));
+if (sent.length !== sentBefore) fail("a refused 'compact' must not reach the bridge");
 
 const smart = (await call({ format: "smart" })).content[0].text;
 if (!smart.includes("[@ref_1]")) fail("the smart rendering lost the census");

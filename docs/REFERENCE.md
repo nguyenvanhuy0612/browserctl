@@ -144,8 +144,8 @@ because a reload loses any unsaved input on that page.
 
 ### browser_snapshot
 - scope: 'viewport' (default) or 'all' elements in DOM.
-- compact: Compact representation folding repetitive items.
-- maxText: Maximum text length for element labels.
+- elements: true returns every element as structured JSON in 'elements' instead of the census.
+- maxText: Maximum characters of page text in 'text' (default 4000). With scope 'viewport' it is the text on screen; with 'all', the whole page.
 - limit: Maximum number of elements to include in census.
 - cursor: Offset cursor for paged snapshot traversal.
 - format: Output format.
@@ -217,6 +217,10 @@ in `browser_snapshot` under `pageState.openDialogs` and close with a `browser_cl
 - settleMs: Milliseconds to wait during auto settle.
 - format: Output format.
 
+Text with no control around it is clicked when it, or an ancestor, shows a pointer cursor;
+`resolved.clickableAncestor` names that ancestor. Otherwise the click is refused and the hint
+lists the controls nearest to the text.
+
 ### browser_type
 - target: Target element.
 - text: Text to type into target.
@@ -227,8 +231,13 @@ in `browser_snapshot` under `pageState.openDialogs` and close with a `browser_cl
 - settleMs: Settling timeout in milliseconds.
 - format: Output format.
 
+On an autocomplete field (a combobox, or `aria-autocomplete` list/both) without `submit`, the
+result's `effect.suggestions` lists up to 8 visible options the text opened as `{ref, text}`, and
+`effect.suggestionCount` gives the total when there are more. Click a suggestion's ref to commit
+the value.
+
 ### browser_fill_form
-- fields: Array of field descriptors containing target and value.
+- fields: Array of field descriptors containing target and value. The value is text for a text field, 'true' or 'false' for a checkbox or radio, and an option's value or visible text for a <select>.
 - submitTarget: Optional target of submit button to click after filling.
 - format: Output format.
 

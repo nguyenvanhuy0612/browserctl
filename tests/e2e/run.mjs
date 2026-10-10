@@ -20,6 +20,7 @@ import { dirname, join, basename } from "node:path";
 import {
   BRIDGE,
   cmd,
+  cmdFailReply,
   cmdFail,
   assert,
   test,
@@ -256,6 +257,32 @@ async function main() {
       }
     });
 
+    // The description promises checkboxes and <select>s, not only text fields, so both are
+    // asserted against the real DOM: 'true'/'false' sets a checkbox, a visible option text picks
+    // that option.
+    await test("fill_form: a checkbox and a <select> in the same call as a text field", async () => {
+      const opt = await cmd("eval_js", {
+        expression: "(()=>{const s=document.getElementById('sel');return s.options[s.options.length-1].text})()",
+      });
+      const r = await cmd("fill_form", {
+        fields: [
+          { target: "css=#plain", value: "with-controls" },
+          { target: "css=#cbox", value: "true" },
+          { target: "css=#sel", value: opt.value },
+        ],
+      });
+      assert(r.filled.length === 3, `filled = ${r.filled.length}`);
+      const st = await cmd("eval_js", {
+        expression:
+          "(()=>{const s=document.getElementById('sel');return [document.getElementById('cbox').checked,s.options[s.selectedIndex].text]})()",
+      });
+      assert(st.value[0] === true, `checkbox not checked: ${JSON.stringify(st.value)}`);
+      assert(st.value[1] === opt.value, `select = ${JSON.stringify(st.value[1])}, want ${opt.value}`);
+      await cmd("fill_form", { fields: [{ target: "css=#cbox", value: "false" }] });
+      const off = await cmd("eval_js", { expression: "document.getElementById('cbox').checked" });
+      assert(off.value === false, "value 'false' must uncheck the checkbox");
+    });
+
     // The contract from the design: stop at the first failure, keep what was already
     // written, and name the index. Asserted against the real DOM, not the response shape.
     await test("fill_form: stops at the first bad field and keeps what it already wrote", async () => {
@@ -370,6 +397,169 @@ async function main() {
         v.value === "world",
         `controlled input reverted (value=${JSON.stringify(v.value)}) — native setter fix regressed`
       );
+    });
+    await test("snapshot: a viewport snapshot's text is the text on screen, 'all' is the page's", async () => {
+      await cmd("eval_js", {
+        expression: `(()=>{
+          const on=document.createElement('div'); on.id='vt-on'; on.textContent='ONSCREEN-MARKER';
+          on.style.cssText='position:fixed;top:4px;left:4px;z-index:9';
+          const off=document.createElement('div'); off.id='vt-off'; off.textContent='OFFSCREEN-MARKER';
+          off.style.cssText='position:absolute;top:20000px;left:0';
+          const hid=document.createElement('div'); hid.id='vt-hid'; hid.textContent='HIDDEN-MARKER';
+          hid.style.cssText='position:fixed;top:30px;left:4px;visibility:hidden';
+          document.body.append(on,off,hid); return true;
+        })()`,
+      });
+      try {
+        const vp = await cmd("snapshot", { scope: "viewport", compact: true });
+        assert(vp.text.includes("ONSCREEN-MARKER"), "viewport text lost the text on screen");
+        assert(!vp.text.includes("OFFSCREEN-MARKER"), "viewport text carries text below the fold");
+        assert(!vp.text.includes("HIDDEN-MARKER"), "viewport text carries hidden text");
+        const all = await cmd("snapshot", { scope: "all", compact: true });
+        assert(all.text.includes("OFFSCREEN-MARKER"), "scope 'all' must keep the whole page's text");
+        const none = await cmd("snapshot", { scope: "viewport", compact: true, maxText: 0 });
+        assert(none.text === "", `maxText 0 must give no text: ${JSON.stringify(none.text)}`);
+      } finally {
+        await cmd("eval_js", {
+          expression: "['vt-on','vt-off','vt-hid'].forEach(id=>document.getElementById(id)?.remove()), true",
+        });
+      }
+    });
+
+    // Text with no control around it. A card whose click handler is attached with
+    // addEventListener, as React and Vue attach theirs, shows only a pointer cursor; a click on
+    // its text must reach that handler. Text with nothing clickable around it is refused, and the
+    // hint names the control nearest to it, not the first controls on the page.
+    await test("click: text inside a pointer-cursor card reaches the card's listener", async () => {
+      await cmd("eval_js", {
+        expression: `(()=>{
+          const card=document.createElement('div'); card.id='pc-card'; card.style.cursor='pointer';
+          card.innerHTML='<div><span>Open card QZX</span></div>';
+          card.addEventListener('click',()=>{window.__cardClicked=(window.__cardClicked||0)+1;card.dataset.opened='1';});
+          const lone=document.createElement('p'); lone.id='pc-lone'; lone.textContent='Lonely text WVY';
+          const near=document.createElement('button'); near.id='pc-near'; near.textContent='Near button';
+          document.body.prepend(card, lone, near); window.__cardClicked=0; return true;
+        })()`,
+      });
+      try {
+        const r = await cmd("click", { target: "Open card QZX" });
+        const n = await cmd("eval_js", { expression: "window.__cardClicked" });
+        assert(n.value === 1, `the card's listener ran ${n.value} times`);
+        assert(
+          r.resolved?.clickableAncestor?.via === "cursor:pointer",
+          `the result must say where the click affordance came from: ${JSON.stringify(r.resolved)}`
+        );
+        const raw = await cmdFailReply("click", { target: "Lonely text WVY" });
+        assert(!raw.ok && /plain text/.test(raw.error), `plain text must still be refused: ${JSON.stringify(raw)}`);
+        assert(/Near button/.test(raw.recoveryHint || ""), `the hint must name the nearest control: ${raw.recoveryHint}`);
+      } finally {
+        await cmd("eval_js", {
+          expression: "['pc-card','pc-lone','pc-near'].forEach(id=>document.getElementById(id)?.remove()), true",
+        });
+      }
+    });
+
+    // An overlay over the target: the dispatched click still reaches the target, and the
+    // warning names the overlay's ref as the thing to close, not a vague "may have intercepted".
+    await test("click: a covered target is clicked, and the warning names the overlay to close", async () => {
+      await cmd("eval_js", {
+        expression: `(()=>{
+          const b=document.createElement('button'); b.id='cv-btn'; b.textContent='Covered target';
+          b.style.cssText='position:fixed;top:200px;left:200px;width:160px;height:40px;z-index:5';
+          b.addEventListener('click',()=>{window.__cv=(window.__cv||0)+1;});
+          const o=document.createElement('div'); o.id='cv-ov';
+          o.style.cssText='position:fixed;top:180px;left:180px;width:220px;height:80px;z-index:6;background:rgba(0,0,0,.3)';
+          document.body.append(b,o); window.__cv=0; return true;
+        })()`,
+      });
+      try {
+        const r = await cmd("click", { target: "#cv-btn" });
+        const n = await cmd("eval_js", { expression: "window.__cv" });
+        assert(n.value === 1, `the covered button's listener ran ${n.value} times`);
+        assert(/covered at its centre by <div> \(@ref_\d+\)/.test(r.warning || ""), `warning: ${r.warning}`);
+        assert(/close or answer @ref_\d+ first/.test(r.warning), `the warning must name what to close: ${r.warning}`);
+        assert(!/may have intercepted/.test(r.warning), "the old vague wording is back");
+      } finally {
+        await cmd("eval_js", { expression: "['cv-btn','cv-ov'].forEach(id=>document.getElementById(id)?.remove()), true" });
+      }
+    });
+
+    // Autocomplete fields. The widgets are built per test and removed after it, so nothing else
+    // on the fixture page sees them. Options arrive 120 ms after the input event, the way a
+    // suggestion request answers, and type must wait for them rather than report none.
+    const buildAutocomplete = (id, { controls, delayMs = 120, staticOption = false } = {}) =>
+      cmd("eval_js", {
+        expression: `(()=>{
+          const box=document.createElement('div'); box.id='${id}';
+          box.innerHTML='<input id="${id}-in" role="combobox" aria-autocomplete="list" placeholder="${id} city"'+
+            (${controls} ? ' aria-controls="${id}-list"' : '')+'><ul id="${id}-list" role="listbox"></ul>'+
+            (${staticOption} ? '<div role="listbox"><div role="option">Always here</div></div>' : '');
+          document.body.prepend(box);
+          const input=box.querySelector('input'), list=box.querySelector('ul');
+          input.addEventListener('input',()=>setTimeout(()=>{
+            if (${delayMs} < 0) return;
+            list.innerHTML=['Zurich','Zug','Zermatt'].filter(c=>c.toLowerCase().startsWith(input.value.toLowerCase()))
+              .map(c=>'<li role="option" onclick="document.getElementById(\\'${id}-in\\').value=this.textContent">'+c+'</li>').join('');
+          }, Math.max(0, ${delayMs})));
+          return true;
+        })()`,
+      });
+    const removeAutocomplete = (id) =>
+      cmd("eval_js", { expression: `document.getElementById('${id}')?.remove(), true` });
+
+    await test("type into an autocomplete field returns the suggestions it opened", async () => {
+      await buildAutocomplete("ac1", { controls: true });
+      try {
+        const r = await cmd("fill", { target: "#ac1-in", text: "Z" });
+        const s = r.effect.suggestions;
+        assert(Array.isArray(s), `no suggestions on an autocomplete field: ${JSON.stringify(r.effect)}`);
+        assert(
+          s.map((o) => o.text).join(",") === "Zurich,Zug,Zermatt",
+          `suggestions = ${JSON.stringify(s)}`
+        );
+        assert(s.every((o) => /^(f\d+:)?ref_\d+$/.test(o.ref)), `each suggestion needs a ref: ${JSON.stringify(s)}`);
+        await cmd("click", { target: "@" + s[1].ref });
+        const v = await cmd("eval_js", { expression: "document.getElementById('ac1-in').value" });
+        assert(v.value === "Zug", `clicking the suggestion ref did not pick it (value=${JSON.stringify(v.value)})`);
+      } finally {
+        await removeAutocomplete("ac1");
+      }
+    });
+    await test("type: suggestions without aria-controls are the options the text produced", async () => {
+      await buildAutocomplete("ac2", { controls: false, staticOption: true });
+      try {
+        const r = await cmd("fill", { target: "#ac2-in", text: "Zu" });
+        const texts = (r.effect.suggestions || []).map((o) => o.text);
+        assert(texts.join(",") === "Zurich,Zug", `a listbox already on the page leaked in: ${JSON.stringify(texts)}`);
+      } finally {
+        await removeAutocomplete("ac2");
+      }
+    });
+    await test("type: an autocomplete with nothing to offer answers an empty list, bounded", async () => {
+      await buildAutocomplete("ac3", { controls: true, delayMs: -1 });
+      try {
+        const t0 = Date.now();
+        const r = await cmd("fill", { target: "#ac3-in", text: "Q" });
+        const ms = Date.now() - t0;
+        assert(
+          Array.isArray(r.effect.suggestions) && r.effect.suggestions.length === 0,
+          `expected an empty list: ${JSON.stringify(r.effect.suggestions)}`
+        );
+        assert(ms < 2000, `waiting for suggestions that never come took ${ms} ms`);
+      } finally {
+        await removeAutocomplete("ac3");
+      }
+    });
+    await test("type: a plain field and a submitted one carry no suggestions", async () => {
+      const plain = await cmd("fill", { target: "#plain", text: "x" });
+      assert(!("suggestions" in plain.effect), `plain input: ${JSON.stringify(plain.effect)}`);
+      await buildAutocomplete("ac4", { controls: true });
+      try {
+        const r = await cmd("fill", { target: "#ac4-in", text: "Z", submit: true });
+        assert(!("suggestions" in r.effect), `submit:true still waited for suggestions: ${JSON.stringify(r.effect)}`);
+      } finally {
+        await removeAutocomplete("ac4");
+      }
     });
     // A native <dialog> is the standard modal, and it is the case dismiss used to fail:
     // showModal() closes on Escape only for a TRUSTED event, so the dispatched one never
