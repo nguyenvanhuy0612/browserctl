@@ -3,6 +3,31 @@
 One entry per published version. The reasoning and measurements behind each change are in the
 commit history and on the GitHub release.
 
+## 0.9.4
+
+A snapshot names what you ask for and nothing twice: `only` lists just the fields, buttons or
+links, a viewport snapshot's text is the text on screen, and a page with iframes returns one
+census.
+
+- **BREAKING:** `browser_snapshot` takes `elements: true` for the structured list; `compact` is
+  refused with a pointer to it, and the output format no longer decides which is returned.
+  `format` is `json`, `pretty` or `smart`; `compact` and `raw` are gone. CLI: `--elements`
+  replaces `-c`/`--compact`, and `snapshot --json` answers the census.
+- **BREAKING:** a page with iframes answers one `census` with every frame in it; `compactView` is
+  gone. Folded controls come back as one line each, `@ref "text" -> href`. `hiddenContent` kinds
+  are `load-more`, `collapsed` and `scrollable-region`; tabs are tagged in the census instead, and
+  collapsed menus no longer push a real "Show more" out of the list.
+- `browser_snapshot` `only: ["fields", "buttons", "links"]` lists just those kinds and leaves the
+  page text out unless `maxText` is set (CLI `--only`). With scope `"viewport"`, `text` is the
+  visible text on screen. The `smart` format carries every field the JSON does.
+- `browser_type`: on an autocomplete field, `effect.suggestions` lists the options the text
+  opened, each with a ref.
+- `browser_click`: plain text inside a box with a pointer cursor is clicked
+  (`resolved.clickableAncestor`); a refusal names the controls nearest to the text, and the
+  covered and did-not-change warnings name the next step.
+- `browser_fill_form`: the description states it sets checkboxes, radios and selects.
+  Load-more detection reads "Xem thêm", "Hiện thêm" and "Tải thêm".
+
 ## 0.9.3
 
 A session's tab is its own: no other agent, and no CLI call, can act on it, and a click in another

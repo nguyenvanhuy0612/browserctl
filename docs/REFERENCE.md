@@ -1,4 +1,4 @@
-# browserctl Core Tool Reference — v0.9.3
+# browserctl Core Tool Reference — v0.9.4
 
 browserctl provides 25 core tools (69 tools across all profiles) for web automation and agent inspection.
 
@@ -144,11 +144,16 @@ because a reload loses any unsaved input on that page.
 
 ### browser_snapshot
 - scope: 'viewport' (default) or 'all' elements in DOM.
+- only: List only these kinds of control: 'fields' (inputs, selects, checkboxes, radios), 'buttons', 'links'. Page text is left out unless maxText is passed.
 - elements: true returns every element as structured JSON in 'elements' instead of the census.
 - maxText: Maximum characters of page text in 'text' (default 4000). With scope 'viewport' it is the text on screen; with 'all', the whole page.
 - limit: Maximum number of elements to include in census.
 - cursor: Offset cursor for paged snapshot traversal.
-- format: Output format.
+- format: Output format: 'json' (default), 'pretty' or 'smart'.
+
+The result's `folded` lists folded controls one per line as `@ref "text" -> href`.
+`hiddenContent` entries have `kind` `load-more`, `collapsed` or `scrollable-region`. On a page with
+iframes, `census` already includes every frame.
 
 ### browser_read_page
 - mode: Inspection mode.

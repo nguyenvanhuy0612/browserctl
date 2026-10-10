@@ -156,7 +156,7 @@ async function main() {
     await test("an open dialog is reported, addressable, and dismissable", async () => {
       await cmd("click", { selector: "#dlgopen" });
       const snap = await cmd("snapshot", { compact: true, maxText: 0 });
-      const line = (snap.compactView || "")
+      const line = (snap.census || "")
         .split("\n")
         .find((l) => /Active Modal|Open dialog/.test(l));
       assert(line, "an open <dialog> must be reported by the census");
@@ -482,6 +482,29 @@ async function main() {
       } finally {
         await cmd("eval_js", { expression: "['cv-btn','cv-ov'].forEach(id=>document.getElementById(id)?.remove()), true" });
       }
+    });
+
+    // 'only' narrows the census to the kinds of control asked for, and leaves the page text out
+    // unless maxText asks for it. Every listed line must be of a requested kind.
+    await test("snapshot only: fields, buttons and links each list just their kind", async () => {
+      const lines = (snap) => (snap.census || "").split("\n").filter((l) => /^\s*\[@/.test(l));
+      const isField = (l) =>
+        /<(input|textarea|select)>/.test(l) && !/\[type=(button|submit|reset|image)\]/.test(l);
+      const fields = await cmd("snapshot", { scope: "all", compact: true, only: ["fields"] });
+      assert(lines(fields).length > 0, "no fields listed");
+      assert(lines(fields).every(isField), `a non-field line: ${lines(fields).find((l) => !isField(l))}`);
+      assert(JSON.stringify(fields.only) === '["fields"]', `the result must echo 'only': ${fields.only}`);
+      assert(fields.text === "", `page text must be left out by default: ${JSON.stringify(fields.text).slice(0, 60)}`);
+      const links = await cmd("snapshot", { scope: "all", compact: true, only: ["links"] });
+      assert(lines(links).length > 0 && lines(links).every((l) => /<a>/.test(l)), "a non-link line under only links");
+      const both = await cmd("snapshot", { scope: "all", compact: true, only: ["fields", "buttons"], maxText: 200 });
+      assert(!lines(both).some((l) => /<a>/.test(l) && !/\[button\]/.test(l)), "a link listed under fields+buttons");
+      assert(both.text.length > 0, "maxText must bring the page text back");
+      const full = await cmd("snapshot", { scope: "all", compact: true });
+      assert(
+        (fields.census || "").length + (links.census || "").length <= (full.census || "").length + 400,
+        "the filtered census must not be larger than the full one"
+      );
     });
 
     // Autocomplete fields. The widgets are built per test and removed after it, so nothing else

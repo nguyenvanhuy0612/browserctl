@@ -223,8 +223,8 @@ async function runSingleTest(site, testIndex, total) {
 
     const vpCount = vpSnapRes.result.elements?.length || 0;
     const allCount = allSnapRes.result.elements?.length || 0;
-    const vpTextLen = (vpSnapRes.result.compactView || vpSnapRes.result.census)?.length || 0;
-    const allTextLen = (allSnapRes.result.compactView || allSnapRes.result.census)?.length || 0;
+    const vpTextLen = vpSnapRes.result.census?.length || 0;
+    const allTextLen = allSnapRes.result.census?.length || 0;
 
     const tokenReductionPct = allTextLen > 0
       ? Math.max(0, Math.round(((allTextLen - vpTextLen) / allTextLen) * 100))

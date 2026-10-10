@@ -1580,12 +1580,12 @@ function mergeFrameResults(action, parts, params = {}, errors = []) {
       elements,
       ...(folded.length ? { folded } : {}),
     };
-    const topView = top.result.compactView || top.result.census;
+    const topView = top.result.census;
     if (topView) {
       const sections = [topView];
       let extraFrames = 0;
       for (const { fr, result } of parts) {
-        const partView = result.compactView || result.census;
+        const partView = result.census;
         if (fr.frameId === 0 || !partView) continue;
         const body = partView
           .split("\n")
@@ -1610,7 +1610,7 @@ function mergeFrameResults(action, parts, params = {}, errors = []) {
         sections.push(
           `[Notice: ${extraFrames} sub-frame${extraFrames > 1 ? "s" : ""} listed above with frame-qualified refs. Page totals: ${elements.length} elements, ${offscreenCount} offscreen]`
         );
-        res.compactView = sections.join("\n");
+        res.census = sections.join("\n");
       }
     } else if (params.compact) {
       res.compactNote =

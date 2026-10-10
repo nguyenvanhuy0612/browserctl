@@ -269,6 +269,7 @@ function loadHiddenContentHints() {
     refCounter: 0,
     refMap: {},
     reverseRefMap: new WeakMap(),
+    REF_SWEEP_EVERY: 2000,
   };
   return loadFromContentJs(slices, ["hiddenContentHints"], ctx);
 }
@@ -329,6 +330,58 @@ test("hiddenContentHints: an unlabelled control is never reported", () => {
   const el = fakeEl({ text: "", attrs: { "aria-expanded": "false" } });
   const { more } = hiddenContentHints([el]);
   assert.equal(more.length, 0);
+});
+
+test("hiddenContentHints: a collapsed disclosure is 'collapsed', not load-more", () => {
+  const { hiddenContentHints } = loadHiddenContentHints();
+  const el = fakeEl({ text: "Products", attrs: { "aria-expanded": "false" } });
+  const { more, collapsed } = hiddenContentHints([el]);
+  assert.equal(more.length, 0);
+  assert.equal(collapsed.length, 1);
+  assert.equal(collapsed[0].text, "Products");
+});
+
+test("hiddenContentHints: collapsed controls do not crowd a real load-more out of the list", () => {
+  const { hiddenContentHints } = loadHiddenContentHints();
+  const menus = ["HTML", "CSS", "JavaScript", "Web APIs", "Products"].map((text) =>
+    fakeEl({ text, attrs: { "aria-expanded": "false" } })
+  );
+  const { more, collapsed } = hiddenContentHints([...menus, fakeEl({ text: "Show more results" })]);
+  assert.equal(more.map((m) => m.text).join("|"), "Show more results");
+  assert.equal(collapsed.length, 4, "collapsed controls are capped on their own");
+});
+
+test("hiddenContentHints: the end of a repeated run needs a load-more word, not any 'View X'", () => {
+  const { hiddenContentHints } = loadHiddenContentHints();
+  const parent = runParent(6);
+  const run = (last) => [
+    ...["Posts", "About", "Friends", "Photos", "Reels"].map((text) => fakeEl({ text, parent })),
+    last,
+  ];
+  const cover = hiddenContentHints(run(fakeEl({ text: "View profile cover photo", parent })));
+  assert.equal(cover.more.length, 0, "'View profile cover photo' is a link, not more rows");
+  const everyone = hiddenContentHints(run(fakeEl({ text: "See everyone", parent })));
+  assert.equal(everyone.more.length, 1, "'See everyone' at the end of a run loads the rest");
+});
+
+test("hiddenContentHints: a collapsed 'More' ending a run is a collapsed menu, not load-more", () => {
+  const { hiddenContentHints } = loadHiddenContentHints();
+  const parent = runParent(6);
+  const els = [
+    ...["Posts", "About", "Friends", "Photos", "Reels"].map((text) => fakeEl({ text, parent })),
+    fakeEl({ text: "More", parent, attrs: { "aria-expanded": "false" } }),
+  ];
+  const { more, collapsed } = hiddenContentHints(els);
+  assert.equal(more.length, 0);
+  assert.equal(collapsed.length, 1);
+});
+
+test("hiddenContentHints: Vietnamese load-more labels are recognised", () => {
+  const { hiddenContentHints } = loadHiddenContentHints();
+  for (const text of ["Hiện thêm", "Xem thêm bình luận", "Tải thêm"]) {
+    const { more } = hiddenContentHints([fakeEl({ text })]);
+    assert.equal(more.length, 1, text);
+  }
 });
 
 // =====================================================================================
@@ -1733,4 +1786,61 @@ test("click effect: an element outside any label still gets the did-not-change w
   const out = quietEffect();
   applyClickState(out, clickStateOf(div), clickStateOf(div));
   assert.match(out.warning || "", /did not change/);
+});
+
+// =====================================================================================
+// controlKind — the categories browser_snapshot's 'only' filter keeps
+// =====================================================================================
+
+function loadControlKind() {
+  return loadFromContentJs(
+    [extractConst(SRC, "FIELD_ROLES"), extractFunction(SRC, "controlKind")],
+    ["controlKind"]
+  );
+}
+
+const ctl = (tag, { type, role, editable = false } = {}) => ({
+  tagName: tag,
+  type,
+  isContentEditable: editable,
+  getAttribute: (a) => (a === "role" ? (role ?? null) : null),
+});
+
+test("controlKind: inputs, selects, checkboxes and editable regions are fields", () => {
+  const { controlKind } = loadControlKind();
+  for (const el of [
+    ctl("INPUT", { type: "text" }),
+    ctl("INPUT", { type: "password" }),
+    ctl("INPUT", { type: "checkbox" }),
+    ctl("INPUT", { type: "radio" }),
+    ctl("TEXTAREA"),
+    ctl("SELECT"),
+    ctl("DIV", { editable: true }),
+    ctl("DIV", { role: "combobox" }),
+    ctl("DIV", { role: "switch" }),
+  ]) {
+    assert.equal(controlKind(el), "fields", `${el.tagName} ${el.type || el.getAttribute("role") || ""}`);
+  }
+});
+
+test("controlKind: pressable controls are buttons, whatever their tag", () => {
+  const { controlKind } = loadControlKind();
+  for (const el of [
+    ctl("BUTTON"),
+    ctl("INPUT", { type: "submit" }),
+    ctl("SUMMARY"),
+    ctl("DIV", { role: "button" }),
+    ctl("A", { role: "button" }),
+    ctl("DIV", { role: "tab" }),
+    ctl("LI", { role: "menuitem" }),
+    ctl("DIV", { role: "option" }),
+  ]) {
+    assert.equal(controlKind(el), "buttons", `${el.tagName} ${el.getAttribute("role") || ""}`);
+  }
+});
+
+test("controlKind: anchors and role=link are links", () => {
+  const { controlKind } = loadControlKind();
+  assert.equal(controlKind(ctl("A")), "links");
+  assert.equal(controlKind(ctl("SPAN", { role: "link" })), "links");
 });

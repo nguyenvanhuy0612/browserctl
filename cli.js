@@ -92,6 +92,7 @@ Navigation & Tabs:
 
 Inspection & Query (get):
   browserctl snapshot [--all]           Capture interactive DOM elements (--all = everything in the DOM)
+    [--only fields,buttons,links]        List only these kinds of control; page text is left out
   browserctl read_page [mode] [--depth N] [--max-chars N] [--ref @ref_1]
                                         Read accessibility tree & text (mode: interactive | all)
   browserctl get text <target>          Get visible text of element (@e1, ref_1, selector)
@@ -495,6 +496,7 @@ async function main() {
   let prettyOutput = false;
   let rawOutput = false;
   let elementsMode = false;
+  let onlyKinds = null;
   let fullpageMode = false;
   let autoDaemon = true;
   let forceTake = false;
@@ -516,6 +518,19 @@ async function main() {
       rawOutput = true;
     } else if (a === "--elements") {
       elementsMode = true;
+    } else if (a === "--only" || a.startsWith("--only=")) {
+      const kinds = String(a === "--only" ? (rawArgs[++i] ?? "") : a.slice(7))
+        .split(",")
+        .map((k) => k.trim())
+        .filter(Boolean);
+      const bad = kinds.filter((k) => !["fields", "buttons", "links"].includes(k));
+      if (!kinds.length || bad.length) {
+        console.error(
+          `--only takes fields, buttons and/or links, comma-separated${bad.length ? ` (not ${bad.join(", ")})` : ""}`
+        );
+        process.exit(2);
+      }
+      onlyKinds = kinds;
     } else if (a === "-c" || a === "--compact") {
       console.error(
         `${a}: the snapshot census is always compact; --elements returns every element as structured JSON instead`
@@ -765,6 +780,7 @@ async function main() {
       case "snapshot":
         params.compact = !elementsMode;
         if (rawArgs.includes("--all")) params.scope = "all";
+        if (onlyKinds) params.only = onlyKinds;
         if (args[0] && /^\d+$/.test(args[0])) params.maxText = parseInt(args[0], 10);
         for (let i = 0; i < rawArgs.length; i++) {
           const m = /^--cursor(?:=(.*))?$/.exec(rawArgs[i]);
@@ -1206,7 +1222,7 @@ async function main() {
     }
 
     if (action === "snapshot") {
-      if (result?.compactView || result?.census) {
+      if (result?.census) {
         console.log(`Page: ${result.title || "Untitled"} (${result.url})`);
         if (result.viewport) {
           const vh = result.viewport.height || 0;
@@ -1228,7 +1244,7 @@ async function main() {
           console.log(`Interactive elements (${visible}${folded}):`);
         }
         if (result.structure) console.log(`Structure: ${result.structure}`);
-        console.log(`\n${result.census || result.compactView}`);
+        console.log(`\n${result.census}`);
 
         const notes = [];
         if (result.window && result.next !== undefined) {
@@ -1250,15 +1266,17 @@ async function main() {
               .slice(0, 40)}" (@${h.ref})`;
           const bits = [];
           const more = hidden.filter((h) => h.kind === "load-more");
-          const tabs = hidden.filter((h) => h.kind === "tab");
+          const collapsed = hidden.filter((h) => h.kind === "collapsed");
           const regions = hidden.filter((h) => h.kind === "scrollable-region");
           if (more.length) bits.push(`loads more on click: ${more.map(label).join(", ")}`);
-          if (tabs.length) bits.push(`filter tabs: ${tabs.map(label).join(", ")}`);
           for (const r of regions)
             bits.push(`a scrollable region with ~${r.hiddenPx}px below the fold (@${r.ref})`);
-          notes.push(
-            `${bits.join("; ")} — rows behind these are not in the DOM, so no scope setting reveals them`
-          );
+          if (bits.length)
+            notes.push(
+              `${bits.join("; ")} — rows behind these are not in the DOM, so no scope setting reveals them`
+            );
+          if (collapsed.length)
+            notes.push(`collapsed, expand to read: ${collapsed.map(label).join(", ")}`);
         }
         for (const d of result.pageState?.openDialogs || []) {
           notes.push(

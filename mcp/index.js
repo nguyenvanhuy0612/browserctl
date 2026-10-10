@@ -526,16 +526,60 @@ function text(obj, format) {
 
 // A compact snapshot answers with the census alone: the structured 'elements' repeat what the
 // census lines already say. The controls the census folds into a summary line arrive from the
-// extension in 'folded', each with its ref, text and href.
+// extension in 'folded' as {ref, text, href, frame}; they go to the agent as one census-style
+// line each, '@ref "text" -> href (frame url)', every field kept and none of the JSON keys.
 function compactSnapshot(res) {
   if (!res || typeof res.census !== "string" || !Array.isArray(res.elements)) return res;
   const { elements: _elements, ...rest } = res;
+  if (Array.isArray(rest.folded)) rest.folded = rest.folded.map(foldedLine).join("\n");
   return rest;
+}
+
+function foldedLine(f) {
+  let line = refTag(f.ref);
+  if (f.text) line += " " + JSON.stringify(f.text);
+  if (f.href) line += " -> " + f.href;
+  if (f.frame) line += ` (frame ${f.frame})`;
+  return line;
 }
 
 // A ref as the census writes it, whether the reader returned it with its '@' or without.
 function refTag(ref) {
   return "@" + String(ref).replace(/^@/, "");
+}
+
+// Everything a snapshot carries beside its census, as lines under it, so the smart rendering
+// answers with the same data as the JSON: the region map, paging, folded controls, hidden
+// content, open dialogs and the page text.
+function snapshotNotes(obj) {
+  const out = [];
+  if (obj.structure) out.push(`Structure: ${obj.structure}`);
+  if (obj.next !== undefined && obj.next !== null) {
+    const w = obj.window || {};
+    out.push(
+      `More: ${w.shown ?? "?"} of ${w.inScope ?? "?"} listed from ${w.offset ?? 0}; pass cursor: ${obj.next} for the rest.`
+    );
+  }
+  if (obj.duplicateCount) out.push(`${obj.duplicateCount} duplicate link(s) suppressed.`);
+  const folded = Array.isArray(obj.folded) ? obj.folded.map(foldedLine).join("\n") : obj.folded;
+  if (folded) out.push(`Folded:\n${folded}`);
+  const label = (h) => `"${String(h.text || "").replace(/\s+/g, " ")}" (${refTag(h.ref)})`;
+  for (const [kind, title] of [
+    ["load-more", "Loads more on click"],
+    ["collapsed", "Collapsed, expand to read"],
+  ]) {
+    const hits = (obj.hiddenContent || []).filter((h) => h.kind === kind);
+    if (hits.length) out.push(`${title}: ${hits.map(label).join(", ")}`);
+  }
+  for (const r of (obj.hiddenContent || []).filter((h) => h.kind === "scrollable-region"))
+    out.push(`Scrollable region with ~${r.hiddenPx}px below the fold (${refTag(r.ref)})`);
+  const dialogs = obj.pageState?.openDialogs || [];
+  if (dialogs.length)
+    out.push(
+      `Open dialogs: ${dialogs.map((d) => label({ text: d.label, ref: d.ref })).join(", ")}`
+    );
+  if (obj.text) out.push(`Page text: ${obj.text}`);
+  return out.length ? "\n\n" + out.join("\n") : "";
 }
 
 function textRaw(obj, format = "json") {
@@ -569,7 +613,7 @@ function textRaw(obj, format = "json") {
     };
   }
 
-  const rendered = obj?.compactView || obj?.census;
+  const rendered = obj?.census;
   if (rendered) {
     const vh = obj.viewport?.height || 0;
     const sy = obj.viewport?.scrollY || 0;
@@ -591,7 +635,7 @@ function textRaw(obj, format = "json") {
     } else {
       header += `Interactive elements (${visible}${folded}):\n\n`;
     }
-    return { content: [{ type: "text", text: header + rendered }] };
+    return { content: [{ type: "text", text: header + rendered + snapshotNotes(obj) }] };
   }
   if ((obj?.all === true || obj?.extracted !== undefined) && Array.isArray(obj.matches)) {
     const fmt = (v) => {
@@ -884,7 +928,7 @@ const SHARED_PARAMS = `EVERY TOOL ALSO TAKES
           to use your target tab. Lets several agents drive different tabs at once. tab_id is the
           snake_case alias; prefer tabId.
   format  'json' (default, compact) | 'pretty' (indented) | 'smart' (human-readable rendering) |
-          'raw' (the bare value).`;
+          'raw' (the bare value, where a tool has one; browser_snapshot has none).`;
 
 const GROUP_SECTION = Object.entries(GROUP_NOTE)
   .map(([g, note]) => `[${g}] ${note}`)
@@ -1547,27 +1591,34 @@ server.registerTool(
     description:
       "A text census of the page's controls: one line per element with a stable 'ref' to act on, in reading order. Start here to see what is on a page.\n" +
       "scope: 'viewport' (default) or 'all' \u2014 every element currently in the DOM, worth it whenever a COUNT or a COMPLETE list is the answer. 'all' is not everything the page can show: feeds and virtualised lists keep most rows out of the DOM until something is clicked, and 'hiddenContent' names the control that loads them.\n" +
-      "The census hoists key inputs and search fields to the top, and dense repetitive runs are folded; each folded control comes back in 'folded' as {ref, text, href}. What it withheld comes back as data: window/next (paging), offscreenCount, foldedCount, duplicateCount, structure (a ref per region), pageState.openDialogs, hiddenContent.\n" +
-      "It does NOT carry pixel geometry, class names or attributes: browser_extract({selector, fields}) returns those for every match.",
+      "The census hoists key inputs and search fields to the top, and dense repetitive runs are folded; each folded control comes back in 'folded' as a line '@ref \"text\" -> href'. What it withheld comes back as data: window/next (paging), offscreenCount, foldedCount, duplicateCount, structure (a ref per region), pageState.openDialogs, hiddenContent.\n" +
+      "It does NOT carry pixel geometry, class names or attributes: browser_extract({selector, fields}) returns those for every match, and is cheaper for a list's data.",
     inputSchema: {
       scope: z
         .enum(["viewport", "all"])
         .optional()
         .describe(
-          "'viewport' (default) = on-screen elements only. 'all' = every element currently in the DOM (NOT every row the page could load). Use 'all' for counts and complete lists; it typically costs only 3-35% more than viewport."
+          "'viewport' (default) = on-screen only. 'all' = every element in the DOM, for counts and complete lists; several times larger on a long page."
+        ),
+      only: z
+        .array(z.enum(["fields", "buttons", "links"]))
+        .min(1)
+        .optional()
+        .describe(
+          "List only these kinds, for a small read: 'fields' take a value (inputs, selects, checkboxes, radios), 'buttons' are pressed (buttons, tabs, menu items), 'links' navigate. A login form: ['fields','buttons']. Page text is omitted unless maxText is set."
         ),
       elements: z
         .boolean()
         .optional()
-        .describe(
-          "true returns every element as structured JSON in 'elements' instead of the census (default false) — it is not a larger census."
-        ),
-      format: z.enum(["json", "pretty", "smart", "raw"]).optional().describe("Output format."),
+        .describe("true: every element as structured JSON in 'elements' instead of the census."),
+      format: z.enum(["json", "pretty", "smart"]).optional().describe("Output format."),
       maxText: z
         .number()
         .int()
         .optional()
-        .describe("Max characters of page body text to include (default 4000)"),
+        .describe(
+          "Max characters of page text: the text on screen with scope 'viewport' (default 4000; 0 with only)"
+        ),
       limit: z
         .number()
         .int()
@@ -1580,11 +1631,12 @@ server.registerTool(
         .describe("Continue a paged census: pass the 'next' value the previous response returned."),
     },
   },
-  tool("snapshot", async ({ scope, elements, format, maxText, limit, cursor }) => {
+  tool("snapshot", async ({ scope, only, elements, format, maxText, limit, cursor }) => {
     const isCompact = elements !== true;
     const res = await callBridge("snapshot", {
       scope: scope || "viewport",
       compact: isCompact,
+      ...(only ? { only } : {}),
       maxText,
       limit,
       cursor,

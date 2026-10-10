@@ -100,8 +100,7 @@ const main = async () => {
   }
 
   const snap = (await call("snapshot", { scope: "all", compact: true, maxText: 0 })).result || {};
-  // compactView exists only when sub-frames were merged in; census is the single-frame view.
-  const cv = snap.compactView || snap.census || "";
+  const cv = snap.census || "";
   const tree = ((await call("read_page", { mode: "interactive" })).result || {}).tree || "";
 
   console.log(

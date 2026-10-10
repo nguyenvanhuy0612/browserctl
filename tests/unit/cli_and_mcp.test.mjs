@@ -41,6 +41,16 @@ test("CLI: prints help text when invoked with --help", async () => {
   assert.ok(!stdout.includes("--compact"), "the help must not offer the removed --compact");
 });
 
+test("CLI: snapshot --only refuses a kind it does not know, before any bridge call", async () => {
+  for (const args of [["--only", "images"], ["--only=fields,images"], ["--only"]]) {
+    const err = await execFileAsync(process.execPath, [cliPath, "snapshot", ...args, "--no-daemon"], {
+      env: { ...process.env, BROWSERCTL_BRIDGE_URL: "http://127.0.0.1:1" },
+    }).catch((e) => e);
+    assert.equal(err.code, 2, `${args.join(" ")} must exit 2, got ${err.code}`);
+    assert.match(err.stderr, /fields, buttons and\/or links/);
+  }
+});
+
 test("CLI: --compact is refused with a pointer to --elements, before any bridge call", async () => {
   for (const flag of ["--compact", "-c"]) {
     const err = await execFileAsync(process.execPath, [cliPath, "snapshot", flag, "--no-daemon"], {
@@ -563,7 +573,7 @@ test("MCP: unloaded capabilities are advertised, and browser_action lists its ca
         return res.end(JSON.stringify({ ok: true, result: {
           url: "https://example.com", title: "Example", scope: "viewport",
           viewport: { width: 800, height: 600, scrollY: 0, scrollHeight: 600, scrollPercent: 0 },
-          elements: [], compactView: "  [@ref_1] <button> \\"Go\\"",
+          elements: [], census: "  [@ref_1] <button> \\"Go\\"",
         } }));
       });
     });
@@ -753,7 +763,7 @@ test("Snapshot notices name what was withheld and flag load-on-demand content", 
   const bg = await fs.readFile(join(__dirname, "..", "..", "extension", "background.js"), "utf8");
   assert.ok(!/compactLines\.push\(`\[Quick Actions/.test(bg),
     "F41: background.js must not rebuild a flat compact view — every real page has iframes, and the rebuild discarded landmarks, folding and every notice");
-  assert.ok(/top\.result\.compactView/.test(bg) && /frame-qualified/.test(bg),
+  assert.ok(/top\.result\.census/.test(bg) && /frame-qualified/.test(bg),
     "F41: sub-frame views must be appended with frame-qualified refs, not flattened into one");
 });
 
@@ -934,7 +944,7 @@ test("A census leads with the page's shape, and says what it folded (F55)", asyn
 test("Load-more detection needs a phrase, not a bare nav word (F47)", async () => {
   const fs = await import("node:fs/promises");
   const content = await fs.readFile(join(__dirname, "..", "..", "extension", "content.js"), "utf8");
-  const m = content.match(/const LOAD_MORE_RE = (\/.*?\/i);/);
+  const m = content.match(/const LOAD_MORE_RE =\s*(\/.*?\/[a-z]+);/);
   assert.ok(m, "LOAD_MORE_RE must be a literal regex");
   const LOAD_MORE_RE = eval(m[1]);
   const s3m = content.match(/(\/\^\(more\|older[^\n]*?\/i)\.test\(\s*t\s*\)/);
@@ -1724,7 +1734,7 @@ test("Snapshot is paged, and the frame merge cannot drop what it was not taught 
       req.on("end", () => {
         calls.push(JSON.parse(body));
         res.writeHead(200, {"content-type":"application/json"});
-        res.end(JSON.stringify({ ok: true, result: { compactView: "x", window: { offset: 8, shown: 8, inScope: 226 }, next: 16 } }));
+        res.end(JSON.stringify({ ok: true, result: { census: "x", window: { offset: 8, shown: 8, inScope: 226 }, next: 16 } }));
       });
     });
     await new Promise((r) => stub.listen(0, "127.0.0.1", r));

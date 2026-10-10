@@ -1,19 +1,15 @@
 // Multi-frame e2e regression suite for browserctl.
 //
-// tests/e2e/run.mjs's page (testpage.html) is single-frame apart from one cross-origin
-// iframe used only for the frame-routing tests — it never exercises the compact-view
-// MERGE path with a page that also has landmark grouping, key-input hoisting,
-// repetitive-run folding, duplicate-link suppression, a long-label truncation hint, an
-// open-but-not-blocking dialog, a React-portal (zero-size wrapper) panel, or a
-// menuitemradio-built menu. That blind spot let a severe defect ship silently:
-// extension/background.js's snapshot merge had `if (top.result.compactView && parts.length
-// === 1)` — so ANY page with an iframe (i.e. every real site) discarded the content
-// script's compact view and rebuilt a flat one, losing every feature above. All 42
-// tests on the single-frame page stayed green throughout.
+// A snapshot of a page with iframes is the top frame's census with each sub-frame's census
+// appended under frame-qualified refs, all in 'census'. run.mjs's page has one cross-origin
+// iframe used only for frame routing, so the merge itself is exercised here: landmark grouping,
+// key-input hoisting, repetitive-run folding, duplicate-link suppression, a long-label
+// truncation hint, an open-but-not-blocking dialog, a React-portal (zero-size wrapper) panel and
+// a menuitemradio-built menu must all survive it.
 //
 // This suite drives a purpose-built multi-frame fixture (multiframe.html + a same-origin
 // child document) through the REAL bridge -> extension -> Chrome stack, the same way
-// run.mjs does, and asserts the compact view/read_page tree still carry every one of
+// run.mjs does, and asserts the census and the read_page tree still carry every one of
 // those features once a second frame is in play.
 //
 // Prereqs: same as run.mjs — bridge running (`browserctl start` or `npm start`) and the
@@ -103,35 +99,40 @@ async function main() {
     await test("snapshot(compact, scope=all) succeeds on a multi-frame page", async () => {
       snap = await cmd("snapshot", { compact: true, scope: "all" });
       assert(
-        typeof snap.compactView === "string" && snap.compactView.length > 0,
-        "no compactView returned"
+        typeof snap.census === "string" && snap.census.length > 0,
+        "no census returned"
       );
+    });
+
+    await test("the merged census is the only copy: sub-frames in 'census', no 'compactView'", async () => {
+      assert(!("compactView" in snap), "a second copy of the census came back as compactView");
+      assert(/\[iframe f\d+ /.test(snap.census), "the sub-frame's census is not appended to 'census'");
     });
 
     await test("compact view keeps landmark grouping (not rebuilt flat)", async () => {
       assert(
-        /\[Header \/ Banner\]/.test(snap.compactView),
+        /\[Header \/ Banner\]/.test(snap.census),
         "missing [Header / Banner] landmark header"
       );
-      assert(/\[Navigation\]/.test(snap.compactView), "missing [Navigation] landmark header");
+      assert(/\[Navigation\]/.test(snap.census), "missing [Navigation] landmark header");
     });
 
     await test("compact view keeps hoisted key-inputs block", async () => {
       assert(
-        /\[Key Inputs & Search Fields\]/.test(snap.compactView),
+        /\[Key Inputs & Search Fields\]/.test(snap.census),
         "missing [Key Inputs & Search Fields] block"
       );
-      const idx = snap.compactView.indexOf("[Key Inputs & Search Fields]");
+      const idx = snap.census.indexOf("[Key Inputs & Search Fields]");
       assert(
-        idx >= 0 && /Search site/.test(snap.compactView.slice(idx, idx + 300)),
+        idx >= 0 && /Search site/.test(snap.census.slice(idx, idx + 300)),
         "key-inputs block missing the hoisted search field"
       );
     });
 
     await test("compact view keeps repetitive-run folding (5 identical Remove buttons)", async () => {
       assert(
-        /folded 3 repetitive <button> "Remove"/.test(snap.compactView),
-        `no folded-run line found:\n${snap.compactView}`
+        /folded 3 repetitive <button> "Remove"/.test(snap.census),
+        `no folded-run line found:\n${snap.census}`
       );
     });
 
@@ -147,7 +148,7 @@ async function main() {
       // `<a> "View Details"` listing form specifically — not on the substring anywhere in
       // the page, which would also catch the unrelated "(row: ...)" context annotations
       // the Remove-button run picks up; see the report for that separate finding.)
-      const count = (snap.compactView.match(/<a> "View Details"/g) || []).length;
+      const count = (snap.census.match(/<a> "View Details"/g) || []).length;
       assert(count === 1, `expected exactly 1 "View Details" anchor row, found ${count}`);
     });
 
@@ -169,7 +170,7 @@ async function main() {
       );
       assert(
         new RegExp(`\\[\\+${el.textTruncatedBy} chars: get text @${el.ref}\\]`).test(
-          snap.compactView
+          snap.census
         ),
         "compact view missing the truncation-hint annotation for the long label"
       );
@@ -185,22 +186,22 @@ async function main() {
         `open dialog not reported: ${JSON.stringify(snap.pageState && snap.pageState.openDialogs)}`
       );
       assert(
-        /\[Open dialog: "Notifications"/.test(snap.compactView),
+        /\[Open dialog: "Notifications"/.test(snap.census),
         "compact view missing the open-dialog line"
       );
       assert(
-        !/\[Active Modal\/Drawer:/.test(snap.compactView),
+        !/\[Active Modal\/Drawer:/.test(snap.census),
         "non-blocking dialog was reported as a blocking Active Modal/Drawer"
       );
     });
 
     await test("sub-frame content is appended under an [iframe f<id> ...] header, not merged flat", async () => {
       assert(
-        /\[iframe f\d+ /.test(snap.compactView),
-        `missing [iframe f<id> ...] section header:\n${snap.compactView}`
+        /\[iframe f\d+ /.test(snap.census),
+        `missing [iframe f<id> ...] section header:\n${snap.census}`
       );
       assert(
-        /f\d+:ref_\d+/.test(snap.compactView),
+        /f\d+:ref_\d+/.test(snap.census),
         "no frame-qualified ref (f<id>:ref_N) found in compact view"
       );
     });
@@ -209,7 +210,7 @@ async function main() {
       // There used to be a guidance footer, and the merge could emit one per frame. Results
       // are data now: the census is page content and nothing else, so the invariant is
       // stronger and simpler — no footer, from any frame.
-      const strays = snap.compactView.match(/\[(Quick Actions|Next|More):/g) || [];
+      const strays = snap.census.match(/\[(Quick Actions|Next|More):/g) || [];
       assert(strays.length === 0, `the census must carry no advice, found: ${strays.join(", ")}`);
     });
 

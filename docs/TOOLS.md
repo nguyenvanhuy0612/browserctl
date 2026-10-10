@@ -1,4 +1,4 @@
-# Tool surface as it actually is — generated 2026-10-10, browserctl 0.9.3
+# Tool surface as it actually is — generated 2026-10-10, browserctl 0.9.4
 
 Generated from the running server (`server._registeredTools`), not written by hand — the last
 hand-written version of this list claimed `all` on a tool that did not have it.
@@ -13,7 +13,7 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 | `status` | format | [SESSION] Whether the bridge is reachable, the daemon's state, and whether the Chrome extension is connected. |
 | `start` | (none) | [SESSION] Start the bridge daemon if it is not running. It starts itself on demand, so this is rarely needed. |
 | `stop` | (none) | [SESSION] Stop the local browserctl bridge daemon. DO NOT call this to tidy up when a task is finished — |
-| `snapshot` | scope, elements, format, maxText, limit, cursor | [READ] A text census of the page's controls: one line per element with a stable 'ref' to act on, in reading order. Start here to see what is on a page. |
+| `snapshot` | scope, only, elements, format, maxText, limit, cursor | [READ] A text census of the page's controls: one line per element with a stable 'ref' to act on, in reading order. Start here to see what is on a page. |
 | `read_page` | mode, depth, target, maxChars, format | [READ] The accessibility tree as indented text — which control sits inside which group, form or region — with a ref on each interactive element. Structure, not prose. |
 | `find` | query, selector, in, regex, contextChars, max, format | [READ] Find things on the page and get a ref back for each. in: 'controls' (default) matches interactive elements by accessible name, text, placeholder, aria-label or title, and 'matchedBy' says which of those hit; in: 'text' searches the page's prose instead and each match carries 'nearestInteractive'. |
 | `extract` | *selector, fields, max, format | [READ] Extract structured rows from repeating containers without writing JavaScript. |

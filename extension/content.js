@@ -447,17 +447,23 @@
   }
 
   // prettier-ignore
-  const LOAD_MORE_RE = /^(see|show|view|load|browse)\s+(previous|more|all|older|newer|earlier|the rest)\b|^(load more|show more|view more|more results|older posts|newer posts)\b/i;
+  const LOAD_MORE_RE =
+    /^(see|show|view|load|browse)\s+(previous|more|all|older|newer|earlier|the rest)\b|^(load more|show more|view more|more results|older posts|newer posts)\b|^(xem|hiện|tải)\s+thêm(?![\p{L}])/iu;
 
+  // Controls that stand for content not on screen: 'more' are labelled as loading it (or end a
+  // repeated run), 'collapsed' are disclosures with aria-expanded=false that are not menus. Each
+  // list is capped on its own, so a page full of collapsed navigation buttons cannot push a real
+  // "Show more" out of the answer.
   function hiddenContentHints(els) {
     const more = [];
+    const collapsed = [];
     const tabs = [];
     const seen = new Set();
-    const add = (el, t, why) => {
+    const add = (list, el, t, why) => {
       if (!t) return;
       if (seen.has(t)) return;
       seen.add(t);
-      more.push({ text: t.slice(0, 48), ref: getOrAssignRef(el), why });
+      list.push({ text: t.slice(0, 48), ref: getOrAssignRef(el), why });
     };
 
     const sigOf = (el) => {
@@ -493,25 +499,25 @@
       } catch {}
       const opensMenu = !!hasPopup || role === "menuitem" || role === "combobox";
 
-      if (t && LOAD_MORE_RE.test(t)) add(el, t, "load-more label");
+      if (t && LOAD_MORE_RE.test(t)) add(more, el, t, "load-more label");
       else if (expanded === "false" && !opensMenu && t)
-        add(el, t, "collapsed, aria-expanded=false");
+        add(collapsed, el, t, "collapsed, aria-expanded=false");
       else if (
         (runCount.get(sigOf(el)) || 0) >= 5 &&
         t &&
         t.length <= 24 &&
-        /^(more|older|newer|previous|next|\u2026|\.\.\.)$|^(see|show|view|load|browse)\s+\S/i.test(
+        /^(more|older|newer|previous|next|\u2026|\.\.\.)$|^(see|show|view|load|browse)\s+(\d+\s+)?(more|all|everyone|older|newer|previous|earlier|others?|replies|comments|answers|results)\b/i.test(
           t
         )
       ) {
-        add(el, t, "control at the end of a repeated run");
+        add(more, el, t, "control at the end of a repeated run");
       }
 
       if ((role === "tab" || selected === "true" || selected === "false") && t && t.length <= 28) {
         tabs.push({ text: t, ref: getOrAssignRef(el), selected: selected === "true" });
       }
     }
-    return { more: more.slice(0, 4), tabs: tabs.slice(0, 6) };
+    return { more: more.slice(0, 4), collapsed: collapsed.slice(0, 4), tabs: tabs.slice(0, 6) };
   }
 
   function overflowingRegions(root) {
@@ -1097,8 +1103,39 @@
     return parts.join(" ").slice(0, max);
   }
 
+  // The kind of control EL is, for snapshot's 'only': 'fields' take a value (text inputs,
+  // selects, checkboxes, radios, switches, sliders, editable regions), 'links' navigate, and
+  // 'buttons' are everything else that is pressed. An explicit role decides before the tag, so
+  // <a role="button"> is a button and <div role="combobox"> a field.
+  const FIELD_ROLES = new Set([
+    "combobox",
+    "searchbox",
+    "textbox",
+    "slider",
+    "spinbutton",
+    "checkbox",
+    "radio",
+    "switch",
+  ]);
+
+  function controlKind(el) {
+    const role = (el.getAttribute("role") || "").toLowerCase();
+    if (role === "link") return "links";
+    if (FIELD_ROLES.has(role)) return "fields";
+    if (role) return "buttons";
+    const tag = el.tagName;
+    if (tag === "A") return "links";
+    if (tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable) return "fields";
+    if (tag === "INPUT")
+      return ["button", "submit", "reset", "image"].includes((el.type || "").toLowerCase())
+        ? "buttons"
+        : "fields";
+    return "buttons";
+  }
+
   function snapshot(params = {}) {
-    const maxText = params.maxText ?? 4000;
+    const only = Array.isArray(params.only) && params.only.length ? new Set(params.only) : null;
+    const maxText = params.maxText ?? (only ? 0 : 4000);
     const compact = !!params.compact;
     const scope = params.scope || "viewport";
     const limit =
@@ -1106,7 +1143,9 @@
     const offset =
       Number.isFinite(params.cursor) && params.cursor > 0 ? Math.floor(params.cursor) : 0;
 
-    const allInteractives = deepQueryAll(INTERACTIVE_SELECTOR).filter(isCensusVisible);
+    const allInteractives = deepQueryAll(INTERACTIVE_SELECTOR)
+      .filter(isCensusVisible)
+      .filter((el) => !only || only.has(controlKind(el)));
     let nodes = scope === "viewport" ? allInteractives.filter(isInViewport) : allInteractives;
 
     if (scope === "viewport" && nodes.length === 0 && allInteractives.length > 0) {
@@ -1204,6 +1243,7 @@
       url: location.href,
       title: document.title,
       scope,
+      ...(only ? { only: [...only] } : {}),
       viewport: {
         width: window.innerWidth,
         height: vh,
@@ -1448,7 +1488,7 @@
     const regions = openDialogs.length ? overflowingRegions(openDialogs[0].node) : [];
     const hiddenContent = [
       ...hints.more.map((x) => ({ kind: "load-more", text: x.text, ref: x.ref })),
-      ...hints.tabs.map((x) => ({ kind: "tab", text: x.text, ref: x.ref, selected: !!x.selected })),
+      ...hints.collapsed.map((x) => ({ kind: "collapsed", text: x.text, ref: x.ref })),
       ...regions.map((r) => ({ kind: "scrollable-region", hiddenPx: r.hidden, ref: r.ref })),
     ];
     if (hiddenContent.length) res.hiddenContent = hiddenContent;
@@ -2308,6 +2348,11 @@
           );
         notices.push(
           `Possible hidden content: ${bits.join("; ")}. Lists like these load on demand — no depth or scope setting reveals rows that are not in the DOM yet; click the control instead.`
+        );
+      }
+      if (hints.collapsed.length) {
+        notices.push(
+          `Collapsed sections: ${hints.collapsed.map((h) => `"${h.text}" (@${h.ref})`).join(", ")} — their contents show once expanded.`
         );
       }
       if (hints.tabs.length) {

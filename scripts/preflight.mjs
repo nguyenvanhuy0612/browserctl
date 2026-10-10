@@ -162,8 +162,9 @@ gate("lint and formatting", () => {
 // than waved through; and REPETITION, so a fact lands in the one place that owns it.
 //
 // AGENT_TEXT_BUDGET is the ceiling on everything a default session is handed at connect:
-// core tool descriptions, their parameter describe()s, and the INSTRUCTIONS block.
-const AGENT_TEXT_BUDGET = 20000;
+// core tool descriptions, their parameter describe()s, and the INSTRUCTIONS block. It is
+// 20200 so browser_snapshot can say what each 'only' kind holds and when 'all' is worth its size.
+const AGENT_TEXT_BUDGET = 20200;
 const REPEAT_ALLOWED = {
   "requires the target tab in the foreground: chrome silently drops cdp synthetic mouse input for background tabs so this errors rather than pretending to click":
     "coordinate_click and coordinate_drag are siblings and this is a hard constraint on both; an agent reading one description cannot be sent to the other",
