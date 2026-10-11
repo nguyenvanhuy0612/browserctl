@@ -25,6 +25,9 @@ census.
 - `browser_click`: plain text inside a box with a pointer cursor is clicked
   (`resolved.clickableAncestor`); a refusal names the controls nearest to the text, and the
   covered and did-not-change warnings name the next step.
+- A click whose navigation has not committed when it answers (a slow server, a cold DNS lookup)
+  reports `urlChanged: true` with the pending address and a note, instead of "click NOT
+  confirmed".
 - `browser_fill_form`: the description states it sets checkboxes, radios and selects.
   Load-more detection reads "Xem thêm", "Hiện thêm" and "Tải thêm".
 
