@@ -134,13 +134,13 @@ function fake({ type, faults = {} }) {
         return {
           url: p.url,
           title: p.title,
-          census: '  [@ref_1] <button> "Add one"',
+          census: '  [@e1] <button> "Add one"',
           elements: [],
         };
       case "read_page":
-        return { url: p.url, title: p.title, tree: 'textbox "Full name" [ref_1]' };
+        return { url: p.url, title: p.title, tree: 'textbox "Full name" [e1]' };
       case "find":
-        return { count: 1, matches: [{ ref: "ref_1", name: params.query }] };
+        return { count: 1, matches: [{ ref: "e1", name: params.query }] };
       case "get_page_content":
         return { title: p.title, url: p.url, text: "Alpha 10 Beta 20 Gamma 30" };
       case "extract":
@@ -150,9 +150,9 @@ function fake({ type, faults = {} }) {
           selector: params.selector,
           fields: ["title", "n"],
           matches: [
-            { ref: "ref_2", title: "Alpha", n: "10" },
-            { ref: "ref_3", title: "Beta", n: "20" },
-            { ref: "ref_4", title: "Gamma", n: "30" },
+            { ref: "e2", title: "Alpha", n: "10" },
+            { ref: "e3", title: "Beta", n: "20" },
+            { ref: "e4", title: "Gamma", n: "30" },
           ],
         };
       case "click": {

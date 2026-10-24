@@ -12,7 +12,8 @@
     "storage",
     "debugger",
     "webRequest",
-    "webNavigation"
+    "webNavigation",
+    "downloads"
   ],
   "host_permissions": ["<all_urls>"],
   "options_ui": {

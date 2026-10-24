@@ -1,23 +1,23 @@
 # browserctl Core Tool Reference — v0.9.4
 
-browserctl provides 25 core tools (69 tools across all profiles) for web automation and agent inspection.
+browserctl provides 25 core tools (78 tools across all profiles) for web automation and agent inspection.
 
 ## Targeting an element
 
 Every tool that acts on an element takes one parameter, `target`. It accepts five forms, and a
 bare string is resolved in this order:
 
-| | Form | Example |
-| :--- | :--- | :--- |
-| 1 | a ref from a read | `"@ref_5"`, `"ref_5"` |
-| 2 | a string carrying CSS syntax — `# . [ ] > + ~ :` or a descendant space | `"#login"`, `".btn.primary"`, `"[data-id=x]"` |
-| 3 | the exact visible text of a control | `"Sign in"` |
-| 4 | an exact `placeholder` or `aria-label` | `"Search the docs"` |
-| 5 | part of a control's visible text | `"Sign"` |
-| 6 | a bare tag name, only if nothing above matched | `"tbody"` |
+|     | Form                                                                   | Example                                       |
+| :-- | :--------------------------------------------------------------------- | :-------------------------------------------- |
+| 1   | a ref from a read                                                      | `"@e5"`, `"e5"`                               |
+| 2   | a string carrying CSS syntax — `# . [ ] > + ~ :` or a descendant space | `"#login"`, `".btn.primary"`, `"[data-id=x]"` |
+| 3   | the exact visible text of a control                                    | `"Sign in"`                                   |
+| 4   | an exact `placeholder` or `aria-label`                                 | `"Search the docs"`                           |
+| 5   | part of a control's visible text                                       | `"Sign"`                                      |
+| 6   | a bare tag name, only if nothing above matched                         | `"tbody"`                                     |
 
 A bare word is tried as text **before** it is tried as a tag name. `search`, `main`, `menu`,
-`details`, `summary`, `output` and `time` are all valid HTML tags *and* common button labels; the
+`details`, `summary`, `output` and `time` are all valid HTML tags _and_ common button labels; the
 control a person can see wins.
 
 **Prefixes force one step**, when the guess would be wrong or you want to be explicit:
@@ -34,7 +34,7 @@ match — but still reports how many it saw.
 **Every action tells you what it hit:**
 
 ```json
-"resolved": {"by": "text-exact", "ref": "@ref_12", "tag": "button",
+"resolved": {"by": "text-exact", "ref": "@e12", "tag": "button",
              "label": "Sign in", "matchCount": 1}
 ```
 
@@ -120,11 +120,13 @@ reconnects), `UNKNOWN_BROWSER` (a
 ## Navigation & Tabs
 
 ### browser_navigate
+
 - url: Destination URL to navigate to.
 - reload: Boolean flag to reload the current page.
 - format: Output format ('json', 'pretty', 'smart', 'raw').
 
 ### browser_tabs
+
 - action: Tab operation ('list', 'new', 'select', 'close').
 - tabId: Which tab — for 'select' (or give `browser`) and required for 'close'.
 - url: URL for new tab when action is 'new'.
@@ -143,6 +145,7 @@ because a reload loses any unsaved input on that page.
 ## Inspection & Extraction
 
 ### browser_snapshot
+
 - scope: 'viewport' (default) or 'all' elements in DOM.
 - only: List only these kinds of control: 'fields' (inputs, selects, checkboxes, radios), 'buttons', 'links'. Page text is left out unless maxText is passed.
 - elements: true returns every element as structured JSON in 'elements' instead of the census.
@@ -151,11 +154,12 @@ because a reload loses any unsaved input on that page.
 - cursor: Offset cursor for paged snapshot traversal.
 - format: Output format: 'json' (default), 'pretty' or 'smart'.
 
-The result's `folded` lists folded controls one per line as `@ref "text" -> href`.
+The result's `folded` lists folded controls one per line as `@e "text" -> href`.
 `hiddenContent` entries have `kind` `load-more`, `collapsed` or `scrollable-region`. On a page with
 iframes, `census` already includes every frame.
 
 ### browser_read_page
+
 - mode: Inspection mode.
 - depth: Maximum tree depth.
 - target: Ref of the subtree to inspect from.
@@ -163,6 +167,7 @@ iframes, `census` already includes every frame.
 - format: Output format.
 
 ### browser_find
+
 - query: Text or query string to search for.
 - selector: CSS selector to locate elements.
 - in: Search scope ('controls' or 'text').
@@ -172,17 +177,20 @@ iframes, `census` already includes every frame.
 - format: Output format.
 
 ### browser_extract
+
 - selector: Container CSS selector.
 - fields: Object defining fields to extract per item.
 - max: Maximum number of items to extract.
 - format: Output format.
 
 ### browser_get_content
+
 - maxChars: Maximum characters of readable article/page text to return.
 - format: Output format.
 
 ### browser_get_property
-- target: Target element (@ref, CSS selector, visible text, or index).
+
+- target: Target element (@e, CSS selector, visible text, or index).
 - property: Property name to read ('text', 'value', 'html', 'box', 'attr', 'count', 'checked'). 'checked' is true or false for a checkbox or radio and an error for any other element; for a custom control, read its aria-checked attribute with 'attr'.
 - attr: HTML attribute name when property is 'attr'.
 - format: Output format.
@@ -214,6 +222,7 @@ in `browser_snapshot` under `pageState.openDialogs` and close with a `browser_cl
 ## Interaction & Input
 
 ### browser_click
+
 - target: Target element.
 - doubleClick: Boolean flag for double clicking.
 - button: Mouse button ('left', 'right', 'middle').
@@ -227,6 +236,7 @@ Text with no control around it is clicked when it, or an ancestor, shows a point
 lists the controls nearest to the text.
 
 ### browser_type
+
 - target: Target element.
 - text: Text to type into target.
 - method: Typing method ('type', 'set', 'paste').
@@ -242,11 +252,13 @@ result's `effect.suggestions` lists up to 8 visible options the text opened as `
 the value.
 
 ### browser_fill_form
+
 - fields: Array of field descriptors containing target and value. The value is text for a text field, 'true' or 'false' for a checkbox or radio, and an option's value or visible text for a <select>.
 - submitTarget: Optional target of submit button to click after filling.
 - format: Output format.
 
 ### browser_select_option
+
 - target: Target <select> element.
 - values: Array of option values to select.
 - value: Single option value to select.
@@ -255,6 +267,7 @@ the value.
 - format: Output format.
 
 ### browser_press_key
+
 - key: Key name or chord to send (e.g. 'Enter', 'Tab', 'Escape').
 - target: Optional target element.
 - modifiers: Modifier keys ('Control', 'Shift', 'Alt', 'Meta').
@@ -262,24 +275,28 @@ the value.
 - format: Output format.
 
 ### browser_scroll
+
 - direction: Scroll direction ('down', 'up', 'left', 'right').
 - amount: Pixels to scroll.
 - target: Target element or scrollable container.
 - format: Output format.
 
 ### browser_file_upload
+
 - target: Target file input element.
 - files: Array of file paths to attach.
 - file: Single file path to attach.
 - format: Output format.
 
 ### browser_hover
+
 - target: Target element.
 - format: Output format.
 
 ## Synchronization & Utility
 
 ### browser_wait_for
+
 - for: What to wait for ('settle', 'selector', 'text'). Network idle is browser_wait_network_idle, in the network profile.
 - selector: CSS selector to wait for.
 - text: Text content to wait for.
@@ -288,6 +305,7 @@ the value.
 - format: Output format.
 
 ### browser_take_screenshot
+
 - fullPage: Boolean flag for capturing full scrollable page.
 - target: Target element selector or ref to screenshot.
 - format: Image format ('jpeg', 'png').
@@ -301,29 +319,36 @@ still paints nothing fails the capture after 5 s with a hint to select the tab w
 `activate: true` first.
 
 ### browser_evaluate
+
 - expression: JavaScript expression to evaluate in page context.
 - format: Output format.
 
 ### browser_action
+
 - action: Name of protocol action to dispatch.
 - params: Action parameters object.
 - format: Output format.
 
 ### browser_load_tools
+
 - profile: Name of profile to load ('network', 'cdp', 'cookies', 'storage', 'console', 'record', 'all').
 - tools: Array of specific tool names to load.
 - format: Output format.
 
 ### browser_list_available_tools
+
 - format: Output format.
 
 ## Daemon & Session
 
 ### browser_status
+
 - format: Output format.
 
 ### browser_start
+
 - (none)
 
 ### browser_stop
+
 - (none)

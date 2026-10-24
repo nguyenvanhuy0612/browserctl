@@ -144,7 +144,7 @@ async function main() {
     });
     await test("read_page", async () => {
       const r = await cmd("read_page", { mode: "interactive" });
-      assert(/Click Me/.test(r.tree) && /ref_/.test(r.tree), "read_page tree missing button/ref");
+      assert(/Click Me/.test(r.tree) && /e\d+/.test(r.tree), "read_page tree missing button/ref");
     });
     await test("find (shadow)", async () => {
       const r = await cmd("find", { query: "Shadow Button" });
@@ -160,7 +160,7 @@ async function main() {
         .split("\n")
         .find((l) => /Active Modal|Open dialog/.test(l));
       assert(line, "an open <dialog> must be reported by the census");
-      const ref = (line.match(/\(@(ref_\d+)\)/) || [])[1];
+      const ref = (line.match(/\(@(e\d+)\)/) || [])[1];
       assert(ref, `the dialog must carry a ref it can be read by: ${line}`);
       const body = await cmd("get_property", { ref, property: "text" });
       assert(
@@ -195,7 +195,7 @@ async function main() {
       const r = await cmd("extract", { selector: "li.row" });
       assert(r.count === 3 && r.extracted === 3, `count/extracted = ${r.count}/${r.extracted}`);
       assert(
-        r.matches.every((m) => /^@?ref_/.test(m.ref || "")),
+        r.matches.every((m) => /^@?e\d+/.test(m.ref || "")),
         "every row must carry its own ref"
       );
       assert(
@@ -476,8 +476,8 @@ async function main() {
         const r = await cmd("click", { target: "#cv-btn" });
         const n = await cmd("eval_js", { expression: "window.__cv" });
         assert(n.value === 1, `the covered button's listener ran ${n.value} times`);
-        assert(/covered at its centre by <div> \(@ref_\d+\)/.test(r.warning || ""), `warning: ${r.warning}`);
-        assert(/close or answer @ref_\d+ first/.test(r.warning), `the warning must name what to close: ${r.warning}`);
+        assert(/covered at its centre by <div> \(@e\d+\)/.test(r.warning || ""), `warning: ${r.warning}`);
+        assert(/close or answer @e\d+ first/.test(r.warning), `the warning must name what to close: ${r.warning}`);
         assert(!/may have intercepted/.test(r.warning), "the old vague wording is back");
       } finally {
         await cmd("eval_js", { expression: "['cv-btn','cv-ov'].forEach(id=>document.getElementById(id)?.remove()), true" });
@@ -540,7 +540,7 @@ async function main() {
           s.map((o) => o.text).join(",") === "Zurich,Zug,Zermatt",
           `suggestions = ${JSON.stringify(s)}`
         );
-        assert(s.every((o) => /^(f\d+:)?ref_\d+$/.test(o.ref)), `each suggestion needs a ref: ${JSON.stringify(s)}`);
+        assert(s.every((o) => /^(f\d+:)?e\d+$/.test(o.ref)), `each suggestion needs a ref: ${JSON.stringify(s)}`);
         await cmd("click", { target: "@" + s[1].ref });
         const v = await cmd("eval_js", { expression: "document.getElementById('ac1-in').value" });
         assert(v.value === "Zug", `clicking the suggestion ref did not pick it (value=${JSON.stringify(v.value)})`);

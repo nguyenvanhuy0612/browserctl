@@ -93,9 +93,9 @@ Navigation & Tabs:
 Inspection & Query (get):
   browserctl snapshot [--all]           Capture interactive DOM elements (--all = everything in the DOM)
     [--only fields,buttons,links]        List only these kinds of control; page text is left out
-  browserctl read_page [mode] [--depth N] [--max-chars N] [--ref @ref_1]
+  browserctl read_page [mode] [--depth N] [--max-chars N] [--ref @e1]
                                         Read accessibility tree & text (mode: interactive | all)
-  browserctl get text <target>          Get visible text of element (@e1, ref_1, selector)
+  browserctl get text <target>          Get visible text of element (@e1, selector)
   browserctl get value <target>         Get value of input/textarea/select
   browserctl get attr <target> <name>   Get attribute value (e.g. href, src, placeholder)
   browserctl get title                  Get current page title
@@ -105,7 +105,7 @@ Inspection & Query (get):
   browserctl get count <selector>       Count matching elements
 
 Interaction:
-  browserctl click <target>             Click element (@e1, ref_1, 0, --text "...", custom elements, ARIA roles)
+  browserctl click <target>             Click element (@e1, 0, --text "...", custom elements, ARIA roles)
   browserctl dblclick <target>          Double-click element
   browserctl fill <target> <text>       Clear input and fill text (recovers with candidate input refs if targeted element is not editable)
   browserctl upload <file> [target]     Attach a local file to a file input (walks from a styled label/button to the hidden input)
@@ -116,7 +116,7 @@ Interaction:
   browserctl uncheck <target>           Uncheck checkbox
   browserctl select <target> <val...>   Select option in dropdown by value or --label "..."
   browserctl hover <target>             Hover over element
-  browserctl scroll [up|down] [amount] [target] Scroll page or container (@ref, selector)
+  browserctl scroll [up|down] [amount] [target] Scroll page or container (@e1, selector)
   browserctl scrollintoview <target>    Scroll element into view
   browserctl press <key>                Press key (Enter, Tab, Escape, etc.)
   browserctl dismiss [target]           Dismiss active modal, drawer, or flyout (Escape or close button)
@@ -367,7 +367,7 @@ function parseTarget(arg, params) {
     return;
   }
 
-  if (/^(?:f\w+:)?(?:ref_?|e)\w+$/i.test(trimmed)) {
+  if (/^(?:f\w+:)?e\w+$/i.test(trimmed)) {
     params.ref = `@${trimmed}`;
     return;
   }
@@ -1054,6 +1054,43 @@ async function main() {
           } else {
             parseTarget(arg, params);
           }
+        }
+        break;
+      }
+
+      case "wheel": {
+        for (const arg of args) {
+          if (arg.startsWith("--deltaY=")) params.deltaY = parseInt(arg.slice(9), 10);
+          else if (arg.startsWith("--deltaX=")) params.deltaX = parseInt(arg.slice(9), 10);
+          else if (/^-?\d+$/.test(arg) && params.deltaY === undefined)
+            params.deltaY = parseInt(arg, 10);
+          else parseTarget(arg, params);
+        }
+        break;
+      }
+
+      case "emulate": {
+        if (args.includes("--clear") || args.includes("--off")) {
+          params.clear = true;
+        } else if (args[0] && !args[0].startsWith("-")) {
+          params.device = args[0];
+        }
+        break;
+      }
+
+      case "drag": {
+        const positional = args.filter((a) => !a.startsWith("-"));
+        if (positional[0]) params.source = positional[0];
+        if (positional[1]) params.target = positional[1];
+        break;
+      }
+
+      case "download": {
+        for (const arg of args) {
+          if (arg.startsWith("--filename=")) params.filename = arg.slice(11);
+          else if (arg.startsWith("--url=")) params.url = arg.slice(6);
+          else if (/^https?:\/\//i.test(arg)) params.url = arg;
+          else parseTarget(arg, params);
         }
         break;
       }

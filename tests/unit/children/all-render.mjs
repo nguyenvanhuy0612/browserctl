@@ -8,14 +8,14 @@ import http from "node:http";
         const result = params.fields
           ? { all: true, selector: params.selector, count: 30, fields: ["title", "url", "box"],
               matches: [
-                { ref: "ref_1", title: "First  post", url: "https://x.test/one", box: { x: 10.4, y: 20.6, width: 80, height: 30 } },
-                { ref: "ref_2", title: "Second post", url: null, box: null },
+                { ref: "e1", title: "First  post", url: "https://x.test/one", box: { x: 10.4, y: 20.6, width: 80, height: 30 } },
+                { ref: "e2", title: "Second post", url: null, box: null },
               ],
               note: "30 elements matched; the first 2 are listed." }
           : { property: "attr", all: true, selector: params.selector, count: 2,
               matches: [
-                { ref: "ref_1", property: "attr", name: "href", present: true, value: "/one", resolved: "https://x.test/one" },
-                { ref: "ref_2", property: "attr", name: "href", present: false, value: null },
+                { ref: "e1", property: "attr", name: "href", present: true, value: "/one", resolved: "https://x.test/one" },
+                { ref: "e2", property: "attr", name: "href", present: false, value: null },
               ] };
         res.writeHead(200, {"content-type":"application/json"});
         res.end(JSON.stringify({ ok: true, result }));
@@ -31,7 +31,7 @@ import http from "node:http";
     const lines = survey.split("\n");
     if (lines.length > 5) throw new Error("a two-row survey must not exceed header + rows + note: " + survey);
     if (!/30 matches for li, 2 listed — title, url, box$/.test(lines[0])) throw new Error("header: " + lines[0]);
-    if (!lines[1].includes("@ref_1") || !lines[1].includes("title=First post")) throw new Error("row: " + lines[1]);
+    if (!lines[1].includes("@e1") || !lines[1].includes("title=First post")) throw new Error("row: " + lines[1]);
     if (!lines[1].includes("box=10,21 80x30")) throw new Error("a box must render as coordinates, not JSON: " + lines[1]);
     if (!lines[2].includes("url=-")) throw new Error("a null field must render as a dash, not 'null': " + lines[2]);
     if (!/Note: /.test(lines[3])) throw new Error("the note must survive: " + survey);

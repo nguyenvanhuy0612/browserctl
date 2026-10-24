@@ -8,9 +8,9 @@ import http from "node:http";
 import { z } from "zod";
 
 const census = [
-  '  [@ref_1] <input>[type=text] "Search"',
-  '  [@ref_2] <a> "Home" -> /',
-  "  ... [folded 2 links (refs: @ref_3, @f2:ref_9)]",
+  '  [@e1] <input>[type=text] "Search"',
+  '  [@e2] <a> "Home" -> /',
+  "  ... [folded 2 links (refs: @e3, @f2:e9)]",
 ].join("\n");
 const snap = {
   url: "https://x.test/",
@@ -21,21 +21,21 @@ const snap = {
   foldedCount: 2,
   census,
   elements: [
-    { ref: "ref_1", tag: "input", text: "Search", index: 0 },
-    { ref: "ref_2", tag: "a", text: "Home", href: "/", index: 1 },
-    { ref: "ref_3", tag: "a", text: "Story one", href: "/item?id=1", index: 2, landmark: "main" },
-    { ref: "f2:ref_9", tag: "a", text: "In frame", href: "/f", frame: "https://ads.test/frame" },
+    { ref: "e1", tag: "input", text: "Search", index: 0 },
+    { ref: "e2", tag: "a", text: "Home", href: "/", index: 1 },
+    { ref: "e3", tag: "a", text: "Story one", href: "/item?id=1", index: 2, landmark: "main" },
+    { ref: "f2:e9", tag: "a", text: "In frame", href: "/f", frame: "https://ads.test/frame" },
   ],
   text: "page text",
   next: 4,
-  structure: "main 4 (@ref_20)",
-  hiddenContent: [{ kind: "load-more", text: "Show more", ref: "ref_30" }],
-  pageState: { openDialogs: [{ label: "Cookies", ref: "ref_40" }] },
+  structure: "main 4 (@e20)",
+  hiddenContent: [{ kind: "load-more", text: "Show more", ref: "e30" }],
+  pageState: { openDialogs: [{ label: "Cookies", ref: "e40" }] },
   folded: [
-    { ref: "ref_3", text: "Story one", href: "/item?id=1" },
-    { ref: "f2:ref_9", text: "In frame", href: "/f", frame: "https://ads.test/frame" },
-    { ref: "ref_10", text: "", href: "vote?id=1" },
-    { ref: "ref_11", text: 'say "hi"' },
+    { ref: "e3", text: "Story one", href: "/item?id=1" },
+    { ref: "f2:e9", text: "In frame", href: "/f", frame: "https://ads.test/frame" },
+    { ref: "e10", text: "", href: "vote?id=1" },
+    { ref: "e11", text: 'say "hi"' },
   ],
 };
 const sent = [];
@@ -64,10 +64,10 @@ if ("elements" in compact) fail("a compact snapshot still carries 'elements'");
 if (compact.census !== census) fail("the census changed");
 if (compact.text !== "page text") fail("the page text was dropped");
 const want = [
-  '@ref_3 "Story one" -> /item?id=1',
-  '@f2:ref_9 "In frame" -> /f (frame https://ads.test/frame)',
-  "@ref_10 -> vote?id=1",
-  '@ref_11 "say \\"hi\\""',
+  '@e3 "Story one" -> /item?id=1',
+  '@f2:e9 "In frame" -> /f (frame https://ads.test/frame)',
+  "@e10 -> vote?id=1",
+  '@e11 "say \\"hi\\""',
 ].join("\n");
 if (compact.folded !== want) fail("folded must be one line per control, every field kept:\n" + compact.folded);
 
@@ -91,16 +91,16 @@ if (!refused.isError || !/elements/.test(refused.content[0].text))
 if (sent.length !== sentBefore) fail("a refused 'compact' must not reach the bridge");
 
 const smart = (await call({ format: "smart" })).content[0].text;
-if (!smart.includes("[@ref_1]")) fail("the smart rendering lost the census");
+if (!smart.includes("[@e1]")) fail("the smart rendering lost the census");
 // The smart rendering is the same answer for a human reader: every field the JSON carries is
 // in it, so choosing it never costs the agent the page text, the paging cursor or a folded link.
 for (const [what, needle] of [
   ["the page text", "page text"],
-  ["the structure line", "main 4 (@ref_20)"],
+  ["the structure line", "main 4 (@e20)"],
   ["the paging cursor", "cursor: 4"],
-  ["a folded control's text and href", '@ref_3 "Story one" -> /item?id=1'],
-  ["a hidden-content hint", '"Show more" (@ref_30)'],
-  ["an open dialog", '"Cookies" (@ref_40)'],
+  ["a folded control's text and href", '@e3 "Story one" -> /item?id=1'],
+  ["a hidden-content hint", '"Show more" (@e30)'],
+  ["an open dialog", '"Cookies" (@e40)'],
 ]) {
   if (!smart.includes(needle)) fail(`the smart rendering lost ${what}:\n${smart}`);
 }

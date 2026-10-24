@@ -33,10 +33,10 @@ What `browser_snapshot` hands the agent for a page (iana.org, trimmed):
 
 ```text
 [Header / Banner]
-  [@ref_1] <a> "Domains" -> /domains
-  [@ref_2] <a> "Protocols" -> /protocols
+  [@e1] <a> "Domains" -> /domains
+  [@e2] <a> "Protocols" -> /protocols
   ...
-structure: footer 22 (@ref_32), header 5 (@ref_33), main 4 (@ref_34)
+structure: footer 22 (@e32), header 5 (@e33), main 4 (@e34)
 ```
 
 ---
@@ -239,8 +239,8 @@ Real calls, each result cut to one line:
 ```text
 User:   What does example.com link to?
 Agent:  browser_navigate({ url: "https://example.com" })
-Agent:  browser_snapshot({})               -> [@ref_1] <a> "Learn more" -> https://iana.org/help/example-domains
-Agent:  browser_click({ target: "@ref_1" }) -> resolved: by ref, <a> "Learn more", 1 match
+Agent:  browser_snapshot({})               -> [@e1] <a> "Learn more" -> https://iana.org/help/example-domains
+Agent:  browser_click({ target: "@e1" }) -> resolved: by ref, <a> "Learn more", 1 match
 Agent:  browser_snapshot({})               -> https://www.iana.org/help/example-domains, "Example Domains"
 Agent:  It links to IANA's "Example Domains" page, which explains these domains are reserved for documentation.
 ```
@@ -252,7 +252,7 @@ Agent:  It links to IANA's "Example Domains" page, which explains these domains 
 | Stage | Representative tools | Purpose |
 |---|---|---|
 | **1. Navigate** | `browser_navigate`, `browser_tabs` | Open a URL or reload; list, open, select or release tabs |
-| **2. Read** | `browser_snapshot`, `browser_read_page`, `browser_find`, `browser_get_content` | List the page's controls with `@ref_N` refs, read the accessibility tree, find an element, read article text |
+| **2. Read** | `browser_snapshot`, `browser_read_page`, `browser_find`, `browser_get_content` | List the page's controls with `@eN` refs, read the accessibility tree, find an element, read article text |
 | **3. Act** | `browser_click`, `browser_type`, `browser_fill_form`, `browser_press_key` | Click, type, fill several fields at once, send keys |
 | **4. Verify** | `browser_wait_for`, `browser_take_screenshot`, `browser_status` | Wait for an element or text, capture the page, check the bridge and extension |
 

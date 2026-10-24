@@ -12,8 +12,103 @@ import {
   pendingDialog,
   handleDialog,
   onDialogOpened,
+  onFileChooserOpened,
+  interceptFileChooser,
+  setFilesOnBackendNode,
+  clickWithUserGesture,
 } from "./cdp.js";
 import { handleNet, NET_ACTIONS, dropTab as netDropTab } from "./netlog.js";
+import {
+  RpcError,
+  RPC_ERRORS,
+  PARSE_ERROR,
+  INVALID_REQUEST,
+  METHOD_NOT_FOUND,
+  INVALID_PARAMS,
+  INTERNAL_ERROR,
+  TARGET_NOT_FOUND,
+  ELEMENT_NOT_FOUND,
+  ELEMENT_NOT_INTERACTABLE,
+  NAVIGATION_TIMEOUT,
+  CDP_ATTACH_FAILED,
+  EXECUTION_ABORTED,
+  DOWNLOAD_FAILED,
+  POLICY_RESTRICTION,
+  BUDGET_EXCEEDED,
+  NETWORK_REPLAY_FAILED,
+} from "./transport/errors.js";
+import {
+  executeWithAbort,
+  abortRequest,
+  abortAll,
+  inFlightRequests,
+} from "./transport/dispatcher.js";
+import {
+  sendCdpCommand,
+  dispatchMouseEvent,
+  dispatchMouseWheel,
+  coordinate_drag,
+  dispatchKeyEvent,
+  DEVICE_PRESETS,
+  setDeviceMetrics,
+  setUserAgent,
+  setEmulatedMedia,
+  setGeolocationOverride,
+  setNetworkConditions,
+  clearEmulation,
+  emulate,
+  resolveJsonPointer,
+  createNetworkRule,
+  networkReplay,
+  getFrameTree,
+  flattenFrameTree,
+  findFrame,
+  mapFrameToContext,
+} from "./driver/index.js";
+
+export {
+  RpcError,
+  RPC_ERRORS,
+  PARSE_ERROR,
+  INVALID_REQUEST,
+  METHOD_NOT_FOUND,
+  INVALID_PARAMS,
+  INTERNAL_ERROR,
+  TARGET_NOT_FOUND,
+  ELEMENT_NOT_FOUND,
+  ELEMENT_NOT_INTERACTABLE,
+  NAVIGATION_TIMEOUT,
+  CDP_ATTACH_FAILED,
+  EXECUTION_ABORTED,
+  DOWNLOAD_FAILED,
+  POLICY_RESTRICTION,
+  BUDGET_EXCEEDED,
+  NETWORK_REPLAY_FAILED,
+  executeWithAbort,
+  abortRequest,
+  abortAll,
+  inFlightRequests,
+  sendCdpCommand,
+  dispatchMouseEvent,
+  dispatchMouseWheel,
+  coordinate_drag,
+  dispatchKeyEvent,
+  DEVICE_PRESETS,
+  setDeviceMetrics,
+  setUserAgent,
+  setEmulatedMedia,
+  setGeolocationOverride,
+  setNetworkConditions,
+  clearEmulation,
+  emulate,
+  resolveJsonPointer,
+  createNetworkRule,
+  networkReplay,
+  getFrameTree,
+  flattenFrameTree,
+  findFrame,
+  mapFrameToContext,
+};
 
 const DIALOG_TRIGGERS = new Set([
   "click",
@@ -61,6 +156,10 @@ const CONTENT_ACTIONS = [
   "element_rect",
   "extract",
   "fill_form",
+  "iframe_rect",
+  "show_help_banner",
+  "hide_help_banner",
+  "check_help_resolved",
 ];
 
 let recordingSteps = [];
@@ -249,7 +348,17 @@ async function connect() {
       await chrome.storage.local.set({ instanceId: msg.instanceId });
       return;
     }
-    const reply = await dispatch(msg).catch((err) => ({
+    if (msg.type === "abort" && msg.id && typeof abortRequest === "function") {
+      abortRequest(msg.id, msg.reason);
+      return;
+    }
+    const timeoutMs = (msg.params && (msg.params.timeoutMs || msg.params.timeout)) || 60000;
+    const runDispatch = () =>
+      typeof executeWithAbort === "function" && msg.id
+        ? executeWithAbort(msg.id, timeoutMs, (signal) => dispatch({ ...msg, signal }))
+        : dispatch(msg);
+
+    const reply = await runDispatch().catch((err) => ({
       ok: false,
       error: String(err && err.message ? err.message : err),
       ...(err && typeof err.code === "string" ? { code: err.code } : {}),
@@ -264,6 +373,11 @@ async function connect() {
 
   ws.addEventListener("close", () => {
     if (ws !== socket) return;
+    if (typeof abortAll === "function") {
+      try {
+        abortAll("WebSocket closed");
+      } catch {}
+    }
     const wasConnected = connState === "connected";
     socket = null;
     if (!wantConnect) {
@@ -279,6 +393,11 @@ async function connect() {
 
   ws.addEventListener("error", () => {
     if (ws !== socket) return;
+    if (typeof abortAll === "function") {
+      try {
+        abortAll("WebSocket error");
+      } catch {}
+    }
     try {
       ws.close();
     } catch {}
@@ -349,161 +468,374 @@ const NOT_EXTENSION_ACTIONS = {
   action: "browser_action itself — it dispatches other actions and is not one",
 };
 
-async function dispatch({ action, params = {} }) {
-  const alias = ACTION_ALIASES[action];
-  if (alias) {
-    action = alias.action;
-    params = { ...alias.params, ...params };
-  }
-  if (NOT_EXTENSION_ACTIONS[action]) {
-    return {
-      ok: false,
-      error: `'${action}' is not a page action — use ${NOT_EXTENSION_ACTIONS[action]}.`,
-      code: "NOT_A_PAGE_ACTION",
-    };
-  }
+// --- BSK-inspired RpcError taxonomy and error classification ---
+function createRpcError(code, message, { reason, data, recoveryHint } = {}) {
+  const numericCode = typeof code === "number" ? code : (RPC_ERRORS[code] ?? -32603);
+  const errReason = reason || (typeof code === "string" ? code : "UNKNOWN_ERROR");
+  const err = new RpcError(numericCode, message, {
+    reason: errReason,
+    details: data,
+    ...(recoveryHint ? { recoveryHint } : {}),
+  });
+  return Object.assign(err, {
+    ok: false,
+    code,
+    reason: errReason,
+    error: message,
+    ...(data ? { data } : {}),
+    ...(recoveryHint ? { recoveryHint } : {}),
+  });
+}
 
-  if (action === "upload") {
-    const tab = await targetTab(params);
-    const { frameId, params: p } = frameRoute(params);
-    const marked = await toContent(
-      "upload_mark",
-      {
-        target: p.target,
-        index: p.index,
-        ref: p.ref,
-        selector: p.selector,
-        text: p.text,
-        placeholder: p.placeholder,
-        tabId: tab.id,
-      },
-      frameId
+function formatDispatchError(err, action) {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (err && err.code) {
+    return createRpcError(err.code, msg, {
+      reason: err.reason || err.code,
+      data: err.diagnostics || err.data,
+      recoveryHint: err.recoveryHint,
+    });
+  }
+  if (msg.includes("Cannot access a chrome-extension:// URL")) {
+    return createRpcError(
+      "CDP_ACCESS_DENIED",
+      "Chrome policy prohibits accessing internal or extension pages via CDP",
+      { reason: "cdp_extension_access_denied", recoveryHint: "Target regular web pages instead." }
     );
-    if (!marked.ok) return marked;
-    const files = Array.isArray(params.files) ? params.files : params.file ? [params.file] : [];
-    const set = await handleCdp("upload_set", { files }, tab.id);
-    if (!set.ok) return set;
-    const dropped = files.length - (set.result.count || 0);
-    const warning =
-      dropped > 0
-        ? marked.result.multiple
-          ? `${files.length} files given, ${set.result.count} attached \u2014 the page's input took what it wanted and dropped ${dropped}`
-          : `this input has no 'multiple' attribute, so it holds ONE file: ${dropped} of the ${files.length} given were dropped and only ${set.result.files?.[0] || set.result.count} is attached`
-        : null;
+  }
+  if (
+    msg.includes("Receiving end does not exist") ||
+    msg.includes("Could not establish connection")
+  ) {
+    return createRpcError(
+      "PAGE_UNREACHABLE",
+      `content script not reachable for '${action}' (page may be loading, discarded, or an internal URL)`,
+      {
+        reason: "content_script_unreachable",
+        recoveryHint: "Wait for page to commit or reload the tab.",
+      }
+    );
+  }
+  return { ok: false, error: msg };
+}
+
+// Intercepts the native file chooser dialog via CDP when uploading through custom buttons
+// that trigger dynamic file picker dialogs instead of exposing an <input type=file>.
+async function uploadWithChooserFallback(tabId, p, files, frameId) {
+  await interceptFileChooser(tabId, true);
+  let timer;
+  let stop;
+  const chooserPromise = new Promise((resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error("timed out waiting for file chooser to open (10s)")),
+      10000
+    );
+    stop = onFileChooserOpened(tabId, (evt) => {
+      clearTimeout(timer);
+      resolve(evt);
+    });
+  });
+
+  try {
+    const clickScript = `(() => {
+      function findTarget(root) {
+        const found = root.querySelector('[data-bctl-upload-target="1"]');
+        if (found) return found;
+        for (const el of root.querySelectorAll('*')) {
+          if (el.shadowRoot) {
+            const inside = findTarget(el.shadowRoot);
+            if (inside) return inside;
+          }
+        }
+        return null;
+      }
+      const el = findTarget(document);
+      if (el) {
+        el.click();
+        return true;
+      }
+      return false;
+    })()`;
+
+    let clicked = false;
+    if (typeof clickWithUserGesture === "function") {
+      try {
+        const evalRes = await clickWithUserGesture(tabId, clickScript);
+        if (evalRes && evalRes.result && evalRes.result.value) clicked = true;
+      } catch {}
+    }
+
+    if (!clicked) {
+      const clickRes = await toContent(
+        "click",
+        {
+          target: p.target,
+          selector: p.selector,
+          ref: p.ref,
+          text: p.text,
+          placeholder: p.placeholder,
+          index: p.index,
+          tabId,
+        },
+        frameId
+      );
+      if (!clickRes.ok) throw new Error(clickRes.error || "failed to click upload target");
+    }
+    const event = await chooserPromise;
+    if (!event || !event.backendNodeId) {
+      throw new Error("no backendNodeId received from file chooser dialog");
+    }
+    await setFilesOnBackendNode(tabId, event.backendNodeId, files);
     return {
       ok: true,
       result: {
-        ...set.result,
-        input: marked.result,
-        ...(warning ? { warning } : {}),
-        note: "the file is attached to the input and change/input have fired; read the page to confirm the site accepted it",
+        files: files.map((f) => (typeof f === "string" ? f.split(/[/\\]/).pop() : f)),
+        count: files.length,
+        method: "chooser_intercepted",
+        target: p.target ?? p.selector ?? p.ref ?? p.text ?? "target",
+        note: "file attached via intercepted file chooser dialog",
       },
     };
+  } finally {
+    clearTimeout(timer);
+    if (stop) stop();
+    await interceptFileChooser(tabId, false).catch(() => {});
   }
+}
 
-  if (action === "element_screenshot") {
-    const tab = await targetTab(params);
-    const { frameId, params: p } = frameRoute(params);
-    const rectReply = await toContent(
-      "element_rect",
-      {
-        target: p.target,
-        selector: p.selector,
-        index: p.index,
-        ref: p.ref,
-        text: p.text,
-        placeholder: p.placeholder,
-        tabId: tab.id,
-      },
-      frameId
-    );
-    if (!rectReply.ok) return rectReply;
-    const rect = rectReply.result;
-    // Same routes as a viewport screenshot: a visible tab is captured and cropped without the
-    // debugger; an attached tab, a background tab, or an element that does not fit in the
-    // viewport goes through CDP, attaching on the way.
-    if (!isAttached(tab.id) && tab.active && fitsViewport(rect)) {
+async function handleUpload(params) {
+  const tab = await targetTab(params);
+  const { frameId, params: p } = frameRoute(params);
+  const marked = await toContent(
+    "upload_mark",
+    {
+      target: p.target,
+      index: p.index,
+      ref: p.ref,
+      selector: p.selector,
+      text: p.text,
+      placeholder: p.placeholder,
+      tabId: tab.id,
+    },
+    frameId
+  );
+  const files = Array.isArray(params.files) ? params.files : params.file ? [params.file] : [];
+  const hasTarget =
+    p.target != null ||
+    p.selector != null ||
+    p.ref != null ||
+    p.text != null ||
+    p.placeholder != null;
+  if (!marked.ok || (marked.result && marked.result.isFileInput === false)) {
+    if (hasTarget) {
       try {
-        return { ok: true, result: await cropVisibleTab(tab, rect, params.format) };
+        const fallback = await uploadWithChooserFallback(tab.id, p, files, frameId);
+        if (fallback && fallback.ok) return fallback;
       } catch (err) {
-        if (err.code !== "TAB_LEFT_FRONT") throw err;
+        return createRpcError(
+          "UPLOAD_FAILED",
+          `upload failed: no <input type=file> found and file chooser interception failed (${err.message})`,
+          { reason: "file_chooser_failed" }
+        );
       }
     }
-    await ensureAttached(tab.id);
-    // The tab as it is now: it may have left the front since the command started
-    const current = await chrome.tabs.get(tab.id).catch(() => tab);
-    const emulateFocus = !(await inFront(current));
-    return await handleCdp(
-      "element_screenshot",
-      { rect, format: params.format, emulateFocus },
-      tab.id
+    return marked;
+  }
+  const set = await handleCdp("upload_set", { files }, tab.id);
+  if (!set.ok) return set;
+  const dropped = files.length - (set.result.count || 0);
+  const warning =
+    dropped > 0
+      ? marked.result.multiple
+        ? `${files.length} files given, ${set.result.count} attached \u2014 the page's input took what it wanted and dropped ${dropped}`
+        : `this input has no 'multiple' attribute, so it holds ONE file: ${dropped} of the ${files.length} given were dropped and only ${set.result.files?.[0] || set.result.count} is attached`
+      : null;
+  return {
+    ok: true,
+    result: {
+      ...set.result,
+      input: marked.result,
+      ...(warning ? { warning } : {}),
+      note: "the file is attached to the input and change/input have fired; read the page to confirm the site accepted it",
+    },
+  };
+}
+
+async function handleElementRect(params) {
+  const tab = await targetTab(params);
+  const { frameId, params: p } = frameRoute(params);
+  const rectReply = await toContent(
+    "element_rect",
+    {
+      target: p.target,
+      selector: p.selector,
+      index: p.index,
+      ref: p.ref,
+      text: p.text,
+      placeholder: p.placeholder,
+      tabId: tab.id,
+    },
+    frameId
+  );
+  if (!rectReply.ok) return rectReply;
+  let rect = rectReply.result;
+  if (frameId > 0) rect = await projectFrameRect(tab.id, frameId, rect);
+  return { ok: true, result: rect };
+}
+
+async function handleElementScreenshot(params) {
+  const tab = await targetTab(params);
+  const { frameId, params: p } = frameRoute(params);
+  const rectReply = await toContent(
+    "element_rect",
+    {
+      target: p.target,
+      selector: p.selector,
+      index: p.index,
+      ref: p.ref,
+      text: p.text,
+      placeholder: p.placeholder,
+      tabId: tab.id,
+    },
+    frameId
+  );
+  if (!rectReply.ok) return rectReply;
+  let rect = rectReply.result;
+  if (frameId > 0) rect = await projectFrameRect(tab.id, frameId, rect);
+  if (!isAttached(tab.id) && tab.active && fitsViewport(rect)) {
+    try {
+      return { ok: true, result: await cropVisibleTab(tab, rect, params.format) };
+    } catch (err) {
+      if (err.code !== "TAB_LEFT_FRONT") throw err;
+    }
+  }
+  await ensureAttached(tab.id);
+  const current = await chrome.tabs.get(tab.id).catch(() => tab);
+  const emulateFocus = !(await inFront(current));
+  return await handleCdp(
+    "element_screenshot",
+    { rect, format: params.format, emulateFocus },
+    tab.id
+  );
+}
+
+async function handlePressKeyWithModifiers(params) {
+  const tab = await targetTab(params);
+  if (isAttached(tab.id)) return await handleCdp("press_key_cdp", params, tab.id);
+  return createRpcError(
+    "CDP_ATTACH_REQUIRED",
+    "press_key with modifiers needs cdp_attach first (the CDP path delivers a real key " +
+      "event, incl. Mac editor commands like Cmd+A, but requires the tab to be in the " +
+      "foreground). For a background tab, pass allowSynthetic:true to dispatch a synthetic " +
+      "DOM event instead — page shortcut handlers fire, native editing does not.",
+    { reason: "modifiers_need_foreground_or_synthetic" }
+  );
+}
+
+async function handleWheel(params) {
+  const tab = await targetTab(params);
+  let x = params.x;
+  let y = params.y;
+  if (params.target) {
+    const rectRes = await toContent("element_rect", { target: params.target });
+    if (rectRes && rectRes.rect) {
+      x = rectRes.rect.x + rectRes.rect.width / 2;
+      y = rectRes.rect.y + rectRes.rect.height / 2;
+    }
+  }
+  return await handleCdp("wheel", { ...params, x, y }, tab.id);
+}
+
+async function handleDrag(params) {
+  const tab = await targetTab(params);
+  let fromX = params.fromX;
+  let fromY = params.fromY;
+  let toX = params.toX;
+  let toY = params.toY;
+
+  if (params.source) {
+    const srcRect = await toContent("element_rect", { target: params.source });
+    if (srcRect && srcRect.rect) {
+      fromX = srcRect.rect.x + srcRect.rect.width / 2;
+      fromY = srcRect.rect.y + srcRect.rect.height / 2;
+    } else {
+      throw createRpcError("ELEMENT_NOT_FOUND", `source element '${params.source}' not found`, {
+        target: params.source,
+      });
+    }
+  }
+
+  if (params.target) {
+    const dstRect = await toContent("element_rect", { target: params.target });
+    if (dstRect && dstRect.rect) {
+      toX = dstRect.rect.x + dstRect.rect.width / 2;
+      toY = dstRect.rect.y + dstRect.rect.height / 2;
+    } else {
+      throw createRpcError("ELEMENT_NOT_FOUND", `target element '${params.target}' not found`, {
+        target: params.target,
+      });
+    }
+  }
+
+  if (fromX == null || fromY == null || toX == null || toY == null) {
+    throw createRpcError(
+      "INVALID_PARAMS",
+      "drag requires both source (or fromX, fromY) and target (or toX, toY)"
     );
   }
 
-  if (
-    action === "press_key" &&
-    Array.isArray(params.modifiers) &&
-    params.modifiers.length &&
-    !params.allowSynthetic
-  ) {
-    const tab = await targetTab(params);
-    if (isAttached(tab.id)) return await handleCdp("press_key_cdp", params, tab.id);
-    return {
-      ok: false,
-      error:
-        "press_key with modifiers needs cdp_attach first (the CDP path delivers a real key " +
-        "event, incl. Mac editor commands like Cmd+A, but requires the tab to be in the " +
-        "foreground). For a background tab, pass allowSynthetic:true to dispatch a synthetic " +
-        "DOM event instead — page shortcut handlers fire, native editing does not.",
-    };
-  }
+  return await handleCdp("coordinate_drag", { fromX, fromY, toX, toY }, tab.id);
+}
 
-  if (CDP_ACTIONS.includes(action)) {
-    const tab = await targetTab(params);
-    const cdpParams =
-      action === "capture_screenshot" ? { ...params, emulateFocus: !(await inFront(tab)) } : params;
-    const reply = await handleCdp(action, cdpParams, tab.id);
-    if (action === "a11y_snapshot" && reply && reply.ok) {
-      return { ok: true, result: await enrichAxWithRefs(reply.result, tab.id) };
-    }
-    return reply;
+async function handleCdpAction(action, params) {
+  const tab = await targetTab(params);
+  const cdpParams =
+    action === "capture_screenshot" ? { ...params, emulateFocus: !(await inFront(tab)) } : params;
+  const reply = await handleCdp(action, cdpParams, tab.id);
+  if (action === "a11y_snapshot" && reply && reply.ok) {
+    return { ok: true, result: await enrichAxWithRefs(reply.result, tab.id) };
   }
+  return reply;
+}
 
-  if (NET_ACTIONS.includes(action)) {
-    const tab = await targetTab(params);
-    return await handleNet(action, params, tab.id);
+async function handleNetAction(action, params) {
+  const tab = await targetTab(params);
+  return await handleNet(action, params, tab.id);
+}
+
+async function handleContentAction(action, params) {
+  const tab = await targetTab(params);
+  if (looksLikePdf(tab.url)) {
+    return createRpcError(
+      "PDF_TAB",
+      `tab is showing a PDF (no readable DOM) — call read_pdf instead of '${action}'`,
+      { reason: "tab_is_pdf", recoveryHint: "Use browser_read_pdf tool." }
+    );
   }
-
-  if (CONTENT_ACTIONS.includes(action)) {
-    const tab = await targetTab(params);
-    if (looksLikePdf(tab.url)) {
-      return {
-        ok: false,
-        error: `tab is showing a PDF (no readable DOM) — call read_pdf instead of '${action}'`,
-      };
-    }
-    if (params.tabId == null) params = { ...params, tabId: tab.id };
-    if (action === "click" || action === "click_selector") {
-      try {
-        const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-        if (active && drivenTabIds.has(active.id)) {
-          pruneClickCandidates();
-          clickCandidates.push({ at: Date.now(), restoreTo: active.id });
-        }
-      } catch {}
-    }
-    if (action === "snapshot" || action === "find" || (action === "read_page" && !params.ref_id)) {
-      return await crossFrame(action, params);
-    }
-    const { frameId, params: p } = frameRoute(params);
-    if (DIALOG_TRIGGERS.has(action)) return await withDialogGuard(action, p, frameId, tab.id);
-    return await toContent(action, p, frameId);
+  if (params.tabId == null) params = { ...params, tabId: tab.id };
+  if (action === "click" || action === "click_selector") {
+    try {
+      const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (active && drivenTabIds.has(active.id)) {
+        pruneClickCandidates();
+        clickCandidates.push({ at: Date.now(), restoreTo: active.id });
+      }
+    } catch {}
   }
+  if (action === "snapshot" || action === "find" || (action === "read_page" && !params.ref_id)) {
+    return await crossFrame(action, params);
+  }
+  const { frameId, params: p } = frameRoute(params);
+  if (DIALOG_TRIGGERS.has(action)) return await withDialogGuard(action, p, frameId, tab.id);
+  return await toContent(action, p, frameId);
+}
 
-  switch (action) {
-    case "navigate":
-      return { ok: true, result: await navigate(params) };
-    case "screenshot":
+// BSK-style Background Action Handler Registry
+const BACKGROUND_HANDLERS = new Map([
+  ["navigate", async (params) => ({ ok: true, result: await navigate(params) })],
+  [
+    "screenshot",
+    async (params) => {
       if (params.fullPage) {
         const tab = await targetTab(params);
         await wakeIfAsleep(tab);
@@ -512,76 +844,134 @@ async function dispatch({ action, params = {} }) {
         return await handleCdp("capture_screenshot", { ...params, emulateFocus }, tab.id);
       }
       return { ok: true, result: await screenshot(params) };
-    case "list_tabs":
-      return { ok: true, result: await listTabs() };
-    case "new_tab":
-      return { ok: true, result: await newTab(params) };
-    case "group_tab":
-      return { ok: true, result: await groupTab(params) };
-    case "ungroup_tab":
-      return { ok: true, result: await ungroupTab(params) };
-    case "switch_tab":
-      return { ok: true, result: await switchTab(params) };
-    case "close_tab":
-      return { ok: true, result: await closeTab(params) };
-    case "go_back":
-      return { ok: true, result: await goBack(params) };
-    case "go_forward":
-      return { ok: true, result: await goForward(params) };
-    case "reload":
-      return { ok: true, result: await reload(params) };
-    case "list_windows":
-      return { ok: true, result: await listWindows() };
-    case "focus_window":
-      return { ok: true, result: await focusWindow(params) };
-    case "current_tab":
-      return { ok: true, result: await currentTab(params) };
-    case "read_pdf":
-      return { ok: true, result: await readPdf(params) };
-    case "wait_for":
-      return await waitFor(params);
-
-    case "handle_dialog": {
+    },
+  ],
+  ["list_tabs", async () => ({ ok: true, result: await listTabs() })],
+  ["new_tab", async (params) => ({ ok: true, result: await newTab(params) })],
+  ["group_tab", async (params) => ({ ok: true, result: await groupTab(params) })],
+  ["ungroup_tab", async (params) => ({ ok: true, result: await ungroupTab(params) })],
+  ["switch_tab", async (params) => ({ ok: true, result: await switchTab(params) })],
+  ["close_tab", async (params) => ({ ok: true, result: await closeTab(params) })],
+  ["go_back", async (params) => ({ ok: true, result: await goBack(params) })],
+  ["go_forward", async (params) => ({ ok: true, result: await goForward(params) })],
+  ["reload", async (params) => ({ ok: true, result: await reload(params) })],
+  ["list_windows", async () => ({ ok: true, result: await listWindows() })],
+  ["focus_window", async (params) => ({ ok: true, result: await focusWindow(params) })],
+  ["current_tab", async (params) => ({ ok: true, result: await currentTab(params) })],
+  ["read_pdf", async (params) => ({ ok: true, result: await readPdf(params) })],
+  ["wait_for", async (params) => await waitFor(params)],
+  [
+    "download",
+    async (params) => {
+      const tab = await targetTab(params);
+      return { ok: true, result: await downloadFile(params, tab.id) };
+    },
+  ],
+  [
+    "request_help",
+    async (params) => {
+      const tab = await targetTab(params);
+      return { ok: true, result: await requestHelp(params, tab.id) };
+    },
+  ],
+  ["agent_window", async (params) => ({ ok: true, result: await agentWindow(params) })],
+  [
+    "handle_dialog",
+    async (params) => {
       const tab = await targetTab(params);
       await ensureAttached(tab.id);
       if (!params.action || params.action === "peek") {
         return { ok: true, result: { dialog: pendingDialog(tab.id) } };
       }
       return { ok: true, result: await handleDialog(tab.id, params) };
-    }
-    case "pending_dialog": {
+    },
+  ],
+  [
+    "pending_dialog",
+    async (params) => {
       const tab = await targetTab(params);
       return { ok: true, result: { dialog: isAttached(tab.id) ? pendingDialog(tab.id) : null } };
-    }
-
-    case "reload_extension":
-      return { ok: true, result: reloadExtension() };
-    case "record_start":
-      return recorderRefusal(action, params.tabId) || (await recordStart(params));
-    case "record_stop":
-      return recorderRefusal(action, params.tabId) || (await recordStop(params));
-    case "record_get": {
-      const refused = recorderRefusal(action, params.tabId);
+    },
+  ],
+  ["reload_extension", async () => ({ ok: true, result: reloadExtension() })],
+  [
+    "record_start",
+    async (params) => recorderRefusal("record_start", params.tabId) || (await recordStart(params)),
+  ],
+  [
+    "record_stop",
+    async (params) => recorderRefusal("record_stop", params.tabId) || (await recordStop(params)),
+  ],
+  [
+    "record_get",
+    async (params) => {
+      const refused = recorderRefusal("record_get", params.tabId);
       if (refused) return refused;
       if (!isRecording && recordingSteps.length === 0) {
         const { [RECORDING_KEY]: wasRecording } = await chrome.storage.session.get(RECORDING_KEY);
         if (wasRecording) {
-          return {
-            ok: false,
-            error: "capture state was reset by a service-worker restart — call record_start again",
-          };
+          return createRpcError(
+            "STATE_RESET",
+            "capture state was reset by a service-worker restart — call record_start again",
+            { reason: "service_worker_restarted" }
+          );
         }
       }
       return { ok: true, result: { count: recordingSteps.length, steps: recordingSteps } };
-    }
-    case "replay":
-      // Replaying the recorded steps (no steps given) reads the recording
-      return (
-        (!params.steps && recorderRefusal("record_get", params.tabId)) || (await replay(params))
-      );
+    },
+  ],
+  [
+    "replay",
+    async (params) =>
+      (!params.steps && recorderRefusal("record_get", params.tabId)) || (await replay(params)),
+  ],
+  ["wheel", async (params) => await handleWheel(params)],
+  ["drag", async (params) => await handleDrag(params)],
+]);
 
-    default:
-      throw new Error(`unknown action: ${action}`);
+async function dispatch({ action, params = {} }) {
+  const alias = ACTION_ALIASES[action];
+  if (alias) {
+    action = alias.action;
+    params = { ...alias.params, ...params };
+  }
+  if (NOT_EXTENSION_ACTIONS[action]) {
+    return createRpcError(
+      "NOT_A_PAGE_ACTION",
+      `'${action}' is not a page action — use ${NOT_EXTENSION_ACTIONS[action]}.`,
+      { reason: "not_a_page_action" }
+    );
+  }
+
+  try {
+    if (action === "upload") return await handleUpload(params);
+    if (action === "element_rect") return await handleElementRect(params);
+    if (action === "element_screenshot") return await handleElementScreenshot(params);
+    if (
+      action === "press_key" &&
+      Array.isArray(params.modifiers) &&
+      params.modifiers.length &&
+      !params.allowSynthetic
+    ) {
+      return await handlePressKeyWithModifiers(params);
+    }
+    if (action === "wheel") return await handleWheel(params);
+    if (action === "drag") return await handleDrag(params);
+
+    if (CDP_ACTIONS.includes(action)) return await handleCdpAction(action, params);
+    if (NET_ACTIONS.includes(action)) return await handleNetAction(action, params);
+    if (CONTENT_ACTIONS.includes(action)) return await handleContentAction(action, params);
+
+    const handler = BACKGROUND_HANDLERS.get(action);
+    if (handler) {
+      return await handler(params);
+    }
+
+    return createRpcError("UNKNOWN_ACTION", `unknown action: ${action}`, {
+      reason: "unknown_action",
+    });
+  } catch (err) {
+    return formatDispatchError(err, action);
   }
 }
 
@@ -766,6 +1156,283 @@ async function waitFor(params) {
   const ms = params.timeoutMs ?? 1000;
   await new Promise((r) => setTimeout(r, ms));
   return { ok: true, result: { waitedMs: ms } };
+}
+
+// Triggers a file download by clicking a page target or requesting a URL directly,
+// tracking progress via chrome.downloads until the file completely lands on disk.
+async function downloadFile(params, tabId) {
+  if (!params || (!params.url && !params.target)) {
+    throw new Error("download requires 'target' (element to click) or 'url'");
+  }
+
+  const timeoutMs = params.timeoutMs || 30000;
+  let targetDownloadId = null;
+
+  const downloadPromise = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`download timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    function cleanup() {
+      clearTimeout(timer);
+      if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onCreated) {
+        chrome.downloads.onCreated.removeListener(onCreated);
+        chrome.downloads.onChanged.removeListener(onChanged);
+      }
+    }
+
+    function onCreated(item) {
+      if (!targetDownloadId) {
+        targetDownloadId = item.id;
+      }
+    }
+
+    function onChanged(delta) {
+      if (targetDownloadId && delta.id === targetDownloadId) {
+        if (delta.state && delta.state.current === "complete") {
+          cleanup();
+          chrome.downloads.search({ id: targetDownloadId }, (items) => {
+            resolve(items && items[0] ? items[0] : { id: targetDownloadId, state: "complete" });
+          });
+        } else if (delta.state && delta.state.current === "interrupted") {
+          cleanup();
+          reject(
+            new Error(`download interrupted: ${delta.error ? delta.error.current : "unknown"}`)
+          );
+        }
+      }
+    }
+
+    if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onCreated) {
+      chrome.downloads.onCreated.addListener(onCreated);
+      chrome.downloads.onChanged.addListener(onChanged);
+    } else {
+      clearTimeout(timer);
+      reject(new Error("chrome.downloads API not available (check extension permissions)"));
+    }
+  });
+
+  const startTime = Date.now();
+  if (params.url) {
+    await new Promise((resolve, reject) => {
+      chrome.downloads.download(
+        {
+          url: params.url,
+          ...(params.filename ? { filename: params.filename } : {}),
+          saveAs: false,
+        },
+        (id) => {
+          if (chrome.runtime && chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else {
+            targetDownloadId = id;
+            resolve(id);
+          }
+        }
+      );
+    });
+  } else if (params.target) {
+    const { frameId, params: p } = frameRoute(params);
+    const clickRes = await toContent("click", { target: p.target, tabId }, frameId);
+    if (!clickRes.ok) throw new Error(clickRes.error || "failed to click download target");
+  } else {
+    throw new Error("download requires 'target' (element to click) or 'url'");
+  }
+
+  const item = await downloadPromise;
+  const durationMs = Date.now() - startTime;
+  return {
+    downloaded: true,
+    id: item.id,
+    filename: item.filename ? item.filename.split(/[/\\]/).pop() : item.filename,
+    filePath: item.filename,
+    fileSize: item.fileSize || item.totalBytes || 0,
+    mime: item.mime || null,
+    durationMs,
+  };
+}
+
+// Projects element rect across nested same-origin and cross-origin (OOPIF) iframes
+// into top-level window viewport coordinates.
+async function projectFrameRect(tabId, frameId, localRect) {
+  if (!localRect || frameId === 0 || localRect.reachedTop) return localRect;
+  let curFrameId = frameId;
+  let x = localRect.x;
+  let y = localRect.y;
+
+  while (curFrameId !== 0) {
+    let frameInfo = null;
+    try {
+      frameInfo = await chrome.webNavigation.getFrame({ tabId, frameId: curFrameId });
+    } catch {}
+    if (!frameInfo || frameInfo.parentFrameId == null) break;
+
+    const parentFrameId = frameInfo.parentFrameId;
+    const parentReply = await toContent(
+      "iframe_rect",
+      { url: frameInfo.url, tabId },
+      parentFrameId
+    );
+    if (parentReply && parentReply.ok && parentReply.result) {
+      x += (parentReply.result.x || 0) + (parentReply.result.borderLeft || 0);
+      y += (parentReply.result.y || 0) + (parentReply.result.borderTop || 0);
+    }
+    curFrameId = parentFrameId;
+  }
+
+  return {
+    ...localRect,
+    x,
+    y,
+  };
+}
+
+// Human-in-the-loop assistance: surfaces browser, mounts in-page help banner, and
+// waits for user resolution, matching url navigation, or appearance of target selector.
+async function requestHelp(params, tabId) {
+  const reason = params.reason || "Human assistance requested";
+  const timeoutMs = Math.min(Math.max(params.timeoutMs || 60000, 1000), 300000);
+  const { waitForUrl, waitForSelector } = params;
+
+  const tab = await chrome.tabs.get(tabId);
+  if (chrome.windows && chrome.windows.update) {
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  }
+  await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+
+  await toContent("show_help_banner", { reason, tabId }, 0).catch(() => {});
+
+  const startTime = Date.now();
+  let resolvedBy = null;
+
+  try {
+    const pollIntervalMs = 500;
+    while (Date.now() - startTime < timeoutMs) {
+      const checkRes = await toContent("check_help_resolved", { tabId }, 0).catch(() => null);
+      if (checkRes && checkRes.ok && checkRes.result && checkRes.result.resolved) {
+        resolvedBy = "user_done";
+        break;
+      }
+
+      const curTab = await chrome.tabs.get(tabId).catch(() => null);
+      if (!curTab) throw new Error(`tab ${tabId} was closed while waiting for help`);
+      if (waitForUrl && curTab.url && curTab.url.includes(waitForUrl)) {
+        resolvedBy = "url_matched";
+        break;
+      }
+
+      if (waitForSelector) {
+        const findRes = await toContent(
+          "wait_for",
+          { selector: waitForSelector, timeoutMs: 100, tabId },
+          0
+        ).catch(() => null);
+        if (findRes && findRes.ok) {
+          resolvedBy = "selector_matched";
+          break;
+        }
+      }
+
+      await new Promise((r) => setTimeout(r, pollIntervalMs));
+    }
+  } finally {
+    await toContent("hide_help_banner", { tabId }, 0).catch(() => {});
+  }
+
+  const durationMs = Date.now() - startTime;
+  if (!resolvedBy) {
+    return {
+      resolved: false,
+      timedOut: true,
+      durationMs,
+      note: `human assistance timed out after ${timeoutMs}ms`,
+    };
+  }
+
+  const finalTab = await chrome.tabs.get(tabId).catch(() => tab);
+  return {
+    resolved: true,
+    by: resolvedBy,
+    durationMs,
+    url: finalTab.url,
+    title: finalTab.title,
+  };
+}
+
+let agentWindowId = null;
+
+if (typeof chrome !== "undefined" && chrome.windows && chrome.windows.onRemoved) {
+  chrome.windows.onRemoved.addListener((windowId) => {
+    if (windowId === agentWindowId) {
+      agentWindowId = null;
+    }
+  });
+}
+
+// Manages a dedicated agent window to isolate automation from user's primary windows.
+async function agentWindow(params = {}) {
+  const action = params.action || "get";
+  if (action === "get") {
+    if (agentWindowId != null) {
+      try {
+        const win = await chrome.windows.get(agentWindowId, { populate: true });
+        return {
+          active: true,
+          windowId: win.id,
+          tabs: (win.tabs || []).map((t) => ({ id: t.id, url: t.url, title: t.title })),
+          tabCount: win.tabs ? win.tabs.length : 0,
+        };
+      } catch {
+        agentWindowId = null;
+      }
+    }
+    return { active: false, windowId: null, tabCount: 0 };
+  }
+
+  if (action === "open") {
+    if (agentWindowId != null) {
+      try {
+        const existing = await chrome.windows.get(agentWindowId);
+        return { active: true, windowId: existing.id, opened: false };
+      } catch {
+        agentWindowId = null;
+      }
+    }
+    const createData = {
+      focused: params.focused !== false,
+      ...(params.url ? { url: params.url } : {}),
+      ...(params.width ? { width: Math.round(params.width) } : {}),
+      ...(params.height ? { height: Math.round(params.height) } : {}),
+    };
+    const win = await chrome.windows.create(createData);
+    agentWindowId = win.id;
+    return { active: true, windowId: win.id, opened: true };
+  }
+
+  if (action === "close") {
+    if (agentWindowId != null) {
+      const wid = agentWindowId;
+      agentWindowId = null;
+      try {
+        await chrome.windows.remove(wid);
+        return { closed: true, windowId: wid };
+      } catch {
+        return { closed: false, error: "window already closed" };
+      }
+    }
+    return { closed: false, note: "no active agent window" };
+  }
+
+  if (action === "focus") {
+    if (agentWindowId != null) {
+      await chrome.windows.update(agentWindowId, { focused: true });
+      return { focused: true, windowId: agentWindowId };
+    }
+    throw new Error("no active agent window to focus");
+  }
+
+  throw new Error(`unknown agent_window action: ${action}`);
 }
 
 const drivenTabIds = new Set();
@@ -1129,8 +1796,13 @@ async function listTabs() {
   };
 }
 
-async function newTab({ url, wait = true, activate = false }) {
-  const tab = await chrome.tabs.create({ ...(url ? { url } : {}), active: activate === true });
+async function newTab({ url, wait = true, activate = false, windowId }) {
+  const targetWindowId = windowId ?? (typeof agentWindowId !== "undefined" ? agentWindowId : null);
+  const tab = await chrome.tabs.create({
+    ...(url ? { url } : {}),
+    active: activate === true,
+    ...(targetWindowId != null ? { windowId: targetWindowId } : {}),
+  });
   if (!url || wait === false) return { id: tab.id };
 
   try {
@@ -1492,7 +2164,7 @@ function frameLabel(url) {
   }
 }
 
-// A frame-qualified ref ('@f3:ref_5') routes to that frame with the bare ref. On 'target' only a
+// A frame-qualified ref ('@f3:e5') routes to that frame with the bare ref. On 'target' only a
 // ref-shaped inner part counts, so visible text such as 'f2: Settings' stays in the top frame.
 function frameRoute(params = {}) {
   for (const key of ["target", "ref", "ref_id"]) {
@@ -1501,7 +2173,7 @@ function frameRoute(params = {}) {
     if (!m) continue;
     const bare = m[2].startsWith("@") ? m[2].slice(1) : m[2];
     if (key === "target") {
-      if (!/^(?:ref_\d+|e\d+)$/.test(bare)) continue;
+      if (!/^(?:e\d+)$/.test(bare)) continue;
       return { frameId: Number(m[1]), params: { ...params, target: "@" + bare } };
     }
     return { frameId: Number(m[1]), params: { ...params, [key]: bare } };
@@ -1597,7 +2269,7 @@ function mergeFrameResults(action, parts, params = {}, errors = []) {
           .trim();
         if (!body) continue;
         const qualified = body.replace(
-          /\[@(ref_\d+)\]/g,
+          /\[@(e\d+)\]/g,
           (_m, r) => `[@${qualifyRef(fr.frameId, r)}]`
         );
         const shortUrl = frameLabel(fr.url).slice(0, 90);
@@ -1660,7 +2332,7 @@ function mergeFrameResults(action, parts, params = {}, errors = []) {
   for (const { fr, result } of parts) {
     if (fr.frameId === 0 || !result.tree) continue;
     const qualified = result.tree.replace(
-      /\[(ref_\d+)\]/g,
+      /\[(e\d+)\]/g,
       (_, r) => `[${qualifyRef(fr.frameId, r)}]`
     );
     tree += `\n  iframe [f${fr.frameId}] ${fr.url}\n` + qualified.replace(/^/gm, "  ");

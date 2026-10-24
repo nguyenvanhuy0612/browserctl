@@ -7,6 +7,7 @@ export const TABLESS_ACTIONS = new Set([
   "list_windows",
   "focus_window",
   "reload_extension",
+  "agent_window",
 ]);
 
 // Actions that name their tab in `id` rather than `tabId`.
@@ -42,6 +43,8 @@ export const READ_ACTIONS = new Set([
   "net_get",
   "get_console_logs",
   "get_network_requests",
+  "get_network_request",
+  "network_rule_list",
   "get_response_body",
 ]);
 

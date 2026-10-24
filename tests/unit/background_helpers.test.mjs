@@ -45,7 +45,7 @@ function load(tabs) {
 const nothingHappened = () => ({
   ok: true,
   result: {
-    clicked: "@ref_1",
+    clicked: "@e1",
     effect: {
       measured: true,
       domMutated: false,
@@ -142,10 +142,10 @@ function loadFrameRoute() {
 
 test("a frame-qualified ref in 'target' routes to that frame", () => {
   const frameRoute = loadFrameRoute();
-  for (const target of ["@f3:ref_5", "f3:ref_5", "@f3:@ref_5"]) {
+  for (const target of ["@f3:e5", "f3:e5", "@f3:@e5"]) {
     const out = frameRoute({ target, tabId: 7 });
     assert.equal(out.frameId, 3, target);
-    assert.equal(out.params.target, "@ref_5", target);
+    assert.equal(out.params.target, "@e5", target);
     assert.equal(out.params.tabId, 7);
   }
 });
@@ -160,9 +160,28 @@ test("text in 'target' that only looks frame-qualified stays in the top frame", 
 });
 
 test("the CLI's frame-qualified 'ref' still routes", () => {
-  const out = loadFrameRoute()({ ref: "@f12:ref_3" });
+  const out = loadFrameRoute()({ ref: "@f12:e3" });
   assert.equal(out.frameId, 12);
-  assert.equal(out.params.ref, "ref_3");
+  assert.equal(out.params.ref, "e3");
+});
+
+test("mergeFrameResults: qualifies subframe census elements with frame-qualified refs [@f<id>:e<n>]", () => {
+  const ctx = vm.createContext({
+    frameLabel: (u) => u,
+  });
+  vm.runInContext(
+    "const qualifyRef = (frameId, ref) => (frameId === 0 || !ref ? ref : `f${frameId}:${ref}`);\n" +
+      extractFunction("mergeFrameResults") +
+      "\nglobalThis.__fn = mergeFrameResults;",
+    ctx
+  );
+  const parts = [
+    { fr: { frameId: 0, url: "https://top.test" }, result: { census: '  [@e1] <button> "Top"' } },
+    { fr: { frameId: 2, url: "https://sub.test" }, result: { census: '  [@e5] <button> "Sub"' } },
+  ];
+  const merged = ctx.__fn("snapshot", parts);
+  assert.ok(merged.result.census.includes('[@e1] <button> "Top"'));
+  assert.ok(merged.result.census.includes('[@f2:e5] <button> "Sub"'));
 });
 
 test("a visible-tab element capture crops the element's box, scaled to device pixels", async () => {
@@ -222,7 +241,7 @@ test("a11y coverage is measured against the whole census, not its first page", a
     AX_CENSUS_LIMIT: 100000,
     toContent: async (action, params) => {
       asked = params;
-      const all = names.map((t, i) => ({ ref: `ref_${i + 1}`, tag: "button", text: t }));
+      const all = names.map((t, i) => ({ ref: `e${i + 1}`, tag: "button", text: t }));
       return { ok: true, result: { elements: all.slice(0, params.limit ?? 200) } };
     },
   });
@@ -956,10 +975,7 @@ test("any other network error on navigation carries no certificate code", () => 
 // recording (or last recorded), so one session never stops, wipes or reads another's recording.
 function loadRecorderGuard(state) {
   const ctx = vm.createContext({ ...state });
-  vm.runInContext(
-    extractFunction("recorderRefusal") + "\nglobalThis.__fn = recorderRefusal;",
-    ctx
-  );
+  vm.runInContext(extractFunction("recorderRefusal") + "\nglobalThis.__fn = recorderRefusal;", ctx);
   return ctx.__fn;
 }
 
@@ -979,7 +995,11 @@ test("a finished recording is read only from its tab; a new one may start anywhe
   assert.equal(guard("record_get", 6).code, "RECORDING_ELSEWHERE");
   assert.equal(guard("record_get", 5), null);
   assert.equal(guard("record_start", 6), null);
-  const fresh = loadRecorderGuard({ isRecording: false, recordingTabId: null, recordedTabId: null });
+  const fresh = loadRecorderGuard({
+    isRecording: false,
+    recordingTabId: null,
+    recordedTabId: null,
+  });
   assert.equal(fresh("record_get", 6), null);
 });
 
@@ -1000,7 +1020,11 @@ test("closing the recorded tab frees the recorder", () => {
     ctx
   );
   ctx.__forget(6);
-  assert.equal(ctx.__guard("record_start", 6).code, "RECORDING_ELSEWHERE", "another tab closing changes nothing");
+  assert.equal(
+    ctx.__guard("record_start", 6).code,
+    "RECORDING_ELSEWHERE",
+    "another tab closing changes nothing"
+  );
   ctx.__forget(5);
   assert.equal(ctx.__guard("record_start", 6), null);
   assert.equal(ctx.__guard("record_get", 6), null);
@@ -1020,4 +1044,299 @@ test("the hello lists the ids of the open tabs", async () => {
   const extras = await ctx.__fn();
   assert.deepEqual([...extras.tabs], [4, 9]);
   assert.equal(extras.focused, true);
+});
+
+test("downloadFile: requires target or url", async () => {
+  const ctx = vm.createContext({
+    setTimeout,
+    clearTimeout,
+    chrome: {
+      downloads: {
+        onCreated: { addListener: () => {} },
+        onChanged: { addListener: () => {} },
+      },
+    },
+    frameRoute: (p) => ({ frameId: 0, params: p }),
+    toContent: async () => ({ ok: true }),
+  });
+  vm.runInContext(extractFunction("downloadFile") + "\nglobalThis.__fn = downloadFile;", ctx);
+  await assert.rejects(
+    () => ctx.__fn({}, 1),
+    /download requires 'target' \(element to click\) or 'url'/
+  );
+});
+
+test("downloadFile: tracks url download to completion and returns metadata", async () => {
+  let createdCb, changedCb;
+  const mockItem = {
+    id: 42,
+    filename: "/Users/test/Downloads/data.csv",
+    fileSize: 1024,
+    mime: "text/csv",
+  };
+  const ctx = vm.createContext({
+    setTimeout,
+    clearTimeout,
+    chrome: {
+      downloads: {
+        onCreated: {
+          addListener: (fn) => {
+            createdCb = fn;
+          },
+          removeListener: () => {},
+        },
+        onChanged: {
+          addListener: (fn) => {
+            changedCb = fn;
+          },
+          removeListener: () => {},
+        },
+        download: (opts, cb) => {
+          setTimeout(() => {
+            cb(42);
+            createdCb({ id: 42 });
+            setTimeout(() => {
+              changedCb({ id: 42, state: { current: "complete" } });
+            }, 10);
+          }, 5);
+        },
+        search: (query, cb) => cb([mockItem]),
+      },
+    },
+    frameRoute: (p) => ({ frameId: 0, params: p }),
+    toContent: async () => ({ ok: true }),
+  });
+  vm.runInContext(extractFunction("downloadFile") + "\nglobalThis.__fn = downloadFile;", ctx);
+  const res = await ctx.__fn({ url: "https://example.com/data.csv" }, 1);
+  assert.equal(res.downloaded, true);
+  assert.equal(res.filename, "data.csv");
+  assert.equal(res.filePath, "/Users/test/Downloads/data.csv");
+  assert.equal(res.fileSize, 1024);
+  assert.equal(res.mime, "text/csv");
+  assert.ok(typeof res.durationMs === "number");
+});
+
+test("downloadFile: handles interrupted download with clear error", async () => {
+  let createdCb, changedCb;
+  const ctx = vm.createContext({
+    setTimeout,
+    clearTimeout,
+    chrome: {
+      downloads: {
+        onCreated: {
+          addListener: (fn) => {
+            createdCb = fn;
+          },
+          removeListener: () => {},
+        },
+        onChanged: {
+          addListener: (fn) => {
+            changedCb = fn;
+          },
+          removeListener: () => {},
+        },
+        download: (opts, cb) => {
+          setTimeout(() => {
+            cb(43);
+            createdCb({ id: 43 });
+            setTimeout(() => {
+              changedCb({
+                id: 43,
+                state: { current: "interrupted" },
+                error: { current: "NETWORK_FAILED" },
+              });
+            }, 10);
+          }, 5);
+        },
+      },
+    },
+    frameRoute: (p) => ({ frameId: 0, params: p }),
+    toContent: async () => ({ ok: true }),
+  });
+  vm.runInContext(extractFunction("downloadFile") + "\nglobalThis.__fn = downloadFile;", ctx);
+  await assert.rejects(
+    () => ctx.__fn({ url: "https://example.com/fail.zip" }, 1),
+    /download interrupted: NETWORK_FAILED/
+  );
+});
+
+test("uploadWithChooserFallback: intercepts file chooser dialog and attaches files to backend node", async () => {
+  const interceptedState = [];
+  let attachedFiles = null;
+  let chooserCb = null;
+
+  const ctx = vm.createContext({
+    setTimeout,
+    clearTimeout,
+    interceptFileChooser: async (tabId, enabled) => {
+      interceptedState.push(enabled);
+    },
+    onFileChooserOpened: (tabId, fn) => {
+      chooserCb = fn;
+      return () => {
+        chooserCb = null;
+      };
+    },
+    setFilesOnBackendNode: async (tabId, backendNodeId, files) => {
+      attachedFiles = { backendNodeId, files };
+    },
+    toContent: async (action, params) => {
+      setTimeout(() => {
+        if (chooserCb) chooserCb({ backendNodeId: 999, mode: "selectSingle" });
+      }, 5);
+      return { ok: true, result: { clicked: params.target } };
+    },
+  });
+
+  vm.runInContext(
+    extractFunction("uploadWithChooserFallback") + "\nglobalThis.__fn = uploadWithChooserFallback;",
+    ctx
+  );
+
+  const res = await ctx.__fn(1, { target: "#custom-btn" }, ["/path/to/test.png"], 0);
+  assert.equal(res.ok, true);
+  assert.equal(res.result.method, "chooser_intercepted");
+  assert.deepEqual(res.result.files, ["test.png"]);
+  assert.equal(res.result.count, 1);
+  assert.equal(attachedFiles.backendNodeId, 999);
+  assert.deepEqual(attachedFiles.files, ["/path/to/test.png"]);
+  assert.deepEqual(
+    interceptedState,
+    [true, false],
+    "interception enabled before click, disabled in finally"
+  );
+});
+
+test("projectFrameRect: adds enclosing iframe coordinates across frame hierarchy", async () => {
+  const ctx = vm.createContext({
+    chrome: {
+      webNavigation: {
+        getFrame: async ({ frameId }) => {
+          if (frameId === 2)
+            return { frameId: 2, parentFrameId: 1, url: "https://child.frame/inner" };
+          if (frameId === 1)
+            return { frameId: 1, parentFrameId: 0, url: "https://mid.frame/outer" };
+          return { frameId: 0, parentFrameId: null, url: "https://top.page/" };
+        },
+      },
+    },
+    toContent: async (action, params, parentFrameId) => {
+      if (parentFrameId === 1) {
+        return { ok: true, result: { x: 50, y: 60, borderLeft: 2, borderTop: 2 } };
+      }
+      if (parentFrameId === 0) {
+        return { ok: true, result: { x: 200, y: 300, borderLeft: 5, borderTop: 5 } };
+      }
+      return { ok: true, result: { x: 0, y: 0 } };
+    },
+  });
+  vm.runInContext(
+    extractFunction("projectFrameRect") + "\nglobalThis.__fn = projectFrameRect;",
+    ctx
+  );
+  const local = { x: 10, y: 20, width: 100, height: 40 };
+  const res = await ctx.__fn(1, 2, local);
+  assert.equal(res.x, 267);
+  assert.equal(res.y, 387);
+  assert.equal(res.width, 100);
+  assert.equal(res.height, 40);
+});
+
+test("requestHelp: surfaces window, displays banner, and resolves on user completion", async () => {
+  let focusedWindow = null;
+  let activeTab = null;
+  let bannerState = null;
+  let pollCount = 0;
+
+  const ctx = vm.createContext({
+    setTimeout,
+    clearTimeout,
+    chrome: {
+      tabs: {
+        get: async (id) => ({ id, windowId: 99, url: "https://site.test/login", title: "Login" }),
+        update: async (id, opts) => {
+          if (opts.active) activeTab = id;
+        },
+      },
+      windows: {
+        update: async (wid, opts) => {
+          if (opts.focused) focusedWindow = wid;
+        },
+      },
+    },
+    toContent: async (action, params) => {
+      if (action === "show_help_banner") bannerState = "shown";
+      if (action === "hide_help_banner") bannerState = "hidden";
+      if (action === "check_help_resolved") {
+        pollCount++;
+        return { ok: true, result: { resolved: pollCount >= 2 } };
+      }
+      return { ok: true };
+    },
+  });
+  vm.runInContext(extractFunction("requestHelp") + "\nglobalThis.__fn = requestHelp;", ctx);
+
+  const res = await ctx.__fn({ reason: "Solve 2FA", timeoutMs: 5000 }, 42);
+  assert.equal(res.resolved, true);
+  assert.equal(res.by, "user_done");
+  assert.equal(focusedWindow, 99);
+  assert.equal(activeTab, 42);
+  assert.equal(bannerState, "hidden");
+});
+
+test("agentWindow: manages dedicated window lifecycle (open, get, focus, close)", async () => {
+  let created = null;
+  let focused = null;
+  let removed = null;
+
+  const ctx = vm.createContext({
+    chrome: {
+      windows: {
+        create: async (opts) => {
+          created = opts;
+          return { id: 777 };
+        },
+        get: async (id) => ({ id, tabs: [{ id: 101, url: "about:blank" }] }),
+        update: async (id, opts) => {
+          focused = id;
+        },
+        remove: async (id) => {
+          removed = id;
+        },
+        onRemoved: { addListener: () => {} },
+      },
+    },
+  });
+  vm.runInContext(
+    "var agentWindowId = null;\n" +
+      extractFunction("agentWindow") +
+      "\nglobalThis.__fn = agentWindow;",
+    ctx
+  );
+
+  const openRes = await ctx.__fn({
+    action: "open",
+    url: "https://agent.test",
+    width: 1280,
+    height: 800,
+  });
+  assert.equal(openRes.active, true);
+  assert.equal(openRes.windowId, 777);
+  assert.equal(created.url, "https://agent.test");
+  assert.equal(created.width, 1280);
+
+  const getRes = await ctx.__fn({ action: "get" });
+  assert.equal(getRes.active, true);
+  assert.equal(getRes.tabCount, 1);
+
+  const focusRes = await ctx.__fn({ action: "focus" });
+  assert.equal(focusRes.focused, true);
+  assert.equal(focused, 777);
+
+  const closeRes = await ctx.__fn({ action: "close" });
+  assert.equal(closeRes.closed, true);
+  assert.equal(removed, 777);
+
+  const afterClose = await ctx.__fn({ action: "get" });
+  assert.equal(afterClose.active, false);
 });

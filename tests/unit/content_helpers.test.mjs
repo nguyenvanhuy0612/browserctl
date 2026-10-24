@@ -481,7 +481,7 @@ function loadFind(elements) {
 
 const composer = {
   __sel: 'div[role="textbox"][contenteditable]',
-  __ref: "ref_266",
+  __ref: "e266",
   __role: "textbox",
   __name: "Message Body",
   tagName: "DIV",
@@ -492,7 +492,7 @@ test("find: a CSS selector returns the same ref shape as a text match", () => {
   const find = loadFind([composer]);
   const res = find({ selector: 'div[role="textbox"][contenteditable]' });
   assert.equal(res.count, 1);
-  assert.equal(res.matches[0].ref, "ref_266");
+  assert.equal(res.matches[0].ref, "e266");
   assert.equal(res.matches[0].matchedBy, "selector");
   assert.equal(res.matches[0].role, "textbox");
   assert.equal(res.matches[0].clickable, false); // a contenteditable div is not INTERACTIVE_SELECTOR
@@ -519,11 +519,11 @@ test("find: an invalid selector is reported as invalid, not as 'not found'", () 
 });
 
 test("find: hidden matches still return refs, and visible ones are preferred", () => {
-  const hidden = { ...composer, __ref: "ref_9", __visible: false };
+  const hidden = { ...composer, __ref: "e9", __visible: false };
   const find = loadFind([composer, hidden]);
   const res = find({ selector: 'div[role="textbox"][contenteditable]' });
   assert.equal(res.count, 1);
-  assert.equal(res.matches[0].ref, "ref_266");
+  assert.equal(res.matches[0].ref, "e266");
   assert.match(res.note, /1 further match\(es\) are hidden/);
 });
 
@@ -558,7 +558,7 @@ function loadGetProperty(elements) {
   ];
   const stubs = {
     document: {
-      documentElement: mkEl("html", "ref_0"),
+      documentElement: mkEl("html", "e0"),
       title: "T",
       baseURI: "https://site.test/jobs",
       createDocumentFragment: () => ({
@@ -580,8 +580,8 @@ function loadGetProperty(elements) {
 
 test("get_property: all=true returns one row per match, each with its own ref", () => {
   const els = [
-    mkEl("a", "ref_1", { text: "Apply on company site", attrs: { href: "/go/1" } }),
-    mkEl("a", "ref_2", { text: "Easy Apply", attrs: { href: "https://wd.example/job/R7940" } }),
+    mkEl("a", "e1", { text: "Apply on company site", attrs: { href: "/go/1" } }),
+    mkEl("a", "e2", { text: "Easy Apply", attrs: { href: "https://wd.example/job/R7940" } }),
   ];
   const get_property = loadGetProperty(els);
   const res = get_property({ property: "attr", attr: "href", selector: "a", all: true });
@@ -589,7 +589,7 @@ test("get_property: all=true returns one row per match, each with its own ref", 
   assert.equal(res.count, 2);
   assert.deepEqual(
     res.matches.map((m) => m.ref),
-    ["ref_1", "ref_2"]
+    ["e1", "e2"]
   );
   // A relative href is resolved, which is the whole reason the read was re-derived in JS.
   assert.equal(res.matches[0].resolved, "https://site.test/go/1");
@@ -597,7 +597,7 @@ test("get_property: all=true returns one row per match, each with its own ref", 
 });
 
 test("get_property: all=true reads text as happily as attributes", () => {
-  const get_property = loadGetProperty([mkEl("li", "ref_7", { text: "  Row one  " })]);
+  const get_property = loadGetProperty([mkEl("li", "e7", { text: "  Row one  " })]);
   const res = get_property({ property: "text", selector: "li", all: true });
   assert.equal(res.matches[0].value, "Row one");
 });
@@ -605,7 +605,7 @@ test("get_property: all=true reads text as happily as attributes", () => {
 test("get_property: all=true without a selector says why, instead of reading one element", () => {
   const get_property = loadGetProperty([]);
   assert.throws(
-    () => get_property({ property: "text", ref: "ref_1", all: true }),
+    () => get_property({ property: "text", ref: "e1", all: true }),
     /'all' reads every match/
   );
 });
@@ -619,7 +619,7 @@ test("get_property: all=true on zero matches is an answer, not a failure", () =>
 });
 
 test("get_property: all=true caps at max and says how many it left", () => {
-  const els = Array.from({ length: 5 }, (_, i) => mkEl("a", `ref_${i}`, { text: `row ${i}` }));
+  const els = Array.from({ length: 5 }, (_, i) => mkEl("a", `e${i + 1}`, { text: `row ${i}` }));
   const get_property = loadGetProperty(els);
   const res = get_property({ property: "text", selector: "a", all: true, max: 2 });
   assert.equal(res.count, 5);
@@ -628,7 +628,7 @@ test("get_property: all=true caps at max and says how many it left", () => {
 });
 
 test("get_property: single-element reads are unchanged by the all-matches path", () => {
-  const get_property = loadGetProperty([mkEl("h1", "ref_3", { text: "Senior QA" })]);
+  const get_property = loadGetProperty([mkEl("h1", "e3", { text: "Senior QA" })]);
   const res = get_property({ property: "text", selector: "h1" });
   assert.equal(res.property, "text");
   assert.equal(res.value, "Senior QA");
@@ -668,7 +668,7 @@ test("select_option: 'option' matches by value first", () => {
     { value: "vn", text: "Vietnam" },
     { value: "us", text: "United States" },
   ]);
-  const res = select_option({ ref: "ref_1", option: "vn" });
+  const res = select_option({ ref: "e1", option: "vn" });
   assert.equal(el.value, "vn");
   assert.equal(res.selected, "vn");
 });
@@ -678,21 +678,21 @@ test("select_option: 'option' falls back to the visible label", () => {
     { value: "vn", text: "Vietnam" },
     { value: "us", text: "United States" },
   ]);
-  select_option({ ref: "ref_1", option: "United States" });
+  select_option({ ref: "e1", option: "United States" });
   assert.equal(el.value, "us");
 });
 
 test("select_option: a miss lists what the select actually offers", () => {
   const { select_option } = loadSelectOption([{ value: "vn", text: "Vietnam" }]);
   assert.throws(
-    () => select_option({ ref: "ref_1", option: "Vietnaam" }),
+    () => select_option({ ref: "e1", option: "Vietnaam" }),
     /no option matching "Vietnaam".*available: Vietnam \(value=vn\)/s
   );
 });
 
 test("select_option: the explicit value/label params still work", () => {
   const { select_option, el } = loadSelectOption([{ value: "vn", text: "Vietnam" }]);
-  select_option({ ref: "ref_1", label: "Vietnam" });
+  select_option({ ref: "e1", label: "Vietnam" });
   assert.equal(el.value, "vn");
 });
 
@@ -755,11 +755,11 @@ const leaf = (text, attrs = {}) => ({
 
 test("get_property: fields reads several values from each row in one call", () => {
   const rows = [
-    mkRow("li.result", "ref_1", {
+    mkRow("li.result", "e1", {
       h3: leaf("First post"),
       a: leaf("First post", { href: "/one" }),
     }),
-    mkRow("li.result", "ref_2", {
+    mkRow("li.result", "e2", {
       h3: leaf("Second post"),
       a: leaf("Second post", { href: "https://x.test/two" }),
     }),
@@ -778,11 +778,11 @@ test("get_property: fields reads several values from each row in one call", () =
   // A URL comes back absolute — that is what the read was for.
   assert.equal(res.matches[0].url, "https://site.test/one");
   assert.equal(res.matches[1].url, "https://x.test/two");
-  assert.equal(res.matches[1].ref, "ref_2");
+  assert.equal(res.matches[1].ref, "e2");
 });
 
 test("get_property: a field that matches nothing inside the row says so, and says why", () => {
-  const rows = [mkRow("li.result", "ref_1", { h3: leaf("Only a title") })];
+  const rows = [mkRow("li.result", "e1", { h3: leaf("Only a title") })];
   const get_property = loadGetPropertyFields(rows);
   const res = get_property({
     selector: "li.result",
@@ -796,7 +796,7 @@ test("get_property: a field that matches nothing inside the row says so, and say
 
 test("get_property: the field note and the paging note do not overwrite each other", () => {
   const rows = Array.from({ length: 5 }, (_, i) =>
-    mkRow("li.result", `ref_${i}`, { h3: leaf(`row ${i}`) })
+    mkRow("li.result", `e${i + 1}`, { h3: leaf(`row ${i}`) })
   );
   const get_property = loadGetPropertyFields(rows);
   const res = get_property({
@@ -824,7 +824,7 @@ test("get_property: a field whose property answers outside 'value' is not a sile
   // mechanism exists to prevent.
   const el = {
     __sel: "button",
-    __ref: "ref_1",
+    __ref: "e1",
     tagName: "BUTTON",
     innerText: "Submit",
     textContent: "Submit",
@@ -1086,7 +1086,7 @@ function loadResolveTarget(
     isVisible: (el) => !el.__hidden,
     accessibleName: (el) => el.getAttribute?.("aria-label") || el["aria-label"] || "",
     elementText: (el) => el.innerText || el.textContent || "",
-    getOrAssignRef: (el) => el.__ref?.replace(/^@/, "") || "ref_1",
+    getOrAssignRef: (el) => el.__ref?.replace(/^@/, "") || "e1",
     resolve: (idx) => elements[idx] || null,
     matchesByText: (t) =>
       customMatches
@@ -1100,14 +1100,48 @@ function loadResolveTarget(
   return resolveTarget;
 }
 
-test("resolveTarget: step 1 resolves by ref (@ref_1, ref_1)", () => {
-  const btn = { tagName: "BUTTON", innerText: "Save", isConnected: true, __ref: "ref_42" };
+test("resolveTarget: target resolving by @e1 and e1 succeeds", () => {
+  const btn = { tagName: "BUTTON", innerText: "Save", isConnected: true, __ref: "e1" };
   const resolveTarget = loadResolveTarget([btn]);
-  const res = resolveTarget({ target: "@ref_42" });
-  assert.equal(res, btn);
-  assert.equal(res._resolved.by, "ref");
-  assert.equal(res._resolved.ref, "@ref_42");
-  assert.equal(res._resolved.matchCount, 1);
+
+  const resAt = resolveTarget({ target: "@e1" });
+  assert.equal(resAt, btn);
+  assert.equal(resAt._resolved.by, "ref");
+  assert.equal(resAt._resolved.ref, "@e1");
+  assert.equal(resAt._resolved.matchCount, 1);
+
+  const resBare = resolveTarget({ target: "e1" });
+  assert.equal(resBare, btn);
+  assert.equal(resBare._resolved.by, "ref");
+  assert.equal(resBare._resolved.ref, "@e1");
+  assert.equal(resBare._resolved.matchCount, 1);
+});
+
+test("resolveTarget: legacy @ref_1 and ref_1 are strictly refused (no backward compatibility)", () => {
+  const btn = { tagName: "BUTTON", innerText: "Save", isConnected: true, __ref: "e1" };
+  const resolveTarget = loadResolveTarget([btn]);
+
+  assert.throws(
+    () => resolveTarget({ target: "@ref_1" }),
+    (err) => {
+      assert.ok(
+        err.code === "ELEMENT_NOT_FOUND" || err.code === "INVALID_TARGET" || err.code === "INVALID_SELECTOR",
+        `expected failure code, got: ${err.code}`
+      );
+      return true;
+    }
+  );
+
+  assert.throws(
+    () => resolveTarget({ target: "ref_1" }),
+    (err) => {
+      assert.ok(
+        err.code === "ELEMENT_NOT_FOUND" || err.code === "INVALID_TARGET",
+        `expected failure code, got: ${err.code}`
+      );
+      return true;
+    }
+  );
 });
 
 test("resolveTarget: step 2 resolves single bare CSS selector, while explicit css= prefix grants first-match", () => {
@@ -1115,7 +1149,7 @@ test("resolveTarget: step 2 resolves single bare CSS selector, while explicit cs
     tagName: "BUTTON",
     innerText: "Submit",
     isConnected: true,
-    __ref: "ref_0",
+    __ref: "e10",
     __sel: "#btn-unique",
   };
   const resolveTargetSingle = loadResolveTarget([btnUnique]);
@@ -1128,14 +1162,14 @@ test("resolveTarget: step 2 resolves single bare CSS selector, while explicit cs
     tagName: "BUTTON",
     innerText: "Submit",
     isConnected: true,
-    __ref: "ref_1",
+    __ref: "e1",
     __sel: ".btn-submit",
   };
   const btn2 = {
     tagName: "BUTTON",
     innerText: "Submit",
     isConnected: true,
-    __ref: "ref_2",
+    __ref: "e2",
     __sel: ".btn-submit",
   };
   const resolveTargetMulti = loadResolveTarget([btn1, btn2]);
@@ -1158,7 +1192,7 @@ test("resolveTarget: step 2 resolves single bare CSS selector, while explicit cs
 });
 
 test("resolveTarget: bare digit string resolves to visible text, not swallowed as ref", () => {
-  const pageBtn = { tagName: "BUTTON", innerText: "3", isConnected: true, __ref: "ref_99" };
+  const pageBtn = { tagName: "BUTTON", innerText: "3", isConnected: true, __ref: "e99" };
   const resolveTarget = loadResolveTarget([pageBtn]);
   const res = resolveTarget({ target: "3" });
   assert.equal(res, pageBtn);
@@ -1167,7 +1201,7 @@ test("resolveTarget: bare digit string resolves to visible text, not swallowed a
 });
 
 test("resolveTarget: numeric target resolves by snapshot index", () => {
-  const pageBtn = { tagName: "BUTTON", innerText: "Third", isConnected: true, __ref: "ref_5" };
+  const pageBtn = { tagName: "BUTTON", innerText: "Third", isConnected: true, __ref: "e5" };
   const resolveTarget = loadResolveTarget([null, null, pageBtn]);
   const res = resolveTarget({ target: 2 });
   assert.equal(res, pageBtn);
@@ -1175,7 +1209,7 @@ test("resolveTarget: numeric target resolves by snapshot index", () => {
 });
 
 test("resolveTarget: index= prefix string resolves by snapshot index", () => {
-  const pageBtn = { tagName: "BUTTON", innerText: "Third", isConnected: true, __ref: "ref_5" };
+  const pageBtn = { tagName: "BUTTON", innerText: "Third", isConnected: true, __ref: "e5" };
   const resolveTarget = loadResolveTarget([null, null, pageBtn]);
   const res = resolveTarget({ target: "index=2" });
   assert.equal(res, pageBtn);
@@ -1187,7 +1221,7 @@ test("resolveTarget: bare tag name 'search' prefers visible button text (step 3)
     tagName: "SEARCH",
     innerText: "Landmark",
     isConnected: true,
-    __ref: "ref_1",
+    __ref: "e1",
     __sel: "search",
     __nonInteractive: true,
   };
@@ -1195,7 +1229,7 @@ test("resolveTarget: bare tag name 'search' prefers visible button text (step 3)
     tagName: "BUTTON",
     innerText: "search",
     isConnected: true,
-    __ref: "ref_2",
+    __ref: "e2",
     __sel: "button",
   };
   const resolveTarget = loadResolveTarget([landmark, btn]);
@@ -1209,7 +1243,7 @@ test("resolveTarget: bare tag name resolves as type selector in step 6 when no t
     tagName: "NAV",
     innerText: "Quick jump",
     isConnected: true,
-    __ref: "ref_3",
+    __ref: "e3",
     __sel: "nav",
     __nonInteractive: true,
   };
@@ -1220,7 +1254,7 @@ test("resolveTarget: bare tag name resolves as type selector in step 6 when no t
 });
 
 test("resolveTarget: step 3 resolves by exact visible text on interactive elements", () => {
-  const btn = { tagName: "BUTTON", innerText: "Log In", isConnected: true, __ref: "ref_10" };
+  const btn = { tagName: "BUTTON", innerText: "Log In", isConnected: true, __ref: "e10" };
   const resolveTarget = loadResolveTarget([btn]);
   const res = resolveTarget({ target: "Log In" });
   assert.equal(res, btn);
@@ -1235,7 +1269,7 @@ test("resolveTarget: step 4 resolves by exact placeholder or aria-label", () => 
     placeholder: "Search docs...",
     getAttribute: (n) => (n === "placeholder" ? "Search docs..." : null),
     isConnected: true,
-    __ref: "ref_20",
+    __ref: "e20",
   };
   const resolveTarget = loadResolveTarget([input]);
   const res = resolveTarget({ target: "Search docs..." });
@@ -1249,7 +1283,7 @@ test("resolveTarget: step 5 resolves by visible text substring", () => {
     tagName: "BUTTON",
     innerText: "Checkout now with Paypal",
     isConnected: true,
-    __ref: "ref_30",
+    __ref: "e30",
   };
   const resolveTarget = loadResolveTarget([btn]);
   const res = resolveTarget({ target: "Checkout now" });
@@ -1259,8 +1293,8 @@ test("resolveTarget: step 5 resolves by visible text substring", () => {
 });
 
 test("resolveTarget: ambiguity in step 3 throws AMBIGUOUS_TARGET with candidates", () => {
-  const btn1 = { tagName: "BUTTON", innerText: "Cancel", isConnected: true, __ref: "ref_1" };
-  const btn2 = { tagName: "BUTTON", innerText: "Cancel", isConnected: true, __ref: "ref_2" };
+  const btn1 = { tagName: "BUTTON", innerText: "Cancel", isConnected: true, __ref: "e1" };
+  const btn2 = { tagName: "BUTTON", innerText: "Cancel", isConnected: true, __ref: "e2" };
   const resolveTarget = loadResolveTarget([btn1, btn2]);
   assert.throws(
     () => resolveTarget({ target: "Cancel" }),
@@ -1268,8 +1302,8 @@ test("resolveTarget: ambiguity in step 3 throws AMBIGUOUS_TARGET with candidates
       assert.equal(err.code, "AMBIGUOUS_TARGET");
       assert.equal(err.diagnostics.count, 2);
       assert.equal(err.diagnostics.candidates.length, 2);
-      assert.equal(err.diagnostics.candidates[0].ref, "@ref_1");
-      assert.equal(err.diagnostics.candidates[1].ref, "@ref_2");
+      assert.equal(err.diagnostics.candidates[0].ref, "@e1");
+      assert.equal(err.diagnostics.candidates[1].ref, "@e2");
       return true;
     }
   );
@@ -1282,7 +1316,7 @@ test("resolveTarget: explicit prefix css=, text=, placeholder= forces that resol
     innerText: "Search",
     getAttribute: (n) => (n === "placeholder" ? "Search" : null),
     isConnected: true,
-    __ref: "ref_11",
+    __ref: "e11",
   };
   const resolveTarget = loadResolveTarget([input]);
   const res = resolveTarget({ target: "placeholder=Search" });
@@ -1298,7 +1332,7 @@ test("fill_form: sequential stop-on-failure contract returns completed fields an
     buildEffect: () => ({ mutations: 0 }),
     resolveTarget: ({ target }) => {
       if (target === "fail_field") throw new Error("element not found");
-      return { _resolved: { by: "css", ref: "@ref_1", matchCount: 1 } };
+      return { _resolved: { by: "css", ref: "@e1", matchCount: 1 } };
     },
     insertIntoEditable: (el, val) => filledFields.push(val),
     actionability: () => null,
@@ -1331,7 +1365,7 @@ test("resolveTarget: a label and the control it names are one exact-text hit, no
     innerText: "",
     "aria-label": "Email",
     isConnected: true,
-    __ref: "ref_7",
+    __ref: "e7",
   };
   const label = { tagName: "LABEL", innerText: "Email", isConnected: true, control: input };
   const resolveTarget = loadResolveTarget([label, input]);
@@ -1340,13 +1374,13 @@ test("resolveTarget: a label and the control it names are one exact-text hit, no
 
 test("resolveTarget: a wrapper around the matching control is not a second match", () => {
   const li = { tagName: "LI", innerText: "Home", isConnected: true };
-  const a = { tagName: "A", innerText: "Home", isConnected: true, parentNode: li, __ref: "ref_8" };
+  const a = { tagName: "A", innerText: "Home", isConnected: true, parentNode: li, __ref: "e8" };
   const resolveTarget = loadResolveTarget([li, a]);
   assert.equal(resolveTarget({ target: "Home" }), a);
 });
 
 test("resolveTarget: a ref is lower-case, so a control labelled 'E5' is reached by its text", () => {
-  const cell = { tagName: "BUTTON", innerText: "E5", isConnected: true, __ref: "ref_9" };
+  const cell = { tagName: "BUTTON", innerText: "E5", isConnected: true, __ref: "e9" };
   const resolveTarget = loadResolveTarget([cell]);
   assert.equal(resolveTarget({ target: "E5" }), cell);
 });
@@ -1412,7 +1446,7 @@ test("refs: the maps are swept, so a long-lived page does not keep every ref it 
   const labels = Object.keys(ctx.refLabels).length;
   assert.ok(labels <= 250 + 100 + 1, `labels must be capped, ${labels} kept`);
   assert.ok(ctx.refLabels[keepRef], "a live ref keeps its label");
-  assert.ok(ctx.refLabels.ref_1001, "the newest refs keep their labels for the stale-ref hint");
+  assert.ok(ctx.refLabels.e1001, "the newest refs keep their labels for the stale-ref hint");
 });
 
 function loadNaming(labels = {}) {
@@ -1545,6 +1579,27 @@ test("census: a disabled control that is on screen is listed; a hidden one is no
     isShownDisabled({ disabled: true, getBoundingClientRect: () => ({ width: 0, height: 0 }) }),
     false
   );
+});
+
+test("census emission: emits [@e1], [@e2] for elements and [@f2:e5] for frame-qualified refs", () => {
+  const slices = [
+    extractConst(SRC, "OFF_TAGS"),
+    extractFunction(SRC, "stateTags"),
+    "const listedRefs = new Set();",
+    "const rowContextOf = () => '';",
+    "const shortHref = (h) => h;",
+    SRC.slice(SRC.indexOf("const formatDesc = "), SRC.indexOf("const dupOf = ")),
+  ];
+  const { formatDesc } = loadFromContentJs(slices, ["formatDesc"]);
+
+  const line1 = formatDesc({ ref: "e1", tag: "button", text: "Save" });
+  assert.equal(line1, '[@e1] <button> "Save"');
+
+  const line2 = formatDesc({ ref: "e2", tag: "input", type: "text", placeholder: "Search" });
+  assert.equal(line2, '[@e2] <input>[type=text] (placeholder: "Search")');
+
+  const lineFrame = formatDesc({ ref: "f2:e5", tag: "button", text: "Submit" });
+  assert.equal(lineFrame, '[@f2:e5] <button> "Submit"');
 });
 
 test("find ranks an exact name before a word start, and a word start before a substring", () => {
@@ -1819,7 +1874,11 @@ test("controlKind: inputs, selects, checkboxes and editable regions are fields",
     ctl("DIV", { role: "combobox" }),
     ctl("DIV", { role: "switch" }),
   ]) {
-    assert.equal(controlKind(el), "fields", `${el.tagName} ${el.type || el.getAttribute("role") || ""}`);
+    assert.equal(
+      controlKind(el),
+      "fields",
+      `${el.tagName} ${el.type || el.getAttribute("role") || ""}`
+    );
   }
 });
 
@@ -1844,3 +1903,480 @@ test("controlKind: anchors and role=link are links", () => {
   assert.equal(controlKind(ctl("A")), "links");
   assert.equal(controlKind(ctl("SPAN", { role: "link" })), "links");
 });
+
+test("dispatchUnhover sends pointer and mouse departure events at the element's centre", () => {
+  const got = [];
+  class Ev {
+    constructor(type, init) {
+      this.type = type;
+      Object.assign(this, init);
+    }
+  }
+  const { dispatchUnhover } = loadFromContentJs(
+    [extractFunction(SRC, "dispatchUnhover")],
+    ["dispatchUnhover"],
+    {
+      PointerEvent: class extends Ev {},
+      MouseEvent: class extends Ev {},
+      window: {},
+    }
+  );
+  const el = {
+    isConnected: true,
+    getBoundingClientRect: () => ({ x: 10, y: 20, width: 100, height: 40 }),
+    dispatchEvent: (e) => got.push(e),
+  };
+  dispatchUnhover(el);
+  assert.deepEqual(
+    got.map((e) => e.type),
+    ["pointermove", "mousemove", "pointerout", "pointerleave", "mouseout", "mouseleave"]
+  );
+  assert.ok(got.every((e) => e.clientX === 60 && e.clientY === 40));
+});
+
+test("HoverLatch: reassertHoverLatch re-dispatches hover to connected latched element and drops disconnected ones", () => {
+  const got = [];
+  class Ev {
+    constructor(type, init) {
+      this.type = type;
+      Object.assign(this, init);
+    }
+  }
+  const slices = [
+    "var activeHoverLatch = null;",
+    "function setLatch(l) { activeHoverLatch = l; }",
+    "function getLatch() { return activeHoverLatch; }",
+    extractFunction(SRC, "dispatchHover"),
+    extractFunction(SRC, "clearHoverLatch"),
+    extractFunction(SRC, "reassertHoverLatch"),
+  ];
+  const { reassertHoverLatch, clearHoverLatch, setLatch, getLatch } = loadFromContentJs(
+    slices,
+    ["reassertHoverLatch", "clearHoverLatch", "setLatch", "getLatch"],
+    {
+      PointerEvent: class extends Ev {},
+      MouseEvent: class extends Ev {},
+      window: {},
+      isVisible: () => true,
+    }
+  );
+
+  const el = {
+    isConnected: true,
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: 50, height: 20 }),
+    dispatchEvent: (e) => got.push(e.type),
+  };
+
+  setLatch({ el, ref: "e1", target: "menu" });
+  const reasserted = reassertHoverLatch();
+  assert.equal(reasserted, true);
+  assert.equal(got.length, 6);
+  assert.equal(got[0], "pointerover");
+
+  el.isConnected = false;
+  const failed = reassertHoverLatch();
+  assert.equal(failed, false);
+  assert.equal(getLatch(), null);
+
+  setLatch({ el: { isConnected: true }, ref: "e2" });
+  clearHoverLatch();
+  assert.equal(getLatch(), null);
+});
+
+test("findNativeSetter and setNativeValue: bypass instance-level React setters and walk prototype chain", () => {
+  const slices = [extractFunction(SRC, "findNativeSetter"), extractFunction(SRC, "setNativeValue")];
+  const { findNativeSetter, setNativeValue } = loadFromContentJs(slices, [
+    "findNativeSetter",
+    "setNativeValue",
+  ]);
+
+  let nativeValue = "";
+  const nativeProto = {
+    get value() {
+      return nativeValue;
+    },
+    set value(v) {
+      nativeValue = `native:${v}`;
+    },
+  };
+
+  const inputEl = Object.create(nativeProto);
+  setNativeValue(inputEl, "plain");
+  assert.equal(nativeValue, "native:plain");
+
+  let reactIntercepted = false;
+  const reactEl = Object.create(nativeProto);
+  Object.defineProperty(reactEl, "value", {
+    get() {
+      return "react_stale";
+    },
+    set() {
+      reactIntercepted = true;
+    },
+    configurable: true,
+  });
+
+  const setter = findNativeSetter(reactEl, "value");
+  assert.ok(setter);
+  setNativeValue(reactEl, "new_val");
+  assert.equal(reactIntercepted, false, "native setter bypasses React own-property setter");
+  assert.equal(nativeValue, "native:new_val");
+
+  const subProto = Object.create(nativeProto);
+  const customEl = Object.create(subProto);
+  setNativeValue(customEl, "multi_level");
+  assert.equal(nativeValue, "native:multi_level");
+});
+
+test("insertIntoEditable: normalizes CRLF and returns matched verification status", () => {
+  const slices = [
+    extractFunction(SRC, "findNativeSetter"),
+    extractFunction(SRC, "setNativeValue"),
+    extractFunction(SRC, "insertIntoEditable"),
+  ];
+  class Ev {
+    constructor(type, init) {
+      this.type = type;
+      Object.assign(this, init);
+    }
+  }
+  const { insertIntoEditable } = loadFromContentJs(slices, ["insertIntoEditable"], {
+    Event: class extends Ev {},
+  });
+
+  let val = "";
+  const input = {
+    tagName: "INPUT",
+    focus: () => {},
+    dispatchEvent: () => true,
+    get value() {
+      return val;
+    },
+    set value(v) {
+      val = v;
+    },
+  };
+
+  const res = insertIntoEditable(input, "line1\r\nline2\r\nline3");
+  assert.equal(val, "line1\nline2\nline3", "CRLF converted to LF");
+  assert.equal(res.valueNow, "line1\nline2\nline3");
+  assert.equal(res.matched, true);
+});
+
+test("fill_form: reports valueNow and matched verification for completed fields", async () => {
+  const slices = [extractFunction(SRC, "createStructuredError"), extractFunction(SRC, "fill_form")];
+  const fieldsValues = {};
+  const stubs = {
+    location: { href: "https://site.test" },
+    startMutationCounter: () => ({ stop: () => 0 }),
+    buildEffect: () => ({ mutations: 0 }),
+    resolveTarget: ({ target }) => {
+      const el = {
+        tagName: "INPUT",
+        _resolved: { by: "ref", ref: `@${target}` },
+        get value() {
+          return fieldsValues[target] || "";
+        },
+        set value(v) {
+          fieldsValues[target] = v;
+        },
+      };
+      return el;
+    },
+    insertIntoEditable: (el, val) => {
+      el.value = val;
+    },
+    actionability: () => null,
+  };
+  const { fill_form } = loadFromContentJs(slices, ["fill_form"], stubs);
+
+  const res = await fill_form({
+    fields: [
+      { target: "name", value: "QA Engineer" },
+      { target: "bio", value: "Line 1\r\nLine 2" },
+    ],
+    autoSettle: false,
+  });
+
+  assert.equal(res.filled.length, 2);
+  assert.equal(res.filled[0].valueNow, "QA Engineer");
+  assert.equal(res.filled[0].matched, true);
+  assert.equal(res.filled[1].value, "Line 1\r\nLine 2");
+});
+
+test("iframe_rect: finds matching iframe by url and returns bounding rect with border offsets", () => {
+  const mockIframe = {
+    tagName: "IFRAME",
+    src: "https://stripe.com/checkout",
+    getBoundingClientRect: () => ({ x: 100, y: 150, width: 400, height: 300 }),
+  };
+  const stubs = {
+    deepQueryAll: (sel) => (sel === "iframe" ? [mockIframe] : []),
+    window: {
+      getComputedStyle: () => ({ borderLeftWidth: "2px", borderTopWidth: "3px" }),
+    },
+  };
+  const { iframe_rect } = loadFromContentJs(
+    [extractFunction(SRC, "iframe_rect")],
+    ["iframe_rect"],
+    stubs
+  );
+  const r = iframe_rect({ url: "https://stripe.com/checkout?session=123" });
+  assert.equal(r.x, 100);
+  assert.equal(r.y, 150);
+  assert.equal(r.width, 400);
+  assert.equal(r.height, 300);
+  assert.equal(r.borderLeft, 2);
+  assert.equal(r.borderTop, 3);
+});
+
+test("show_help_banner and check_help_resolved: mounts banner and tracks user resolution", () => {
+  let attachedElement = null;
+  const mockDoc = {
+    body: {
+      appendChild: (el) => {
+        attachedElement = el;
+      },
+    },
+    getElementById: (id) => (attachedElement && attachedElement.id === id ? attachedElement : null),
+    createElement: (tag) => {
+      const attrs = {};
+      const el = {
+        tagName: tag.toUpperCase(),
+        setAttribute: (k, v) => {
+          attrs[k] = v;
+        },
+        getAttribute: (k) => attrs[k] ?? null,
+        removeAttribute: (k) => delete attrs[k],
+        remove: () => {
+          if (attachedElement === el) attachedElement = null;
+        },
+        appendChild: () => {},
+        addEventListener: (evt, fn) => {
+          if (evt === "click") el._onClick = fn;
+        },
+        style: {},
+      };
+      return el;
+    },
+  };
+  const stubs = {
+    document: mockDoc,
+    window: {},
+  };
+  const { show_help_banner, check_help_resolved, hide_help_banner } = loadFromContentJs(
+    [
+      extractFunction(SRC, "hide_help_banner"),
+      extractFunction(SRC, "show_help_banner"),
+      extractFunction(SRC, "check_help_resolved"),
+    ],
+    ["show_help_banner", "check_help_resolved", "hide_help_banner"],
+    stubs
+  );
+
+  const shown = show_help_banner({ reason: "Solve CAPTCHA" });
+  assert.equal(shown.displayed, true);
+  assert.ok(attachedElement != null);
+
+  const beforeClick = check_help_resolved();
+  assert.equal(beforeClick.active, true);
+  assert.equal(beforeClick.resolved, false);
+
+  // Simulate user clicking Done
+  attachedElement.setAttribute("data-bctl-help-resolved", "1");
+  const afterClick = check_help_resolved();
+  assert.equal(afterClick.active, true);
+  assert.equal(afterClick.resolved, true);
+
+  const hidden = hide_help_banner();
+  assert.equal(hidden.removed, true);
+  assert.equal(attachedElement, null);
+});
+
+// =====================================================================================
+// sanitizeCsvValue & extract_table — CSV sanitization & table matrix calculation
+// =====================================================================================
+
+function loadExtractTableHelpers(extraStubs = {}) {
+  const slices = [
+    extractFunction(SRC, "sanitizeCsvValue"),
+    extractFunction(SRC, "extract_table"),
+  ];
+  const stubs = {
+    getOrAssignRef: () => "e1",
+    resolveTarget: ({ target }) => (typeof target === "object" ? target : null),
+    deepQuery: () => null,
+    createStructuredError: (code, msg, details) => {
+      const err = new Error(`${code}: ${msg}`);
+      err.code = code;
+      err.details = details;
+      return err;
+    },
+    ...extraStubs,
+  };
+  return loadFromContentJs(slices, ["sanitizeCsvValue", "extract_table"], stubs);
+}
+
+function makeCell(tag, text, { rowspan, colspan } = {}) {
+  return {
+    tagName: tag.toUpperCase(),
+    innerText: text,
+    getAttribute(attr) {
+      if (attr === "rowspan" && rowspan != null) return String(rowspan);
+      if (attr === "colspan" && colspan != null) return String(colspan);
+      return null;
+    },
+  };
+}
+
+function makeRow(cells) {
+  return {
+    tagName: "TR",
+    children: cells,
+    querySelector(sel) {
+      if (sel === "th") return cells.find((c) => c.tagName === "TH") || null;
+      return null;
+    },
+  };
+}
+
+function makeTable(rows) {
+  return {
+    tagName: "TABLE",
+    querySelectorAll(sel) {
+      if (sel === "tr") return rows;
+      return [];
+    },
+  };
+}
+
+test("sanitizeCsvValue: handles null/undefined and basic strings", () => {
+  const { sanitizeCsvValue } = loadExtractTableHelpers();
+
+  assert.equal(sanitizeCsvValue(null), "");
+  assert.equal(sanitizeCsvValue(undefined), "");
+  assert.equal(sanitizeCsvValue("plain text"), "plain text");
+  assert.equal(sanitizeCsvValue(12345), "12345");
+});
+
+test("sanitizeCsvValue: csv_safe=true sanitizes spreadsheet formula injection characters", () => {
+  const { sanitizeCsvValue } = loadExtractTableHelpers();
+
+  // Formula triggers =, +, -, @, \t, \r are prepended with single quote (')
+  assert.equal(sanitizeCsvValue("=1+1", true), "'=1+1");
+  assert.equal(sanitizeCsvValue("+100", true), "'+100");
+  assert.equal(sanitizeCsvValue("-25", true), "'-25");
+  assert.equal(sanitizeCsvValue("@SUM(A1:A5)", true), "'@SUM(A1:A5)");
+  assert.equal(sanitizeCsvValue("\tindented", true), "'\tindented");
+  assert.equal(sanitizeCsvValue("\rreturn", true), "\"'\rreturn\"");
+
+  // When csv_safe is false, raw characters are preserved
+  assert.equal(sanitizeCsvValue("=1+1", false), "=1+1");
+  assert.equal(sanitizeCsvValue("+100", false), "+100");
+  assert.equal(sanitizeCsvValue("-25", false), "-25");
+  assert.equal(sanitizeCsvValue("@SUM(A1:A5)", false), "@SUM(A1:A5)");
+});
+
+test("sanitizeCsvValue: escapes double quotes, commas, and newlines in CSV format", () => {
+  const { sanitizeCsvValue } = loadExtractTableHelpers();
+
+  // Strings with commas are enclosed in quotes
+  assert.equal(sanitizeCsvValue("Alice, Bob"), '"Alice, Bob"');
+  // Double quotes are doubled and enclosed in quotes
+  assert.equal(sanitizeCsvValue('He said "hello"'), '"He said ""hello"""');
+  // Formula injection combined with comma or quotes
+  assert.equal(sanitizeCsvValue("=SUM(A1, B1)", true), '"\'=SUM(A1, B1)"');
+  assert.equal(sanitizeCsvValue('=cmd,"calc"', true), '"\'=cmd,""calc"""');
+});
+
+test("extract_table: matrix calculation correctly handles colspan and rowspan", () => {
+  const { extract_table } = loadExtractTableHelpers();
+  const plain = (o) => JSON.parse(JSON.stringify(o));
+
+  // 3-column table:
+  // Row 0: H1, H2, H3 (headers)
+  // Row 1: A1 (colspan 2), C1
+  // Row 2: A2 (rowspan 2), B2, C2
+  // Row 3: B3, C3 (A2 occupies col 0 from previous row)
+  const table = makeTable([
+    makeRow([makeCell("th", "H1"), makeCell("th", "H2"), makeCell("th", "H3")]),
+    makeRow([makeCell("td", "A1", { colspan: 2 }), makeCell("td", "C1")]),
+    makeRow([makeCell("td", "A2", { rowspan: 2 }), makeCell("td", "B2"), makeCell("td", "C2")]),
+    makeRow([makeCell("td", "B3"), makeCell("td", "C3")]),
+  ]);
+
+  const result = extract_table({ target: table, format: "json" });
+
+  assert.equal(result.table_ref, "@e1");
+  assert.deepEqual(plain(result.headers), ["H1", "H2", "H3"]);
+  assert.equal(result.total_rows, 3);
+  assert.equal(result.total_cols, 3);
+
+  // Row 1 (index 0 of rows)
+  assert.deepEqual(plain(result.rows[0]), { H1: "A1", H2: "A1", H3: "C1" });
+  // Row 2 (index 1 of rows)
+  assert.deepEqual(plain(result.rows[1]), { H1: "A2", H2: "B2", H3: "C2" });
+  // Row 3 (index 2 of rows) - A2 carried over via rowspan into H1
+  assert.deepEqual(plain(result.rows[2]), { H1: "A2", H2: "B3", H3: "C3" });
+});
+
+test("extract_table: generates synthetic headers for tables without <th> elements", () => {
+  const { extract_table } = loadExtractTableHelpers();
+  const plain = (o) => JSON.parse(JSON.stringify(o));
+
+  const table = makeTable([
+    makeRow([makeCell("td", "Val1"), makeCell("td", "Val2")]),
+    makeRow([makeCell("td", "Val3"), makeCell("td", "Val4")]),
+  ]);
+
+  const result = extract_table({ target: table });
+  assert.deepEqual(plain(result.headers), ["col_1", "col_2"]);
+  assert.equal(result.total_rows, 2);
+  assert.deepEqual(plain(result.rows[0]), { col_1: "Val1", col_2: "Val2" });
+  assert.deepEqual(plain(result.rows[1]), { col_1: "Val3", col_2: "Val4" });
+});
+
+test("extract_table: CSV format produces sanitized output with formula defense", () => {
+  const { extract_table } = loadExtractTableHelpers();
+
+  const table = makeTable([
+    makeRow([makeCell("th", "Name"), makeCell("th", "Formula"), makeCell("th", "Quote")]),
+    makeRow([
+      makeCell("td", "Test"),
+      makeCell("td", "=cmd|'calc'!A0"),
+      makeCell("td", 'Line "1", Line 2'),
+    ]),
+    makeRow([
+      makeCell("td", "+Positive"),
+      makeCell("td", "@lookup"),
+      makeCell("td", "-Negative"),
+    ]),
+  ]);
+
+  // With csv_safe: true
+  const safeResult = extract_table({ target: table, format: "csv", csv_safe: true });
+  assert.ok(safeResult.csv != null);
+  const safeLines = safeResult.csv.split("\n");
+  assert.equal(safeLines[0], "Name,Formula,Quote");
+  assert.equal(safeLines[1], "Test,'=cmd|'calc'!A0,\"Line \"\"1\"\", Line 2\"");
+  assert.equal(safeLines[2], "'+Positive,'@lookup,'-Negative");
+
+  // With csv_safe: false (formula injection characters are unescaped)
+  const unsafeResult = extract_table({ target: table, format: "csv", csv_safe: false });
+  const unsafeLines = unsafeResult.csv.split("\n");
+  assert.equal(unsafeLines[1], "Test,=cmd|'calc'!A0,\"Line \"\"1\"\", Line 2\"");
+  assert.equal(unsafeLines[2], "+Positive,@lookup,-Negative");
+});
+
+test("extract_table: throws ELEMENT_NOT_FOUND when table element is missing", () => {
+  const { extract_table } = loadExtractTableHelpers({
+    resolveTarget: () => null,
+    deepQuery: () => null,
+  });
+
+  assert.throws(
+    () => extract_table({ selector: "table#nonexistent" }),
+    (err) => err.code === "ELEMENT_NOT_FOUND"
+  );
+});
+

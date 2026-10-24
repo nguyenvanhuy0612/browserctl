@@ -255,7 +255,7 @@ async function runSingleTest(site, testIndex, total) {
 
     console.log(`- Census: ${buttons} buttons, ${links} links, ${inputs} inputs`);
     console.log(`- Hidden/Collapsed: ${ariaCollapsed} aria-expanded="false", ${hiddenAttrs} [hidden]`);
-    const errRes = await callBridge("click", { tabId, ref: "ref_999999_fake" });
+    const errRes = await callBridge("click", { tabId, ref: "e999999" });
     const structuredErrPassed = !errRes.ok && errRes.code === "STALE_REF";
 
     // 5. Test Physical Event Sequence & Quiescence on an in-viewport element

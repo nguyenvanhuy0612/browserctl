@@ -1,4 +1,4 @@
-# Tool surface as it actually is — generated 2026-10-10, browserctl 0.9.4
+# Tool surface as it actually is — generated 2026-10-24, browserctl 0.9.4
 
 Generated from the running server (`server._registeredTools`), not written by hand — the last
 hand-written version of this list claimed `all` on a tool that did not have it.
@@ -19,7 +19,7 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 | `extract` | *selector, fields, max, format | [READ] Extract structured rows from repeating containers without writing JavaScript. |
 | `get_content` | maxChars, format | [READ] The page's main readable prose — title, url, cleaned article text. For documentation, articles and postings. |
 | `get_property` | target, property, attr, format | [READ] Read an element's text, value, HTML, box, an attribute, or how many match. |
-| `click` | *target, doubleClick, button, waitFor, autoSettle, settleMs, format | [ACT] Click an element by 'target' (ref '@ref_1', CSS selector, visible text, or snapshot index). |
+| `click` | *target, doubleClick, button, waitFor, autoSettle, settleMs, format | [ACT] Click an element by 'target' (ref '@e1', CSS selector, visible text, or snapshot index). |
 | `type` | *target, *text, method, submit, waitFor, autoSettle, settleMs, format | [ACT] Put text into any editable target — input, textarea, contenteditable, or rich-text editor. |
 | `fill_form` | *fields, submitTarget, format | [ACT] Set several form controls in one round-trip: text fields, checkboxes, radios and <select>s. On failure, stops and reports the failed index and which fields were already written. |
 | `select_option` | *target, values, value, option, label, format | [ACT] Select one or more options in a <select> element. Values are matched by value first, then by visible label. |
@@ -42,12 +42,15 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 |---|---|---|
 | `exec_system_cmd` | *command, cwd, env, timeoutMs | [SESSION] Execute a shell/system command on the host running the bridge server. Returns exitCode, stdout, stderr, all (combined output), failed, timedOut, and signal. |
 
-### network (8)
+### network (11)
 
 | Tool | Parameters | Description |
 |---|---|---|
 | `get_network_requests` | urlContains, format | Return network requests captured since attach (method, url, status, type, size). Requires browser_cdp_attach. |
-| `get_response_body` | *requestId, format | Fetch the response body of a captured request by its requestId (from get_network_requests). Best-effort; bodies may be evicted. Requires browser_cdp_attach. |
+| `get_response_body` | *requestId, pointer, format | Fetch the response body of a captured request by its requestId (from get_network_requests). Best-effort; bodies may be evicted. Supports optional pointer (RFC 6901 JSON pointer). Requires browser_cdp_attach. |
+| `get_network_request` | *requestId, part, pointer, format | Inspect full details of a single network request by requestId. Supports slicing by part ('response', 'request', 'headers', 'timing') and querying JSON Pointer. |
+| `network_replay` | *requestId, url, method, headers, body, pointer, format | Re-executes a previously captured network request inside the target page context with current session cookies and credentials. Returns response status, headers, and body or JSON slice. |
+| `mock_route` | *action, ruleId, match, effect, format | Add, remove, list, or clear declarative network interception rules via CDP Fetch domain. Allows mocking response body/status or blocking URLs. |
 | `export_har` | bodies, format | Export captured network traffic as a HAR 1.2 object (headers, status, timing). Headers are included verbatim (local tool, no redaction). Set bodies=true to also include response bodies (best-effort, slower). Requires browser_cdp_attach. |
 | `net_start` | format | Start capturing network requests for the target tab via webRequest. No debugger banner, but no response bodies. Clears the previous buffer. |
 | `net_stop` | format | Stop the webRequest capture for the target tab. |
@@ -111,16 +114,22 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 | `spoof_visibility` | restore, format | Make the target tab's page JS believe it's visible/focused (document.hidden=false, document.visibilityState='visible', fires a visibilitychange event), WITHOUT actually foregrounding the tab or stealing the user's focus. Use this when scrolling a backgrounded tab isn't loading new content — many sites (e.g. infinite-scroll feeds) deliberately pause lazy-loading via the Page Visibility API while a tab is hidden, as a resource-saving pattern. This is explicit and opt-in on purpose: call it once before scrolling a background tab that needs to lazy-load, not automatically on every scroll — visibility state is also used for other things a site might not want spoofed unconditionally (video autoplay, polling/websocket resume, analytics time-on-page). Attaches the CDP debugger if not already attached (shows the 'is being debugged' bar). KNOWN LIMITATION: this patches JS-visible state only — it does not lift Chrome's renderer-level throttling of a backgrounded tab (requestAnimationFrame doesn't fire, IntersectionObserver rides the same throttled pipeline). If a site's lazy-load is driven by rAF/IO rather than a visibilitychange or scroll listener, this may not help; there is no further automatic fallback (foregrounding the tab, even briefly, is a deliberate manual decision this tool will never make for you). The spoof lasts until the page navigates or reloads; call it again on the new page, or pass restore: true to undo it. |
 | `current_tab` | format | Report which tab commands currently act on (id, url, title). Your session's target is resolved on your first command and held across user tab switches. Call this to confirm you're on the right page before snapshotting or reading sensitive content. |
 
-### advanced (9)
+### advanced (15)
 
 | Tool | Parameters | Description |
 |---|---|---|
 | `unload_tools` | profile, tools, format | [EXTEND] Unload specific tool categories or reset active tools back to the lightweight 'core' profile. Frees system prompt tokens when specialized tools are no longer needed. |
-| `describe_element` | *target, format | Given a 'target' (ref '@ref_1', CSS selector, visible text, or snapshot index), return everything useful for debugging it: tag, full attribute dump, bounding rect, visibility verdict WITH the specific reason ('visible' \| 'display:none' \| 'visibility:hidden' \| 'zero-size rect' \| 'opacity:0' \| 'disabled'), and whether it matches the interactive selector. Pierces open Shadow DOM. |
+| `describe_element` | *target, format | Given a 'target' (ref '@e1', CSS selector, visible text, or snapshot index), return everything useful for debugging it: tag, full attribute dump, bounding rect, visibility verdict WITH the specific reason ('visible' \| 'display:none' \| 'visibility:hidden' \| 'zero-size rect' \| 'opacity:0' \| 'disabled'), and whether it matches the interactive selector. Pierces open Shadow DOM. |
 | `a11y_snapshot` | max, format | SECOND OPINION on the page, from Chrome itself. Returns Chrome's own accessibility tree — the role, name and state it computes for every control by the HTML-AAM spec — not browserctl's census. Each node carries a 'ref' where the census has the same control, so results are directly actionable. |
 | `read_pdf` | format | Call this when the target tab is showing a PDF (browser_get_content/browser_find/browser_snapshot/browser_click all fail on a PDF tab with 'no readable DOM' — Chrome's built-in PDF viewer isn't a real DOM, so those tools cannot see its text). Returns the tab's URL and an isPdf verdict; this extension does NOT extract PDF text itself (a hand-rolled parser silently mis-reads subset/CID-font PDFs — dangerous for numeric data like a rate sheet). Fetch the returned URL yourself and read it with your own PDF-reading capability instead of retrying the DOM-based tools. |
-| `element_screenshot` | *target, format | Capture just one element as an image, named by 'target' (ref '@ref_1', CSS selector, visible text, or snapshot index). Same capture as browser_take_screenshot with a target: a visible tab is cropped without the debugger, a background tab attaches it. |
+| `element_screenshot` | *target, format | Capture just one element as an image, named by 'target' (ref '@e1', CSS selector, visible text, or snapshot index). Same capture as browser_take_screenshot with a target: a visible tab is cropped without the debugger, a background tab attaches it. |
 | `print_pdf` | format | Render the page to a PDF; returns base64 (save it to a .pdf file). Requires browser_cdp_attach. |
 | `go_back` | format | Navigate back in the target tab's history. |
 | `go_forward` | format | Navigate forward in the target tab's history. |
 | `reload_extension` | (none) | Reload the browser extension itself from disk (dev convenience; picks up edited extension code). The connection drops briefly and reconnects. |
+| `download` | target, url, filename, timeoutMs, format | Click an element to trigger a file download or download directly from a URL, waiting until the file finishes saving to disk. Returns filename, filePath, and fileSize. |
+| `request_help` | target, *reason, timeoutMs, waitForUrl, waitForSelector, format | Requests human assistance (e.g. solving CAPTCHA, 2FA, biometric auth). Focuses the browser, displays an in-page banner, and waits until the user clicks 'Done', or until a URL pattern or selector is matched. |
+| `agent_window` | action, url, width, height | Manages a dedicated agent window to isolate automation from the user's active windows. When open, newly created tabs automatically belong to the agent window. |
+| `wheel` | target, x, y, deltaX, deltaY, modifiers, format | Dispatch hardware mouse wheel events via CDP at coordinates or target element. Useful for Canvas, WebGL, maps, and virtualized scroll containers where DOM scrolling fails. |
+| `emulate` | device, viewport, colorScheme, geolocation, offline, clear, format | Emulate device metrics, mobile user-agent, touch events, dark/light color scheme, or geolocation. Use clear: true to restore defaults. |
+| `drag` | source, target, fromX, fromY, toX, toY, format | Drag an element from source to target, or between coordinates. Dispatches native CDP mouse and drag events. |

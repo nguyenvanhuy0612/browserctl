@@ -201,8 +201,8 @@ async function main() {
         `missing [iframe f<id> ...] section header:\n${snap.census}`
       );
       assert(
-        /f\d+:ref_\d+/.test(snap.census),
-        "no frame-qualified ref (f<id>:ref_N) found in compact view"
+        /f\d+:e\d+/.test(snap.census),
+        "no frame-qualified ref (f<id>:eN) found in compact view"
       );
     });
 
@@ -267,7 +267,7 @@ async function main() {
         /heading "Portal Panel"/.test(r.tree),
         `portal panel heading missing from read_page tree:\n${r.tree}`
       );
-      const m = r.tree.match(/button "Portal Action" \[(f\d+:ref_\d+)\]/);
+      const m = r.tree.match(/button "Portal Action" \[(f\d+:e\d+)\]/);
       assert(m, `portal panel button missing / not frame-qualified in read_page tree:\n${r.tree}`);
     });
 

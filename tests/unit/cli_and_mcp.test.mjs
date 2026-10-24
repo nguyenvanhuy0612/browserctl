@@ -278,7 +278,7 @@ test("CLI: parseTarget resolves custom elements and frame-qualified refs", async
         return;
       }
 
-      if (/^(?:f\\w+:)?(?:ref_?|e)\\w+$/i.test(trimmed)) {
+      if (/^(?:f\\w+:)?e\\w+$/i.test(trimmed)) {
         params.ref = "@" + trimmed;
         return;
       }
@@ -313,20 +313,20 @@ test("CLI: parseTarget resolves custom elements and frame-qualified refs", async
     if (p2.selector !== "tp-yt-paper-icon-item") throw new Error("Failed custom tag 2");
 
     const p3 = {};
-    parseTarget("@ref_12", p3);
-    if (p3.ref !== "@ref_12") throw new Error("Failed ref");
+    parseTarget("@e12", p3);
+    if (p3.ref !== "@e12") throw new Error("Failed ref");
 
     const p4 = {};
     parseTarget("--text=Normal Text", p4);
     if (p4.text !== "Normal Text") throw new Error("Failed text prefix");
 
     const p5 = {};
-    parseTarget("@f898:ref_54", p5);
-    if (p5.ref !== "@f898:ref_54") throw new Error("Failed frame-qualified ref with @");
+    parseTarget("@f898:e54", p5);
+    if (p5.ref !== "@f898:e54") throw new Error("Failed frame-qualified ref with @");
 
     const p6 = {};
-    parseTarget("f898:ref_54", p6);
-    if (p6.ref !== "@f898:ref_54") throw new Error("Failed frame-qualified ref without @");
+    parseTarget("f898:e54", p6);
+    if (p6.ref !== "@f898:e54") throw new Error("Failed frame-qualified ref without @");
 
     console.log("PARSE_TARGET_OK");
   `;
@@ -407,7 +407,7 @@ test("Extension: every content.js handler is routable (CONTENT_ACTIONS or backgr
     (name) =>
       !allowlisted.has(name) &&
       // a handler may instead be served by background.js itself (e.g. wait_for, record_*)
-      !new RegExp(`case "${name}"|"${name}":`).test(background)
+      !new RegExp(`case "${name}"|"${name}":|\\[\\s*"${name}",`).test(background)
   );
   assert.deepEqual(
     unroutable,
@@ -471,7 +471,7 @@ test("MCP: application errors keep their code/recoveryHint and are not retried",
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({
           ok: false,
-          error: 'ref "ref_4" not found or stale',
+          error: 'ref "@e4" not found or stale',
           code: "STALE_REF",
           recoveryHint: "Call snapshot again to refresh refs.",
         }));
@@ -489,7 +489,7 @@ test("MCP: application errors keep their code/recoveryHint and are not retried",
     const before = requestCount;
     let out = "";
     try {
-      const res = await clickHandler({ target: "@ref_4" });
+      const res = await clickHandler({ target: "@e4" });
       out = JSON.stringify(res);
     } catch (err) {
       out = String(err?.message || err);
@@ -573,7 +573,7 @@ test("MCP: unloaded capabilities are advertised, and browser_action lists its ca
         return res.end(JSON.stringify({ ok: true, result: {
           url: "https://example.com", title: "Example", scope: "viewport",
           viewport: { width: 800, height: 600, scrollY: 0, scrollHeight: 600, scrollPercent: 0 },
-          elements: [], census: "  [@ref_1] <button> \\"Go\\"",
+          elements: [], census: "  [@e1] <button> \\"Go\\"",
         } }));
       });
     });
@@ -629,7 +629,7 @@ test("MCP: find states the real scope of BOTH indexes it searches", async () => 
       [ft, "Shadow DOM", "find_text must say it searches shadow DOM"],
       [ft, "nearestInteractive", "find_text must document nearestInteractive"],
       [ft, "searchedScope", "find_text must point at searchedScope"],
-      [f, "f3:ref_5", "find must document frame-qualified refs"],
+      [f, "f3:e5", "find must document frame-qualified refs"],
       [f, "verbatim", "find must say frame refs are passed back verbatim"],
       [f, "matchedBy", "find must document matchedBy"],
     ];
@@ -994,8 +994,8 @@ test("A stale ref names its replacement instead of dead-ending (F57)", async () 
   assert.ok(/function relocateByLabel\(/.test(content), "a stale ref must be relocatable by that label");
   assert.ok(/relocatedTo/.test(content), "the error must name the replacement ref");
   assert.ok(/No re-snapshot needed/.test(content), "the hint must say a retry is enough");
-  // "@ref_2", "ref_2" and "2" all arrive here; the registry is keyed "ref_2".
-  assert.ok(/const canonical = atMatch \? `ref_\$\{parseInt\(atMatch\[1\], 10\)\}`/.test(content),
+  // "@e2", "e2" and "2" all arrive here; the registry is keyed "e2".
+  assert.ok(/const canonical = `e\$\{parseInt\(refMatch\[1\], 10\)\}`/.test(content),
     "the ref key must be canonicalised before the label lookup");
 });
 
@@ -1264,13 +1264,13 @@ test("Inline hints reach an MCP agent in a syntax it can call (F78)", async () =
   // The dialog notices are hints too, and they named a CLI verb for a tool that no longer
   // exists in any form. Driving Facebook by hand hit exactly this: "[Open dialog:
   // \"Notifications\" ... — use 'dismiss' to close]" with no browser_dismiss to call.
-  const dialogHint = mcpifyHints(`[Open dialog: "Notifications" 360x722 (@ref_57), does not block the page — read it with 'get text @ref_57'; close it with 'dismiss']`);
+  const dialogHint = mcpifyHints(`[Open dialog: "Notifications" 360x722 (@e57), does not block the page — read it with 'get text @e57'; close it with 'dismiss']`);
   assert.ok(dialogHint.includes('browser_action({action:"dismiss"})'), "F78: the dialog hint must name a callable close");
-  assert.ok(dialogHint.includes('browser_get_property({target:"ref_57"})'), "F78: the dialog hint must name the region read, by ref");
+  assert.ok(dialogHint.includes('browser_get_property({target:"e57"})'), "F78: the dialog hint must name the region read, by ref");
   assert.ok(!/use 'dismiss'|with 'dismiss'/.test(dialogHint), "F78: the CLI verb must not survive the rewrite");
 
   // A real ref keeps its number; the bare placeholder stays a placeholder.
-  assert.ok(mcpifyHints("[+168 chars: get text @ref_48]").includes('browser_get_property({target:"ref_48"})'),
+  assert.ok(mcpifyHints("[+168 chars: get text @e48]").includes('browser_get_property({target:"e48"})'),
     "F78: a concrete ref must survive the rewrite");
   assert.ok(mcpifyHints("[read: get text @ref]").includes('{target:"<ref>"}'),
     "F78: the bare @ref placeholder must not become a literal ref named 'ref'");
@@ -1396,7 +1396,7 @@ test("MCP: a parameter that is not in the schema is refused, and the refusal say
     // 4. Element addressing is one parameter. Anything else offered in its place is refused
     // and told the form to use, rather than rewritten behind the caller's back: a caller that
     // gets away with the wrong shape never learns the right one.
-    const other = await readPage({ ref: "ref_5" });
+    const other = await readPage({ ref: "e5" });
     if (!other.isError) throw new Error("a parameter outside the schema was accepted");
     if (!other.content[0].text.includes("target")) throw new Error("the refusal must name 'target': " + other.content[0].text);
     const clickOther = await server._registeredTools["browser_click"].handler({ selector: "#b" });
@@ -1449,9 +1449,9 @@ test("MCP: loadable element tools take 'target' and refuse the removed spellings
     const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
     const call = (n, a) => server._registeredTools[n].handler(a);
 
-    const shot = await call("browser_element_screenshot", { target: "@ref_2", format: "png" });
+    const shot = await call("browser_element_screenshot", { target: "@e2", format: "png" });
     if (shot.isError) throw new Error("element_screenshot refused target: " + shot.content[0].text);
-    if (calls.at(-1).action !== "element_screenshot" || calls.at(-1).params.target !== "@ref_2") {
+    if (calls.at(-1).action !== "element_screenshot" || calls.at(-1).params.target !== "@e2") {
       throw new Error("element_screenshot did not forward target: " + JSON.stringify(calls.at(-1)));
     }
     const desc = await call("browser_describe_element", { target: "css=#btn" });
@@ -1462,7 +1462,7 @@ test("MCP: loadable element tools take 'target' and refuse the removed spellings
 
     const sent = calls.length;
     for (const [tool, args] of [
-      ["browser_element_screenshot", { ref: "ref_2" }],
+      ["browser_element_screenshot", { ref: "e2" }],
       ["browser_element_screenshot", { index: 3 }],
       ["browser_describe_element", { selector: "#btn" }],
       ["browser_describe_element", { placeholder: "Email" }],
@@ -1513,7 +1513,7 @@ test("MCP: a timed-out or dropped command is not sent again", async () => {
     const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
     const call = (n, a) => server._registeredTools[n].handler(a);
 
-    const dropped = await call("browser_click", { target: "@ref_1" });
+    const dropped = await call("browser_click", { target: "@e1" });
     if (!dropped.isError) throw new Error("a dropped click reported success");
     if (hits !== 1) throw new Error("a dropped click was sent " + hits + " times");
     if (!/not retried/.test(dropped.content[0].text)) throw new Error("no explanation: " + dropped.content[0].text);
@@ -1557,39 +1557,39 @@ test("MCP: browser_action with a tool's name behaves as that tool", async () => 
     const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
     const act = (action, params) => server._registeredTools["browser_action"].handler({ action, params });
 
-    const refused = await act("click", { ref: "@ref_1" });
+    const refused = await act("click", { ref: "@e1" });
     if (!refused.isError || !/one parameter now/.test(refused.content[0].text)) {
       throw new Error("browser_action let a removed spelling through: " + JSON.stringify(refused));
     }
 
-    await act("read_page", { target: "@ref_2" });
-    if (calls.at(-1).action !== "read_page" || calls.at(-1).params.ref_id !== "@ref_2") {
+    await act("read_page", { target: "@e2" });
+    if (calls.at(-1).action !== "read_page" || calls.at(-1).params.ref_id !== "@e2") {
       throw new Error("read_page target did not become the subtree: " + JSON.stringify(calls.at(-1)));
     }
-    await act("take_screenshot", { target: "@ref_3" });
+    await act("take_screenshot", { target: "@e3" });
     if (calls.at(-1).action !== "element_screenshot") {
       throw new Error("take_screenshot with a target did not capture the element: " + JSON.stringify(calls.at(-1)));
     }
     await act("wait_for", { for: "settle" });
     if (calls.at(-1).action !== "wait_settle") throw new Error("wait_for settle: " + calls.at(-1).action);
 
-    await act("get_text", { target: "@ref_4" });
+    await act("get_text", { target: "@e4" });
     if (calls.at(-1).action !== "get_property" || calls.at(-1).params.property !== "text") {
       throw new Error("get_text alias broke: " + JSON.stringify(calls.at(-1)));
     }
-    await act("check", { target: "@ref_5" });
+    await act("check", { target: "@e5" });
     if (calls.at(-1).action !== "check") throw new Error("an action with no tool must still dispatch");
 
     const bareClick = await act("click", {});
     if (!bareClick.isError || !/'target' is required|Provide 'target'/.test(bareClick.content[0].text)) {
       throw new Error("the tool's own schema must run inside browser_action: " + JSON.stringify(bareClick));
     }
-    await server._registeredTools["browser_action"].handler({ action: "click", tabId: 42, params: { target: "@ref_6" } });
+    await server._registeredTools["browser_action"].handler({ action: "click", tabId: 42, params: { target: "@e6" } });
     if (calls.at(-1).params.tabId !== 42) {
       throw new Error("browser_action's tabId was lost: " + JSON.stringify(calls.at(-1)));
     }
 
-    await server._registeredTools["browser_type"].handler({ target: "@ref_7", text: "hi", method: "type" });
+    await server._registeredTools["browser_type"].handler({ target: "@e7", text: "hi", method: "type" });
     if (calls.at(-1).action !== "type" || calls.at(-1).params.method !== "type") {
       throw new Error("method 'type' must reach the extension: " + JSON.stringify(calls.at(-1)));
     }
@@ -1637,13 +1637,13 @@ test("MCP: each parameter value dispatches to the action that performs it", asyn
     const call = (n, a) => server._registeredTools[n].handler(a);
     const lastAction = () => calls.at(-1).action;
 
-    await call("browser_type", { target: "@ref_1", text: "hi" });
+    await call("browser_type", { target: "@e1", text: "hi" });
     if (lastAction() !== "fill") throw new Error("default method is not fill: " + lastAction());
-    await call("browser_type", { target: "@ref_1", text: "hi", method: "type" });
+    await call("browser_type", { target: "@e1", text: "hi", method: "type" });
     if (lastAction() !== "type") throw new Error("method=type did not reach the type action");
-    await call("browser_type", { target: "@ref_1", text: "hi", method: "paste" });
+    await call("browser_type", { target: "@e1", text: "hi", method: "paste" });
     if (lastAction() !== "paste") throw new Error("method=paste did not reach the paste action");
-    await call("browser_select_option", { target: "@ref_1", option: "Vietnam" });
+    await call("browser_select_option", { target: "@e1", option: "Vietnam" });
     if (lastAction() !== "select_option" || calls.at(-1).params.option !== "Vietnam") {
       throw new Error("option did not reach select_option: " + JSON.stringify(calls.at(-1)));
     }
@@ -1920,9 +1920,9 @@ test("MCP: the rendered extract names each ref with one '@'", async () => {
   const src = readFileSync(join(__dirname, "..", "..", "mcp", "index.js"), "utf8");
   const ctx = vm.createContext({});
   vm.runInContext(extractFunction(src, "refTag") + "\nglobalThis.__fn = refTag;", ctx);
-  assert.equal(ctx.__fn("@ref_1"), "@ref_1");
-  assert.equal(ctx.__fn("ref_1"), "@ref_1");
-  assert.equal(ctx.__fn("f2:ref_9"), "@f2:ref_9");
+  assert.equal(ctx.__fn("@e1"), "@e1");
+  assert.equal(ctx.__fn("e1"), "@e1");
+  assert.equal(ctx.__fn("f2:e9"), "@f2:e9");
 });
 
 // ---------------------------------------------------------------------------

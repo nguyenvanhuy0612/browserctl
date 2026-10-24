@@ -1,9 +1,72 @@
 import { truncate } from "./util.js";
+import {
+  sendCdpCommand,
+  dispatchMouseEvent,
+  dispatchMouseWheel,
+  coordinate_drag,
+  dispatchKeyEvent,
+  DEVICE_PRESETS,
+  setDeviceMetrics,
+  setUserAgent,
+  setEmulatedMedia,
+  setGeolocationOverride,
+  setNetworkConditions,
+  clearEmulation,
+  emulate,
+  createNetworkRule,
+  networkReplay,
+  getFrameTree,
+  flattenFrameTree,
+  findFrame,
+  mapFrameToContext,
+} from "./driver/index.js";
+import { resolveJsonPointer as _resolveJsonPointer } from "./driver/network.js";
+
+export {
+  sendCdpCommand,
+  dispatchMouseEvent,
+  dispatchMouseWheel,
+  coordinate_drag,
+  dispatchKeyEvent,
+  DEVICE_PRESETS,
+  setDeviceMetrics,
+  setUserAgent,
+  setEmulatedMedia,
+  setGeolocationOverride,
+  setNetworkConditions,
+  clearEmulation,
+  emulate,
+  createNetworkRule,
+  networkReplay,
+  getFrameTree,
+  flattenFrameTree,
+  findFrame,
+  mapFrameToContext,
+};
 
 const MAX_CONSOLE = 1000;
 const MAX_NETWORK = 2000;
 
 const sessions = new Map();
+
+export function resolveJsonPointer(obj, pointer) {
+  return _resolveJsonPointer(obj, pointer);
+}
+
+let ruleCounter = 0;
+function urlMatchesPattern(url, pattern) {
+  if (!pattern || pattern === "*") return true;
+  if (!pattern.includes("*")) return url.includes(pattern);
+  const regex = new RegExp(
+    "^" +
+      pattern
+        .split("*")
+        .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        .join(".*") +
+      "$"
+  );
+  return regex.test(url);
+}
 
 const lastCapture = {};
 export function isAttached(tabId) {
@@ -220,7 +283,12 @@ export async function ensureAttached(tabId) {
           throw new Error(`the debugger detached from tab ${tabId} while attaching; try again`);
         }
       }
-      sessions.set(tabId, { console: [], network: new Map(), domainsEnabled: false });
+      sessions.set(tabId, {
+        console: [],
+        network: new Map(),
+        domainsEnabled: false,
+        fetchRules: [],
+      });
       persistAttached();
     })().finally(() => opening.delete(tabId));
     opening.set(tabId, pending);
@@ -449,6 +517,39 @@ export function onDialogOpened(tabId, fn) {
   };
 }
 
+const fileChooserWaiters = new Map();
+export function onFileChooserOpened(tabId, fn) {
+  const list = fileChooserWaiters.get(tabId) || [];
+  list.push(fn);
+  fileChooserWaiters.set(tabId, list);
+  return () => {
+    const cur = fileChooserWaiters.get(tabId) || [];
+    fileChooserWaiters.set(
+      tabId,
+      cur.filter((w) => w !== fn)
+    );
+  };
+}
+
+export async function interceptFileChooser(tabId, enabled = true) {
+  await ensureAttached(tabId);
+  return await send(tabId, "Page.setInterceptFileChooserDialog", { enabled });
+}
+
+export async function setFilesOnBackendNode(tabId, backendNodeId, files) {
+  await ensureAttached(tabId);
+  return await send(tabId, "DOM.setFileInputFiles", { backendNodeId, files });
+}
+
+export async function clickWithUserGesture(tabId, expression) {
+  await ensureAttached(tabId);
+  return await send(tabId, "Runtime.evaluate", {
+    expression,
+    userGesture: true,
+    awaitPromise: true,
+  });
+}
+
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const s = sessions.get(source.tabId);
   if (!s) return;
@@ -488,6 +589,14 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     case "Page.javascriptDialogClosed": {
       const d = dialogs.get(source.tabId);
       if (d) d.open = null;
+      break;
+    }
+    case "Page.fileChooserOpened": {
+      const list = fileChooserWaiters.get(source.tabId);
+      if (list && list.length) {
+        const waiter = list.shift();
+        waiter(params);
+      }
       break;
     }
     case "Runtime.consoleAPICalled":
@@ -553,6 +662,56 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       }
       break;
     }
+    case "Fetch.requestPaused": {
+      const req = params.request;
+      const requestId = params.requestId;
+      const rules = s.fetchRules || [];
+      const matched = rules.find((r) => {
+        if (r.match?.method && r.match.method.toUpperCase() !== req.method.toUpperCase())
+          return false;
+        return urlMatchesPattern(req.url, r.match?.url);
+      });
+      if (!matched) {
+        sendRaw(source.tabId, "Fetch.continueRequest", { requestId }).catch(() => {});
+        break;
+      }
+      const eff = matched.effect || {};
+      if (eff.type === "block") {
+        sendRaw(source.tabId, "Fetch.failRequest", {
+          requestId,
+          errorReason: "BlockedByClient",
+        }).catch(() => {});
+        break;
+      }
+      if (eff.type === "mock") {
+        const responseCode = eff.status || 200;
+        const responseHeaders = [];
+        if (eff.headers) {
+          for (const [k, v] of Object.entries(eff.headers)) {
+            responseHeaders.push({ name: k, value: String(v) });
+          }
+        }
+        if (!responseHeaders.some((h) => h.name.toLowerCase() === "content-type")) {
+          responseHeaders.push({ name: "content-type", value: "application/json; charset=utf-8" });
+        }
+        const bodyStr =
+          eff.body != null
+            ? typeof eff.body === "string"
+              ? eff.body
+              : JSON.stringify(eff.body)
+            : "";
+        const bodyBase64 = btoa(unescape(encodeURIComponent(bodyStr)));
+        sendRaw(source.tabId, "Fetch.fulfillRequest", {
+          requestId,
+          responseCode,
+          responseHeaders,
+          body: bodyBase64,
+        }).catch(() => {});
+        break;
+      }
+      sendRaw(source.tabId, "Fetch.continueRequest", { requestId }).catch(() => {});
+      break;
+    }
   }
 });
 
@@ -571,6 +730,7 @@ export function dropTab(tabId) {
   focusEmulation.delete(tabId);
   dialogs.delete(tabId);
   dialogWaiters.delete(tabId);
+  fileChooserWaiters.delete(tabId);
   persistAttached();
 }
 
@@ -804,12 +964,184 @@ export async function handleCdp(action, params, tabId) {
             " (it may have been evicted; capture is best-effort)"
         );
       }
+      if (params.pointer) {
+        if (res.base64Encoded) {
+          throw new Error("cannot query JSON pointer on base64-encoded response");
+        }
+        let parsed;
+        try {
+          parsed = JSON.parse(res.body);
+        } catch {
+          throw new Error("response body is not valid JSON; cannot query pointer");
+        }
+        const val = resolveJsonPointer(parsed, params.pointer);
+        return {
+          ok: true,
+          result: {
+            requestId: params.requestId,
+            pointer: params.pointer,
+            value: val,
+            found: val !== undefined,
+          },
+        };
+      }
       return {
         ok: true,
         result: {
           requestId: params.requestId,
           base64Encoded: res.base64Encoded,
           body: res.base64Encoded ? res.body : truncate(res.body, 50000),
+        },
+      };
+    }
+
+    case "get_network_request": {
+      const s = requireSession(tabId);
+      if (!params.requestId) throw new Error("get_network_request requires 'requestId'");
+      const req = s.network.get(params.requestId);
+      if (!req) {
+        throw new Error(
+          `network request ${params.requestId} not found (evicted or never captured)`
+        );
+      }
+      const part = params.part || "all";
+      let bodyText = undefined;
+      if (part === "response" || part === "all") {
+        try {
+          const res = await send(tabId, "Network.getResponseBody", {
+            requestId: params.requestId,
+          });
+          bodyText = res.body;
+          if (params.pointer && bodyText) {
+            const parsed = JSON.parse(bodyText);
+            return {
+              ok: true,
+              result: {
+                requestId: params.requestId,
+                part,
+                pointer: params.pointer,
+                value: resolveJsonPointer(parsed, params.pointer),
+              },
+            };
+          }
+        } catch {}
+      }
+      if (part === "headers") {
+        return {
+          ok: true,
+          result: {
+            requestId: params.requestId,
+            requestHeaders: req.request?.headers,
+            responseHeaders: req.response?.headers,
+          },
+        };
+      }
+      if (part === "timing") {
+        return {
+          ok: true,
+          result: {
+            requestId: params.requestId,
+            timing: req.response?.timing,
+            wallTime: req.wallTime,
+            startTs: req.startTs,
+          },
+        };
+      }
+      if (part === "request") {
+        return {
+          ok: true,
+          result: {
+            requestId: params.requestId,
+            url: req.request?.url,
+            method: req.request?.method,
+            headers: req.request?.headers,
+            postData: req.request?.postData,
+          },
+        };
+      }
+      return {
+        ok: true,
+        result: {
+          requestId: params.requestId,
+          url: req.request?.url,
+          method: req.request?.method,
+          resourceType: req.resourceType,
+          status: req.response?.status,
+          statusText: req.response?.statusText,
+          requestHeaders: req.request?.headers,
+          responseHeaders: req.response?.headers,
+          timing: req.response?.timing,
+          responseBody: bodyText ? truncate(bodyText, 50000) : undefined,
+        },
+      };
+    }
+
+    case "network_replay": {
+      const s = requireSession(tabId);
+      if (!params.requestId) throw new Error("network_replay requires 'requestId'");
+      const req = s.network.get(params.requestId);
+      if (!req) {
+        throw new Error(`network request ${params.requestId} not found to replay`);
+      }
+      const url = params.url || req.request?.url;
+      const method = params.method || req.request?.method || "GET";
+      const headers = { ...(req.request?.headers || {}), ...(params.headers || {}) };
+      for (const k of Object.keys(headers)) {
+        if (k.startsWith(":")) delete headers[k];
+      }
+      const body = params.body !== undefined ? params.body : req.request?.postData;
+
+      const expression = `
+        (async () => {
+          try {
+            const fetchOpts = {
+              method: ${JSON.stringify(method)},
+              headers: ${JSON.stringify(headers)},
+              credentials: "include",
+            };
+            if (${JSON.stringify(body)} && !["GET", "HEAD"].includes(${JSON.stringify(method)})) {
+              fetchOpts.body = ${JSON.stringify(body)};
+            }
+            const res = await window.fetch(${JSON.stringify(url)}, fetchOpts);
+            const text = await res.text();
+            let json = null;
+            try { json = JSON.parse(text); } catch {}
+            const resHeaders = {};
+            for (const [k, v] of res.headers.entries()) resHeaders[k] = v;
+            return {
+              ok: true,
+              status: res.status,
+              statusText: res.statusText,
+              headers: resHeaders,
+              body: text.length > 50000 ? text.slice(0, 50000) + "... [truncated]" : text,
+              json,
+            };
+          } catch (err) {
+            return { ok: false, error: err.message };
+          }
+        })()
+      `;
+      const evalRes = await send(tabId, "Runtime.evaluate", {
+        expression,
+        awaitPromise: true,
+        returnByValue: true,
+      });
+      const val = evalRes.result?.value;
+      if (!val) throw new Error("network_replay evaluation returned no value");
+      if (!val.ok) throw new Error(`replay failed in page: ${val.error}`);
+      let pointerVal = undefined;
+      if (params.pointer && val.json) {
+        pointerVal = resolveJsonPointer(val.json, params.pointer);
+      }
+      return {
+        ok: true,
+        result: {
+          status: val.status,
+          statusText: val.statusText,
+          headers: val.headers,
+          body: val.body,
+          json: val.json,
+          pointerValue: pointerVal,
         },
       };
     }
@@ -1360,6 +1692,156 @@ export async function handleCdp(action, params, tabId) {
       return { ok: true, result: { deleted: params.name } };
     }
 
+    case "wheel": {
+      requireSession(tabId);
+      await requireForegroundForInput(tabId, "wheel");
+      const s = captureScale(tabId);
+      const x = (params.x ?? 0) / s;
+      const y = (params.y ?? 0) / s;
+      const deltaX = params.deltaX || 0;
+      const deltaY = params.deltaY || 0;
+      const modifiers = modMask(params.modifiers);
+      await send(tabId, "Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        x,
+        y,
+        deltaX,
+        deltaY,
+        modifiers,
+      });
+      return { ok: true, result: { scrolled: { x, y, deltaX, deltaY } } };
+    }
+
+    case "emulate": {
+      requireSession(tabId);
+      if (params.clear || params.off) {
+        await send(tabId, "Emulation.clearDeviceMetricsOverride");
+        await send(tabId, "Emulation.setUserAgentOverride", { userAgent: "" });
+        await send(tabId, "Emulation.setTouchEmulationEnabled", { enabled: false });
+        await send(tabId, "Emulation.setEmulatedMedia", { media: "" });
+        try {
+          await send(tabId, "Emulation.clearGeolocationOverride");
+        } catch {}
+        await send(tabId, "Network.emulateNetworkConditions", {
+          offline: false,
+          latency: 0,
+          downloadThroughput: -1,
+          uploadThroughput: -1,
+        });
+        return { ok: true, result: { cleared: true } };
+      }
+
+      let preset = null;
+      if (params.device && DEVICE_PRESETS[params.device.toLowerCase()]) {
+        preset = DEVICE_PRESETS[params.device.toLowerCase()];
+      }
+
+      const width = params.viewport?.width ?? preset?.width;
+      const height = params.viewport?.height ?? preset?.height;
+      const deviceScaleFactor =
+        params.viewport?.deviceScaleFactor ?? preset?.deviceScaleFactor ?? 1;
+      const mobile = params.viewport?.mobile ?? preset?.mobile ?? false;
+      const hasTouch = params.viewport?.hasTouch ?? preset?.hasTouch ?? false;
+      const userAgent = params.userAgent ?? preset?.userAgent;
+
+      if (width && height) {
+        await send(tabId, "Emulation.setDeviceMetricsOverride", {
+          width,
+          height,
+          deviceScaleFactor,
+          mobile,
+        });
+      }
+      if (hasTouch !== undefined) {
+        await send(tabId, "Emulation.setTouchEmulationEnabled", { enabled: Boolean(hasTouch) });
+      }
+      if (userAgent) {
+        await send(tabId, "Emulation.setUserAgentOverride", { userAgent });
+      }
+      if (params.colorScheme || params.color_scheme) {
+        const cs = params.colorScheme || params.color_scheme;
+        await send(tabId, "Emulation.setEmulatedMedia", {
+          media: "page",
+          features: [{ name: "prefers-color-scheme", value: cs }],
+        });
+      }
+      if (params.geolocation) {
+        await send(tabId, "Emulation.setGeolocationOverride", {
+          latitude: params.geolocation.latitude,
+          longitude: params.geolocation.longitude,
+          accuracy: params.geolocation.accuracy ?? 1,
+        });
+      }
+      if (params.offline !== undefined) {
+        await send(tabId, "Network.emulateNetworkConditions", {
+          offline: Boolean(params.offline),
+          latency: 0,
+          downloadThroughput: -1,
+          uploadThroughput: -1,
+        });
+      }
+
+      return {
+        ok: true,
+        result: {
+          emulating: {
+            device: params.device || null,
+            viewport: width && height ? { width, height, deviceScaleFactor, mobile } : null,
+            touch: hasTouch,
+            colorScheme: params.colorScheme || params.color_scheme || null,
+            geolocation: Boolean(params.geolocation),
+            offline: params.offline ?? false,
+          },
+        },
+      };
+    }
+
+    case "network_rule_add": {
+      const s = requireSession(tabId);
+      if (!params.match || !params.effect) {
+        throw new Error(
+          "network_rule_add requires 'match' ({ url, method? }) and 'effect' ({ type: 'mock'|'block', ... })"
+        );
+      }
+      const rule = {
+        id: "rule_" + ++ruleCounter,
+        match: params.match,
+        effect: params.effect,
+      };
+      if (!s.fetchRules || s.fetchRules.length === 0) {
+        await send(tabId, "Fetch.enable", { patterns: [{ urlPattern: "*" }] });
+        s.fetchRules = [];
+      }
+      s.fetchRules.push(rule);
+      return { ok: true, result: { ruleId: rule.id, rulesCount: s.fetchRules.length } };
+    }
+
+    case "network_rule_remove": {
+      const s = requireSession(tabId);
+      if (!params.ruleId) throw new Error("network_rule_remove requires 'ruleId'");
+      s.fetchRules = (s.fetchRules || []).filter((r) => r.id !== params.ruleId);
+      if (s.fetchRules.length === 0) {
+        try {
+          await send(tabId, "Fetch.disable");
+        } catch {}
+      }
+      return { ok: true, result: { removed: params.ruleId, remaining: s.fetchRules.length } };
+    }
+
+    case "network_rule_list": {
+      const s = requireSession(tabId);
+      return { ok: true, result: { rules: s.fetchRules || [] } };
+    }
+
+    case "network_rule_clear": {
+      const s = requireSession(tabId);
+      s.fetchRules = [];
+      try {
+        await send(tabId, "Fetch.disable");
+      } catch {}
+      return { ok: true, result: { cleared: true } };
+    }
+
     default:
       throw new Error(`unknown cdp action: ${action}`);
   }
@@ -1372,6 +1854,12 @@ export const CDP_ACTIONS = [
   "get_console_logs",
   "get_network_requests",
   "get_response_body",
+  "get_network_request",
+  "network_replay",
+  "network_rule_add",
+  "network_rule_remove",
+  "network_rule_list",
+  "network_rule_clear",
   "export_har",
   "capture_screenshot",
   "eval_js",
@@ -1379,6 +1867,8 @@ export const CDP_ACTIONS = [
   "cdp_send",
   "coordinate_click",
   "coordinate_drag",
+  "wheel",
+  "emulate",
   "insert_text",
   "a11y_snapshot",
   "element_screenshot",

@@ -395,6 +395,7 @@ const TABLESS_ACTIONS = new Set([
   "list_windows",
   "focus_window",
   "reload_extension",
+  "agent_window",
 ]);
 
 // Every tool's command goes through here. A per-call tabId goes to the browser that owns it;
@@ -750,6 +751,9 @@ const TOOL_CATEGORIES = {
   network: [
     "browser_get_network_requests",
     "browser_get_response_body",
+    "browser_get_network_request",
+    "browser_network_replay",
+    "browser_mock_route",
     "browser_export_har",
     "browser_net_start",
     "browser_net_stop",
@@ -794,6 +798,12 @@ const TOOL_CATEGORIES = {
     "browser_go_back",
     "browser_go_forward",
     "browser_reload_extension",
+    "browser_download",
+    "browser_request_help",
+    "browser_agent_window",
+    "browser_wheel",
+    "browser_emulate",
+    "browser_drag",
   ],
 };
 
@@ -854,19 +864,19 @@ THE LOOP
 A snapshot answers like this, and each field is a question you would otherwise have to ask:
 
   {"url": "...", "title": "...",
-   "census": "  [@ref_1] <input> \\"Email\\"\\n  [@ref_2] <button> \\"Sign in\\"",
+   "census": "  [@e1] <input> \\"Email\\"\\n  [@e2] <button> \\"Sign in\\"",
    "window": {"offset":0,"shown":60,"inScope":199}, "next": 60,   <- 139 more; pass cursor:60
    "offscreenCount": 31,        <- in the DOM, not on screen; scope:"all" lists them
    "foldedCount": 48,           <- repeats collapsed; their refs are still in the census
-   "structure": "92 repeated <tr> rows · main 199 (@ref_61)",  <- a region ref reads that region
-   "pageState": {"openDialogs":[{"label":"Notifications","ref":"ref_35"}]},
-   "hiddenContent": [{"kind":"load-more","text":"See more","ref":"ref_62"}]}  <- click it; no
+   "structure": "92 repeated <tr> rows · main 199 (@e61)",  <- a region ref reads that region
+   "pageState": {"openDialogs":[{"label":"Notifications","ref":"e35"}]},
+   "hiddenContent": [{"kind":"load-more","text":"See more","ref":"e62"}]}  <- click it; no
                                  scope setting reveals rows that are not in the DOM yet
 
 TARGET RESOLUTION:
 'target' is a ref, a CSS selector, visible text, or a snapshot index (a number). A bare string is
 tried in this order, and the first that matches wins:
-  1 ref (@ref_1, ref_1, @e5) — a stale ref is refused, never re-pointed at whatever took its place
+  1 ref (@e1, e1) — a stale ref is refused, never re-pointed at whatever took its place
   2 CSS, only if it carries selector syntax: # . [ ] > + ~ : or a descendant space
   3 exact visible text on a control      4 exact placeholder or aria-label
   5 substring of visible text            6 bare tag name, if nothing above matched
@@ -945,7 +955,7 @@ const PROMPT_TEXT_FIELD = z.string().optional().describe("Text for a prompt().")
 
 const TARGET_FIELD = z
   .union([z.string(), z.number().int()])
-  .describe("Target element: ref '@ref_1', CSS selector, visible text, or index");
+  .describe("Target element: ref '@e1', CSS selector, visible text, or index");
 
 const TAB_ID_FIELD = z.number().int().optional().describe("Tab id for this call only.");
 
@@ -963,6 +973,7 @@ const NO_TAB_TOOLS = new Set([
   "browser_start",
   "browser_stop",
   "browser_exec_system_cmd",
+  "browser_agent_window",
 ]);
 
 const FORMAT_FIELD = z
@@ -994,7 +1005,7 @@ const GROUP_OF = new Map();
 for (const [g, names] of Object.entries(TOOL_GROUPS)) for (const n of names) GROUP_OF.set(n, g);
 
 const TARGET_REDIRECT = {
-  ref: "addressing is one parameter now: pass target: '@ref_1'.",
+  ref: "addressing is one parameter now: pass target: '@e1'.",
   selector: "addressing is one parameter now: pass target: '#id' or target: 'css=#id'.",
   text: "addressing is one parameter now: pass target: 'Sign in' or target: 'text=Sign in'.",
   index: "addressing is one parameter now: pass target: 3 (a number) or target: 'index=3'.",
@@ -1013,12 +1024,16 @@ const PARAM_REDIRECTS = {
   browser_press_key: TARGET_REDIRECT,
   browser_scroll: TARGET_REDIRECT,
   browser_file_upload: TARGET_REDIRECT,
+  browser_download: TARGET_REDIRECT,
+  browser_request_help: TARGET_REDIRECT,
+  browser_wheel: TARGET_REDIRECT,
+  browser_drag: TARGET_REDIRECT,
   browser_get_property: TARGET_REDIRECT,
   browser_hover: TARGET_REDIRECT,
   browser_take_screenshot: TARGET_REDIRECT,
   browser_element_screenshot: TARGET_REDIRECT,
   browser_describe_element: TARGET_REDIRECT,
-  browser_read_page: { ...TARGET_REDIRECT, ref_id: "the subtree is chosen with target: '@ref_1'." },
+  browser_read_page: { ...TARGET_REDIRECT, ref_id: "the subtree is chosen with target: '@e1'." },
   browser_find: {
     text: "browser_find searches with 'query'. 'text' is what browser_type writes, so the two never share a name.",
   },
@@ -1676,7 +1691,7 @@ server.registerTool(
     title: "Find elements by text",
     description:
       "Find things on the page and get a ref back for each. in: 'controls' (default) matches interactive elements by accessible name, text, placeholder, aria-label or title, and 'matchedBy' says which of those hit; in: 'text' searches the page's prose instead and each match carries 'nearestInteractive'.\n" +
-      "SCOPE differs by index and every result names it in 'searchedScope'. Controls reads the WHOLE page \u2014 top frame, open Shadow DOM, iframes \u2014 on screen or not, so its count can differ from browser_snapshot's (viewport by default); a sub-frame match carries a ref like 'f3:ref_5', passed back verbatim. Text reads the top frame and Shadow DOM, NOT iframes.\n" +
+      "SCOPE differs by index and every result names it in 'searchedScope'. Controls reads the WHOLE page \u2014 top frame, open Shadow DOM, iframes \u2014 on screen or not, so its count can differ from browser_snapshot's (viewport by default); a sub-frame match carries a ref like 'f3:e5', passed back verbatim. Text reads the top frame and Shadow DOM, NOT iframes.\n" +
       "Takes a CSS 'selector' instead of 'query' when that is what you have \u2014 the cheap way to get a ref for something that just appeared, without another browser_snapshot.\n" +
       "A zero-match answers with 'nearest': labels that differ only by case or diacritics, with their refs, plus the page's own vocabulary \u2014 so a one-character transcription error costs one call, not four. A label cut short carries 'truncatedBy' and the read that returns the rest.",
     inputSchema: z
@@ -1734,14 +1749,14 @@ server.registerTool(
   {
     title: "Click element",
     description:
-      "Click an element by 'target' (ref '@ref_1', CSS selector, visible text, or snapshot index).\n" +
+      "Click an element by 'target' (ref '@e1', CSS selector, visible text, or snapshot index).\n" +
       "Waits for the DOM to settle and reports what changed in 'effect' and 'resolved'.\n" +
       "If the click navigates, the response reports urlChanged instead of failing on a stale ref.",
     inputSchema: z
       .object({
         target: z
           .union([z.string(), z.number().int()])
-          .describe("Target element: ref '@ref_1', CSS selector, visible text, or index"),
+          .describe("Target element: ref '@e1', CSS selector, visible text, or index"),
         doubleClick: z.boolean().optional().describe("Perform double-click (default false)"),
         button: z
           .enum(["left", "right", "middle"])
@@ -1761,7 +1776,7 @@ server.registerTool(
       })
       .refine((v) => v.target !== undefined, {
         message:
-          "Provide 'target': a ref '@ref_1', a CSS selector, the control's visible text, or a snapshot index.",
+          "Provide 'target': a ref '@e1', a CSS selector, the control's visible text, or a snapshot index.",
       }),
   },
   tool("click", async ({ target, doubleClick, button, waitFor, autoSettle, settleMs }) => {
@@ -1791,7 +1806,7 @@ server.registerTool(
       .object({
         target: z
           .union([z.string(), z.number().int()])
-          .describe("Target element: ref '@ref_1', CSS selector, placeholder, or index"),
+          .describe("Target element: ref '@e1', CSS selector, placeholder, or index"),
         text: z.string().describe("Text to enter"),
         method: z
           .enum(["set", "type", "paste"])
@@ -1811,7 +1826,7 @@ server.registerTool(
       })
       .refine((v) => v.target !== undefined, {
         message:
-          "Provide 'target': a ref '@ref_1', a CSS selector, the control's visible text, or a snapshot index.",
+          "Provide 'target': a ref '@e1', a CSS selector, the control's visible text, or a snapshot index.",
       }),
   },
   tool("type", async ({ target, text: t, method, submit, waitFor, autoSettle, settleMs }) => {
@@ -1889,7 +1904,7 @@ server.registerTool(
       })
       .refine((v) => v.target !== undefined, {
         message:
-          "Provide 'target': a ref '@ref_1', a CSS selector, the control's visible text, or a snapshot index.",
+          "Provide 'target': a ref '@e1', a CSS selector, the control's visible text, or a snapshot index.",
       })
       .refine(
         (v) =>
@@ -2321,7 +2336,7 @@ server.registerTool(
       "Send the pointer and mouse events of hovering an element, to open a flyout menu or raise a tooltip. A menu shown by CSS :hover alone does not open this way; its items are usually already in browser_snapshot, tagged [hidden until hover/focus].",
     inputSchema: z.object({
       target: TARGET_FIELD.describe(
-        "Target element: ref '@ref_1', CSS selector, visible text, or index"
+        "Target element: ref '@e1', CSS selector, visible text, or index"
       ),
     }),
   },
@@ -2473,7 +2488,7 @@ server.registerTool(
     title: "Read an element — text, value, HTML, box, attribute, or how many match",
     description:
       "Read an element's text, value, HTML, box, an attribute, or how many match.\n" +
-      "Target it with 'target' (ref '@ref_1', CSS selector, visible text, or snapshot index). For property: 'count' it is the CSS selector to count, so it may match many; zero is an answer, not an error.\n" +
+      "Target it with 'target' (ref '@e1', CSS selector, visible text, or snapshot index). For property: 'count' it is the CSS selector to count, so it may match many; zero is an answer, not an error.\n" +
       "property: 'text' (default) | 'value' | 'html' | 'box' | 'attr' (with attr: 'href') | 'count' | 'checked'.\n" +
       "For structured extraction across multiple rows, use browser_extract.",
     inputSchema: z
@@ -2481,7 +2496,7 @@ server.registerTool(
         target: z
           .union([z.string(), z.number().int()])
           .optional()
-          .describe("Target element: ref '@ref_1', CSS selector, visible text, or index"),
+          .describe("Target element: ref '@e1', CSS selector, visible text, or index"),
         property: z
           .enum(["text", "value", "html", "box", "attr", "count", "checked"])
           .optional()
@@ -2495,7 +2510,7 @@ server.registerTool(
       })
       .refine((v) => v.target !== undefined, {
         message:
-          "Provide 'target': a ref '@ref_1', a CSS selector, the control's visible text, or a snapshot index.",
+          "Provide 'target': a ref '@e1', a CSS selector, the control's visible text, or a snapshot index.",
       })
       .refine((v) => v.property !== "attr" || v.attr !== undefined, {
         message:
@@ -2623,11 +2638,17 @@ server.registerTool(
   {
     title: "Get response body",
     description:
-      "Fetch the response body of a captured request by its requestId (from get_network_requests). Best-effort; bodies may be evicted. Requires browser_cdp_attach.",
-    inputSchema: { requestId: z.string().describe("requestId from the CDP network capture") },
+      "Fetch the response body of a captured request by its requestId (from get_network_requests). Best-effort; bodies may be evicted. Supports optional pointer (RFC 6901 JSON pointer). Requires browser_cdp_attach.",
+    inputSchema: {
+      requestId: z.string().describe("requestId from the CDP network capture"),
+      pointer: z
+        .string()
+        .optional()
+        .describe("RFC 6901 JSON pointer to extract a specific sub-tree or field"),
+    },
   },
-  tool("get_response_body", async ({ requestId }) =>
-    text(await callBridge("get_response_body", { requestId }))
+  tool("get_response_body", async ({ requestId, pointer }) =>
+    text(await callBridge("get_response_body", { requestId, pointer }))
   )
 );
 
@@ -2694,11 +2715,11 @@ server.registerTool(
   {
     title: "Screenshot one element",
     description:
-      "Capture just one element as an image, named by 'target' (ref '@ref_1', CSS selector, visible text, or snapshot index). Same capture as browser_take_screenshot with a target: a visible tab is cropped without the debugger, a background tab attaches it.",
+      "Capture just one element as an image, named by 'target' (ref '@e1', CSS selector, visible text, or snapshot index). Same capture as browser_take_screenshot with a target: a visible tab is cropped without the debugger, a background tab attaches it.",
     inputSchema: {
       target: z
         .union([z.string(), z.number().int()])
-        .describe("Element to capture: ref '@ref_1', CSS selector, visible text, or index"),
+        .describe("Element to capture: ref '@e1', CSS selector, visible text, or index"),
       format: z.enum(["png", "jpeg"]).optional(),
     },
   },
@@ -2718,12 +2739,12 @@ server.registerTool(
   {
     title: "Describe one element",
     description:
-      "Given a 'target' (ref '@ref_1', CSS selector, visible text, or snapshot index), return everything useful for debugging it: tag, full attribute dump, bounding rect, visibility verdict WITH the specific reason ('visible' | 'display:none' | 'visibility:hidden' | 'zero-size rect' | 'opacity:0' | 'disabled'), and whether it matches the interactive selector. Pierces open Shadow DOM.",
+      "Given a 'target' (ref '@e1', CSS selector, visible text, or snapshot index), return everything useful for debugging it: tag, full attribute dump, bounding rect, visibility verdict WITH the specific reason ('visible' | 'display:none' | 'visibility:hidden' | 'zero-size rect' | 'opacity:0' | 'disabled'), and whether it matches the interactive selector. Pierces open Shadow DOM.",
     inputSchema: {
       target: z
         .union([z.string(), z.number().int()])
         .describe(
-          "Element to describe: ref '@ref_1', CSS selector (e.g. '#submit-btn'), visible text, or index"
+          "Element to describe: ref '@e1', CSS selector (e.g. '#submit-btn'), visible text, or index"
         ),
     },
   },
@@ -3027,6 +3048,247 @@ server.registerTool(
     inputSchema: {},
   },
   tool("reload_extension", async () => text(await callBridge("reload_extension")))
+);
+
+server.registerTool(
+  "browser_download",
+  {
+    title: "Download file",
+    description:
+      "Click an element to trigger a file download or download directly from a URL, waiting until the file finishes saving to disk. Returns filename, filePath, and fileSize.",
+    inputSchema: {
+      target: TARGET_FIELD.optional().describe(
+        "Target element to click to trigger download (e.g. 'Export CSV', '#download-btn', '@e1')"
+      ),
+      url: z
+        .string()
+        .optional()
+        .describe("Direct URL to download using the browser's active session"),
+      filename: z.string().optional().describe("Suggested local filename for the download"),
+      timeoutMs: z.number().optional().describe("Maximum wait time in ms (default: 30000)"),
+    },
+  },
+  tool("download", async ({ target, url, filename, timeoutMs }) =>
+    text(await callBridge("download", { target, url, filename, timeoutMs }))
+  )
+);
+
+server.registerTool(
+  "browser_request_help",
+  {
+    title: "Request human help",
+    description:
+      "Requests human assistance (e.g. solving CAPTCHA, 2FA, biometric auth). Focuses the browser, displays an in-page banner, and waits until the user clicks 'Done', or until a URL pattern or selector is matched.",
+    inputSchema: {
+      target: TARGET_FIELD.optional().describe("Target tab or context element"),
+      reason: z.string().describe("Explanation shown to the user on why assistance is needed"),
+      timeoutMs: z
+        .number()
+        .int()
+        .min(1000)
+        .max(300000)
+        .optional()
+        .describe("Timeout in milliseconds (default: 60000)"),
+      waitForUrl: z
+        .string()
+        .optional()
+        .describe("URL substring that resolves help when navigated to"),
+      waitForSelector: z
+        .string()
+        .optional()
+        .describe("Selector that resolves help when present in DOM"),
+    },
+  },
+  tool("request_help", async ({ target, reason, timeoutMs, waitForUrl, waitForSelector }) =>
+    text(
+      await callBridge("request_help", { target, reason, timeoutMs, waitForUrl, waitForSelector })
+    )
+  )
+);
+
+server.registerTool(
+  "browser_agent_window",
+  {
+    title: "Agent window isolation",
+    description:
+      "Manages a dedicated agent window to isolate automation from the user's active windows. When open, newly created tabs automatically belong to the agent window.",
+    inputSchema: {
+      action: z
+        .enum(["get", "open", "close", "focus"])
+        .optional()
+        .describe("Action to perform: 'get' (default), 'open', 'close', or 'focus'"),
+      url: z.string().optional().describe("Initial URL when opening"),
+      width: z.number().int().optional().describe("Window width in pixels"),
+      height: z.number().int().optional().describe("Window height in pixels"),
+    },
+  },
+  tool("agent_window", async ({ action, url, width, height }) =>
+    text(await callBridge("agent_window", { action, url, width, height }))
+  )
+);
+
+server.registerTool(
+  "browser_wheel",
+  {
+    title: "Mouse wheel scroll",
+    description:
+      "Dispatch hardware mouse wheel events via CDP at coordinates or target element. Useful for Canvas, WebGL, maps, and virtualized scroll containers where DOM scrolling fails.",
+    inputSchema: {
+      target: TARGET_FIELD.optional().describe(
+        "Target element to center the wheel event over (e.g. '@e1')"
+      ),
+      x: z.number().optional().describe("X coordinate in pixels"),
+      y: z.number().optional().describe("Y coordinate in pixels"),
+      deltaX: z.number().optional().describe("Horizontal scroll delta (default 0)"),
+      deltaY: z.number().optional().describe("Vertical scroll delta (positive = scroll down)"),
+      modifiers: z.array(z.string()).optional().describe("Modifier keys (e.g. ['Shift', 'Alt'])"),
+    },
+  },
+  tool("wheel", async ({ target, x, y, deltaX, deltaY, modifiers }) =>
+    text(await callBridge("wheel", { target, x, y, deltaX, deltaY, modifiers }))
+  )
+);
+
+server.registerTool(
+  "browser_emulate",
+  {
+    title: "Emulate device and environment",
+    description:
+      "Emulate device metrics, mobile user-agent, touch events, dark/light color scheme, or geolocation. Use clear: true to restore defaults.",
+    inputSchema: {
+      device: z
+        .string()
+        .optional()
+        .describe(
+          "Device preset name ('iphone-14', 'iphone-14-pro-max', 'pixel-7', 'ipad', 'desktop')"
+        ),
+      viewport: z
+        .object({
+          width: z.number().int(),
+          height: z.number().int(),
+          deviceScaleFactor: z.number().optional(),
+          mobile: z.boolean().optional(),
+          hasTouch: z.boolean().optional(),
+        })
+        .optional()
+        .describe("Custom viewport overrides"),
+      colorScheme: z
+        .enum(["dark", "light", "no-preference"])
+        .optional()
+        .describe("Emulate prefers-color-scheme"),
+      geolocation: z
+        .object({
+          latitude: z.number(),
+          longitude: z.number(),
+          accuracy: z.number().optional(),
+        })
+        .optional()
+        .describe("Override geolocation coordinates"),
+      offline: z.boolean().optional().describe("Emulate offline network state"),
+      clear: z.boolean().optional().describe("Clear all emulation overrides"),
+    },
+  },
+  tool("emulate", async (params) => text(await callBridge("emulate", params)))
+);
+
+server.registerTool(
+  "browser_drag",
+  {
+    title: "Drag and drop element",
+    description:
+      "Drag an element from source to target, or between coordinates. Dispatches native CDP mouse and drag events.",
+    inputSchema: {
+      source: TARGET_FIELD.optional().describe("Source element to drag from (e.g. '@e1')"),
+      target: TARGET_FIELD.optional().describe("Target element to drop onto (e.g. '@e2')"),
+      fromX: z.number().optional().describe("Starting X coordinate"),
+      fromY: z.number().optional().describe("Starting Y coordinate"),
+      toX: z.number().optional().describe("Ending X coordinate"),
+      toY: z.number().optional().describe("Ending Y coordinate"),
+    },
+  },
+  tool("drag", async (params) => text(await callBridge("drag", params)))
+);
+
+server.registerTool(
+  "browser_get_network_request",
+  {
+    title: "Inspect single network request",
+    description:
+      "Inspect full details of a single network request by requestId. Supports slicing by part ('response', 'request', 'headers', 'timing') and querying JSON Pointer.",
+    inputSchema: {
+      requestId: z.string().describe("requestId from get_network_requests"),
+      part: z
+        .enum(["all", "response", "request", "headers", "timing"])
+        .optional()
+        .describe("Which part of the request to return (default: 'all')"),
+      pointer: z
+        .string()
+        .optional()
+        .describe("RFC 6901 JSON pointer to extract a specific field from the response body"),
+    },
+  },
+  tool("get_network_request", async ({ requestId, part, pointer }) =>
+    text(await callBridge("get_network_request", { requestId, part, pointer }))
+  )
+);
+
+server.registerTool(
+  "browser_network_replay",
+  {
+    title: "Replay network request with session cookies",
+    description:
+      "Re-executes a previously captured network request inside the target page context with current session cookies and credentials. Returns response status, headers, and body or JSON slice.",
+    inputSchema: {
+      requestId: z.string().describe("requestId of the request to replay"),
+      url: z.string().optional().describe("Override request URL"),
+      method: z.string().optional().describe("Override HTTP method"),
+      headers: z.record(z.string()).optional().describe("Override or add request headers"),
+      body: z.string().optional().describe("Override request body"),
+      pointer: z
+        .string()
+        .optional()
+        .describe("RFC 6901 JSON pointer to extract from the replayed response"),
+    },
+  },
+  tool("network_replay", async (params) => text(await callBridge("network_replay", params)))
+);
+
+server.registerTool(
+  "browser_mock_route",
+  {
+    title: "Declarative network mock rules",
+    description:
+      "Add, remove, list, or clear declarative network interception rules via CDP Fetch domain. Allows mocking response body/status or blocking URLs.",
+    inputSchema: {
+      action: z
+        .enum(["add", "remove", "list", "clear"])
+        .describe("Rule action: 'add', 'remove', 'list', or 'clear'"),
+      ruleId: z.string().optional().describe("Rule ID to remove"),
+      match: z
+        .object({
+          url: z.string().describe("URL pattern to match (supports * wildcards)"),
+          method: z.string().optional().describe("HTTP method to match (default all)"),
+        })
+        .optional()
+        .describe("Match criteria (for action: 'add')"),
+      effect: z
+        .object({
+          type: z.enum(["mock", "block"]).describe("Effect type: 'mock' or 'block'"),
+          status: z.number().int().optional().describe("HTTP status code for mock (default 200)"),
+          body: z.string().optional().describe("Mock response body string"),
+          headers: z.record(z.string()).optional().describe("Mock response headers"),
+        })
+        .optional()
+        .describe("Mock effect (for action: 'add')"),
+    },
+  },
+  tool("mock_route", async ({ action, ruleId, match, effect }) => {
+    if (action === "add") return text(await callBridge("network_rule_add", { match, effect }));
+    if (action === "remove") return text(await callBridge("network_rule_remove", { ruleId }));
+    if (action === "list") return text(await callBridge("network_rule_list"));
+    if (action === "clear") return text(await callBridge("network_rule_clear"));
+    throw new Error(`unknown mock action: ${action}`);
+  })
 );
 
 // The bridge leases this session's target tab to it for as long as it is seen; the heartbeat

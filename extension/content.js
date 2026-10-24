@@ -3,6 +3,7 @@
   window.__browserctlLoaded = true;
 
   let indexedElements = [];
+  let activeHoverLatch = null;
   const INTERACTIVE_SELECTOR = [
     "a[href]",
     "button",
@@ -1044,17 +1045,37 @@
     return null;
   }
 
+  // Walks the prototype chain from the element's prototype upward to locate the native
+  // property setter, bypassing framework instance descriptors (React, Vue, custom elements).
+  function findNativeSetter(el, prop = "value") {
+    let cur = el ? Object.getPrototypeOf(el) : null;
+    while (cur) {
+      const desc = Object.getOwnPropertyDescriptor(cur, prop);
+      if (desc && typeof desc.set === "function") return desc.set;
+      cur = Object.getPrototypeOf(cur);
+    }
+    const fallbackProto =
+      el && el.tagName === "TEXTAREA"
+        ? typeof HTMLTextAreaElement !== "undefined"
+          ? HTMLTextAreaElement.prototype
+          : null
+        : typeof HTMLInputElement !== "undefined"
+          ? HTMLInputElement.prototype
+          : null;
+    if (fallbackProto) {
+      const desc = Object.getOwnPropertyDescriptor(fallbackProto, prop);
+      if (desc && typeof desc.set === "function") return desc.set;
+    }
+    return null;
+  }
+
   function setNativeValue(el, value) {
-    const proto = Object.getPrototypeOf(el);
-    const ownSetter =
-      Object.getOwnPropertyDescriptor(el, "value") &&
-      Object.getOwnPropertyDescriptor(el, "value").set;
-    const protoSetter =
-      Object.getOwnPropertyDescriptor(proto, "value") &&
-      Object.getOwnPropertyDescriptor(proto, "value").set;
-    if (protoSetter && ownSetter !== protoSetter) protoSetter.call(el, value);
-    else if (protoSetter) protoSetter.call(el, value);
-    else el.value = value;
+    const setter = findNativeSetter(el, "value");
+    if (setter) {
+      setter.call(el, value);
+    } else {
+      el.value = value;
+    }
   }
 
   // Inputs, textareas and selects are listed first, under their own heading, and only there:
@@ -1134,6 +1155,7 @@
   }
 
   function snapshot(params = {}) {
+    if (typeof reassertHoverLatch === "function") reassertHoverLatch();
     const only = Array.isArray(params.only) && params.only.length ? new Set(params.only) : null;
     const maxText = params.maxText ?? (only ? 0 : 4000);
     const compact = !!params.compact;
@@ -1589,7 +1611,7 @@
     const oldestKept = refCounter - MAX_REF_LABELS;
     for (const ref of Object.keys(refLabels)) {
       if (refMap[ref]) continue;
-      const n = Number(ref.slice(4));
+      const n = Number(ref.replace(/^e/, ""));
       if (n <= oldestKept) delete refLabels[ref];
     }
   }
@@ -1598,7 +1620,7 @@
     const existing = reverseRefMap.get(el);
     if (existing && refMap[existing] && refMap[existing].deref() === el) return existing;
     if (refCounter > 0 && refCounter % REF_SWEEP_EVERY === 0) sweepRefs();
-    const ref = `ref_${++refCounter}`;
+    const ref = `e${++refCounter}`;
     refMap[ref] = new WeakRef(el);
     reverseRefMap.set(el, ref);
     try {
@@ -1770,7 +1792,7 @@
       `ambiguous target "${target}" matched ${candidates.length} elements (${reason}): ${list}. Disambiguate with a ref, prefix (css=, text=, placeholder=), or a more specific string.`,
       "AMBIGUOUS_TARGET",
       { target, count: candidates.length, candidates: candidates.slice(0, 5) },
-      "Disambiguate with a ref (@ref_...), prefix (css=, text=, placeholder=), or a narrower string."
+      "Disambiguate with a ref (@e1, @e2...), prefix (css=, text=, placeholder=), or a narrower string."
     );
   }
 
@@ -1802,7 +1824,7 @@
 
     if (rawTarget === null) {
       throw new Error(
-        "this action needs a 'target': a ref '@ref_1', a CSS selector, the control's visible text, or a snapshot index"
+        "this action needs a 'target': a ref '@e1', a CSS selector, the control's visible text, or a snapshot index"
       );
     }
 
@@ -1976,13 +1998,10 @@
       );
     }
 
-    const refMatch = tStr.match(/^@?(ref_\d+|e\d+)$/);
+    const refMatch = tStr.match(/^@?(e\d+)$/);
     if (refMatch) {
       const canonicalRef = tStr.replace(/^@/, "");
-      let el = resolveRef(canonicalRef);
-      if (!el && /^e\d+$/.test(canonicalRef)) {
-        el = resolveRef(`ref_${canonicalRef.slice(1)}`);
-      }
+      const el = resolveRef(canonicalRef);
       if (el) {
         el._resolved = {
           by: "ref",
@@ -1994,9 +2013,7 @@
         return el;
       }
 
-      const atMatch = tStr.match(/^@?(?:ref_|e)(\d+)$/);
-      // prettier-ignore
-      const canonical = atMatch ? `ref_${parseInt(atMatch[1], 10)}` : String(tStr).trim().replace(/^@/, "");
+      const canonical = `e${parseInt(refMatch[1], 10)}`;
       const moved = relocateByLabel(canonical);
       if (moved) {
         throw createStructuredError(
@@ -2243,6 +2260,7 @@
   }
 
   function read_page({ mode = "interactive", depth = 60, ref_id, maxChars = 50000 } = {}) {
+    if (typeof reassertHoverLatch === "function") reassertHoverLatch();
     const root = ref_id ? resolveRef(ref_id) : document.body;
     if (ref_id && !root)
       throw new Error(`ref "${ref_id}" not found or stale; call read_page without ref_id`);
@@ -2457,6 +2475,7 @@
   }
 
   function find({ query, selector, max = 20 } = {}) {
+    if (typeof reassertHoverLatch === "function") reassertHoverLatch();
     if (!query && !selector) throw new Error("find requires 'query' or 'selector'");
     if (selector) {
       let els;
@@ -2632,6 +2651,7 @@
   }
 
   function find_text({ query, regex = false, max = 20, contextChars = 80 } = {}) {
+    if (typeof reassertHoverLatch === "function") reassertHoverLatch();
     if (!query) throw new Error("find_text requires 'query'");
     const pattern = regex
       ? query
@@ -2883,6 +2903,7 @@
     autoSettle = true,
     settleMs = 150,
   } = {}) {
+    if (typeof clearHoverLatch === "function") clearHoverLatch();
     const el = resolveTarget({ target, index, ref, selector, text });
     // Text with no control around it is clicked where a pointer cursor marks a clickable box: the
     // click goes to the text itself and bubbles to that box's handler, as a real one would.
@@ -3121,10 +3142,15 @@
     }
 
     if ("value" in el) {
-      setNativeValue(el, text);
+      const normalized =
+        typeof text === "string" ? text.replace(/\r\n/g, "\n") : String(text ?? "");
+      setNativeValue(el, normalized);
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
-      return;
+      return {
+        valueNow: String(el.value ?? "").slice(0, 200),
+        matched: String(el.value ?? "") === normalized,
+      };
     }
 
     const candidateInputs = deepQueryAll(
@@ -3165,6 +3191,7 @@
     autoSettle = true,
     settleMs = 100,
   } = {}) {
+    if (typeof clearHoverLatch === "function") clearHoverLatch();
     const el = resolveTarget({ target, index, ref, selector, placeholder });
     if (el.tagName === "SELECT") {
       throw createStructuredError(
@@ -3222,8 +3249,14 @@
       }),
       resolved: el._resolved,
     };
-    if ("value" in el) out.effect.valueNow = String(el.value ?? "").slice(0, 200);
-    else if (el.isContentEditable) out.effect.textNow = String(el.textContent ?? "").slice(0, 200);
+    if ("value" in el) {
+      const expected = typeof text === "string" ? text.replace(/\r\n/g, "\n") : String(text ?? "");
+      out.effect.valueNow = String(el.value ?? "").slice(0, 200);
+      out.effect.matched = String(el.value ?? "") === expected;
+    } else if (el.isContentEditable) {
+      out.effect.textNow = String(el.textContent ?? "").slice(0, 200);
+      out.effect.matched = String(el.textContent ?? "").includes(String(text ?? ""));
+    }
     // The completions the field now offers, each a ref to click: picking one is what commits
     // the value on most autocomplete widgets, and typed text alone often does not.
     if (completes) {
@@ -3250,6 +3283,7 @@
     autoSettle = true,
     settleMs = 150,
   } = {}) {
+    if (typeof clearHoverLatch === "function") clearHoverLatch();
     const el = resolveTarget({ target, index, ref, selector, placeholder });
     const warning = actionability(el);
     const urlBefore = location.href;
@@ -3291,8 +3325,14 @@
       }),
       resolved: el._resolved,
     };
-    if ("value" in el) out.effect.valueNow = String(el.value ?? "").slice(0, 200);
-    else if (el.isContentEditable) out.effect.textNow = String(el.textContent ?? "").slice(0, 200);
+    if ("value" in el) {
+      const expected = typeof text === "string" ? text.replace(/\r\n/g, "\n") : String(text ?? "");
+      out.effect.valueNow = String(el.value ?? "").slice(0, 200);
+      out.effect.matched = String(el.value ?? "") === expected;
+    } else if (el.isContentEditable) {
+      out.effect.textNow = String(el.textContent ?? "").slice(0, 200);
+      out.effect.matched = String(el.textContent ?? "").includes(String(text ?? ""));
+    }
     if (warning)
       out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
     return out;
@@ -3343,6 +3383,7 @@
   }
 
   function scrollOnce({ direction = "down", amount = 400, target, ref, selector, index } = {}) {
+    if (typeof clearHoverLatch === "function") clearHoverLatch();
     const isUp = direction === "up";
     const isLeft = direction === "left";
     const isRight = direction === "right";
@@ -3545,8 +3586,7 @@
 
   // The events a pointer arriving over an element produces, pointer before mouse, at the
   // element's centre: menus and tooltips built on pointer events (Radix, newer MUI) listen for
-  // the first, older code for the second. Enter events do not bubble. CSS :hover is not among
-  // what this can reach; only a real pointer sets it.
+  // the first, older code for the second. Enter events do not bubble.
   function dispatchHover(el) {
     const r = el.getBoundingClientRect();
     const at = { clientX: r.x + r.width / 2, clientY: r.y + r.height / 2, view: window };
@@ -3561,25 +3601,83 @@
     fire(MouseEvent, "mousemove", true, at);
   }
 
+  // Pointer departure events reversing dispatchHover on the target element.
+  function dispatchUnhover(el) {
+    if (!el || !el.isConnected) return;
+    const r = el.getBoundingClientRect();
+    const at = { clientX: r.x + r.width / 2, clientY: r.y + r.height / 2, view: window };
+    const pointer = { ...at, pointerType: "mouse", isPrimary: true, pointerId: 1 };
+    const fire = (Ctor, type, bubbles, extra) =>
+      el.dispatchEvent(new Ctor(type, { bubbles, cancelable: bubbles, ...extra }));
+    fire(PointerEvent, "pointermove", true, pointer);
+    fire(MouseEvent, "mousemove", true, at);
+    fire(PointerEvent, "pointerout", true, pointer);
+    fire(PointerEvent, "pointerleave", false, pointer);
+    fire(MouseEvent, "mouseout", true, at);
+    fire(MouseEvent, "mouseleave", false, at);
+  }
+
+  function clearHoverLatch() {
+    activeHoverLatch = null;
+  }
+
+  // Re-applies hover events to the latched element before observation commands, keeping
+  // hover-revealed menus and tooltips visible in subsequent snapshots.
+  function reassertHoverLatch() {
+    if (!activeHoverLatch) return false;
+    const { el, ref } = activeHoverLatch;
+    const isVis = (node) => (typeof isVisible === "function" ? isVisible(node) : true);
+    const targetEl =
+      el && el.isConnected && isVis(el)
+        ? el
+        : ref &&
+            typeof refMap !== "undefined" &&
+            refMap[ref] &&
+            refMap[ref].isConnected &&
+            isVis(refMap[ref])
+          ? refMap[ref]
+          : null;
+    if (targetEl) {
+      dispatchHover(targetEl);
+      return true;
+    }
+    activeHoverLatch = null;
+    return false;
+  }
+
   async function hover({
     target,
     index,
     ref,
     selector,
     text,
+    release = false,
     autoSettle = true,
     settleMs = 50,
   } = {}) {
+    if (release) {
+      if (activeHoverLatch && activeHoverLatch.el) {
+        dispatchUnhover(activeHoverLatch.el);
+      }
+      clearHoverLatch();
+      return { hovered: null, released: true };
+    }
     const el = resolveTarget({ target, index, ref, selector, text });
     const warning = actionability(el);
     el.scrollIntoView({ block: "center", inline: "center" });
     dispatchHover(el);
+    activeHoverLatch = {
+      el,
+      ref: el.__ref,
+      target: target ?? (ref != null ? ref : selector || text || index),
+    };
     if (autoSettle && settleMs > 0) {
       await wait_settle({ timeoutMs: settleMs });
     }
     const out = {
       hovered: target ?? (ref != null ? ref : selector || text || index),
       resolved: el._resolved,
+      latched: true,
     };
     if (warning)
       out.warning = `element is not visible (${warning}) — the action was still applied, but verify the effect`;
@@ -3598,6 +3696,7 @@
     autoSettle: _autoSettle = true,
     settleMs: _settleMs = 100,
   } = {}) {
+    if (typeof clearHoverLatch === "function") clearHoverLatch();
     const el = resolveTarget({ target, index, ref, selector });
     const warning = actionability(el);
     if (el.tagName !== "SELECT") throw new Error("target element is not a select");
@@ -3700,6 +3799,7 @@
   }
 
   function press_key({ key, target: targetInput, index, ref, modifiers }) {
+    if (typeof clearHoverLatch === "function") clearHoverLatch();
     const named = targetInput !== undefined || index !== undefined || ref !== undefined;
     const target = named
       ? resolveTarget({ target: targetInput, index, ref })
@@ -3833,11 +3933,12 @@
       placeholder != null;
     const all = deepQueryAll('input[type="file"]');
     let input = null;
+    let el = null;
     let matchedBy = "";
     let resolved = null;
 
     if (named) {
-      const el = resolveTarget({ target, index, ref, selector, text, placeholder });
+      el = resolveTarget({ target, index, ref, selector, text, placeholder });
       resolved = el._resolved;
       if (isFileInput(el)) {
         input = el;
@@ -3878,6 +3979,17 @@
     }
 
     if (!input) {
+      if (named && el) {
+        for (const e of deepQueryAll("[data-bctl-upload-target]")) {
+          e.removeAttribute("data-bctl-upload-target");
+        }
+        el.setAttribute("data-bctl-upload-target", "1");
+        return {
+          isFileInput: false,
+          ref: getOrAssignRef(el),
+          resolved: el._resolved || resolved,
+        };
+      }
       throw createStructuredError(
         all.length === 0
           ? "no <input type=file> on this page"
@@ -3893,6 +4005,7 @@
     for (const e of deepQueryAll("[data-bctl-upload]")) e.removeAttribute("data-bctl-upload");
     input.setAttribute("data-bctl-upload", "1");
     return {
+      isFileInput: true,
       matchedBy,
       ref: getOrAssignRef(input),
       name: input.name || null,
@@ -3920,22 +4033,20 @@
     }
     let x = r.x;
     let y = r.y;
+    let reachedTop = window === window.top;
     for (let w = window; w !== w.top; w = w.parent) {
       let frame = null;
       try {
         frame = w.frameElement;
       } catch {}
       if (!frame) {
-        throw createStructuredError(
-          "the element is inside a cross-origin frame, whose position in the page cannot be read from inside it",
-          "CROSS_ORIGIN_FRAME",
-          {},
-          "Capture the viewport with take_screenshot instead."
-        );
+        reachedTop = false;
+        break;
       }
       const fr = frame.getBoundingClientRect();
       x += fr.x + frame.clientLeft;
       y += fr.y + frame.clientTop;
+      if (w.parent === window.top) reachedTop = true;
     }
     // The top viewport's size, so a capture of the visible tab can be cropped to this box.
     const top = window.top;
@@ -3944,6 +4055,7 @@
       y,
       width: r.width,
       height: r.height,
+      reachedTop,
       viewport: { width: top.innerWidth, height: top.innerHeight },
     };
   }
@@ -4190,7 +4302,133 @@
     return { recording: false };
   }
 
-  function extract({ selector, fields, max = 50 } = {}) {
+  function sanitizeCsvValue(val, csv_safe = true) {
+    if (val == null) return "";
+    let str = String(val);
+    if (csv_safe && /^[=+\-@\t\r]/.test(str)) {
+      str = "'" + str;
+    }
+    if (str.includes('"') || str.includes(",") || str.includes("\n") || str.includes("\r")) {
+      return '"' + str.replace(/"/g, '""') + '"';
+    }
+    return str;
+  }
+
+  function extract_table({
+    target,
+    selector,
+    csv_safe = true,
+    max_rows = 500,
+    max_cols = 100,
+    format = "json",
+  } = {}) {
+    let table = null;
+    if (target) {
+      table = resolveTarget({ target });
+    } else if (selector) {
+      table = deepQuery(selector);
+    }
+    if (!table) {
+      throw createStructuredError("ELEMENT_NOT_FOUND", "table element not found", {
+        target: target || selector,
+      });
+    }
+    if (table.tagName && table.tagName.toLowerCase() !== "table") {
+      const nested = table.querySelector ? table.querySelector("table") : null;
+      if (nested) table = nested;
+    }
+
+    const matrix = [];
+    const rows = Array.from(table.querySelectorAll ? table.querySelectorAll("tr") : []).slice(
+      0,
+      max_rows
+    );
+    let totalCols = 0;
+
+    for (let r = 0; r < rows.length; r++) {
+      if (!matrix[r]) matrix[r] = [];
+      const tr = rows[r];
+      const cells = Array.from(tr.children || []).filter(
+        (el) => el.tagName === "TH" || el.tagName === "TD"
+      );
+      let colIdx = 0;
+
+      for (const cell of cells) {
+        while (matrix[r][colIdx] !== undefined) {
+          colIdx++;
+        }
+        if (colIdx >= max_cols) break;
+
+        const rowspan = Math.max(1, parseInt(cell.getAttribute?.("rowspan") || "1", 10));
+        const colspan = Math.max(1, parseInt(cell.getAttribute?.("colspan") || "1", 10));
+        const text = (cell.innerText || cell.textContent || "").trim();
+
+        for (let dr = 0; dr < rowspan; dr++) {
+          const targetR = r + dr;
+          if (!matrix[targetR]) matrix[targetR] = [];
+          for (let dc = 0; dc < colspan; dc++) {
+            const targetC = colIdx + dc;
+            if (targetC < max_cols) {
+              matrix[targetR][targetC] = text;
+              if (targetC + 1 > totalCols) totalCols = targetC + 1;
+            }
+          }
+        }
+        colIdx += colspan;
+      }
+    }
+
+    if (matrix.length === 0) {
+      return { headers: [], rows: [], total_rows: 0, total_cols: 0 };
+    }
+
+    const firstRowHasTh = Boolean(rows[0] && rows[0].querySelector?.("th"));
+    let headers = [];
+    let startRow = 0;
+
+    if (firstRowHasTh) {
+      headers = (matrix[0] || []).map((h, i) => (h && h.trim() ? h.trim() : `col_${i + 1}`));
+      startRow = 1;
+    } else {
+      headers = Array.from({ length: totalCols }, (_, i) => `col_${i + 1}`);
+    }
+
+    const resultRows = [];
+    for (let r = startRow; r < matrix.length; r++) {
+      const rowObj = {};
+      const rowArr = matrix[r] || [];
+      for (let c = 0; c < totalCols; c++) {
+        const key = headers[c] || `col_${c + 1}`;
+        const rawVal = rowArr[c] !== undefined ? rowArr[c] : null;
+        rowObj[key] = rawVal;
+      }
+      resultRows.push(rowObj);
+    }
+
+    let csvOutput = undefined;
+    if (format === "csv") {
+      const headerLine = headers.map((h) => sanitizeCsvValue(h, false)).join(",");
+      const dataLines = resultRows.map((row) =>
+        headers.map((h) => sanitizeCsvValue(row[h], csv_safe)).join(",")
+      );
+      csvOutput = [headerLine, ...dataLines].join("\n");
+    }
+
+    return {
+      table_ref: "@" + getOrAssignRef(table),
+      headers,
+      rows: resultRows,
+      total_rows: resultRows.length,
+      total_cols: totalCols,
+      csv: csvOutput,
+    };
+  }
+
+  function extract(params = {}) {
+    if (params.mode === "table" || (!params.selector && params.target)) {
+      return extract_table(params);
+    }
+    const { selector, fields, max = 50 } = params;
     if (!selector) {
       throw new Error("extract requires a row 'selector' (e.g. 'table tbody tr' or 'li.result')");
     }
@@ -4257,6 +4495,7 @@
   }
 
   async function fill_form({ fields = [], submitTarget, autoSettle = true, settleMs = 150 } = {}) {
+    if (typeof clearHoverLatch === "function") clearHoverLatch();
     if (!Array.isArray(fields) || fields.length === 0) {
       throw new Error("fill_form requires 'fields' (array of {target, value, method?})");
     }
@@ -4292,10 +4531,15 @@
             insertIntoEditable(el, f.value ?? "", { paste: method === "paste" });
           }
         }
+        const valueNow = "value" in el ? String(el.value ?? "") : String(el.textContent ?? "");
+        const expected = String(f.value ?? "").replace(/\r\n/g, "\n");
+        const matched = "value" in el ? valueNow === expected : valueNow.includes(expected);
         filled.push({
           index: i,
           target: f.target,
           value: f.value,
+          valueNow: valueNow.slice(0, 200),
+          matched,
           resolved: el._resolved,
         });
       } catch (err) {
@@ -4567,6 +4811,7 @@
     autoSettle: _autoSettle = true,
     settleMs: _settleMs = 100,
   } = {}) {
+    if (typeof clearHoverLatch === "function") clearHoverLatch();
     const el = resolveTarget({ target, index, ref, selector, placeholder });
     const warning = actionability(el);
     el.scrollIntoView({ block: "center", inline: "center" });
@@ -4596,6 +4841,7 @@
     autoSettle: _autoSettle = true,
     settleMs: _settleMs = 100,
   } = {}) {
+    if (typeof clearHoverLatch === "function") clearHoverLatch();
     const el = resolveTarget({ target, index, ref, selector, text });
     const warning = actionability(el);
     el.scrollIntoView({ block: "center", inline: "center" });
@@ -4611,6 +4857,7 @@
   }
 
   function dblclick_element({ target, index, ref, selector, text } = {}) {
+    if (typeof clearHoverLatch === "function") clearHoverLatch();
     const el = resolveTarget({ target, index, ref, selector, text });
     const warning = actionability(el);
     el.scrollIntoView({ block: "center", inline: "center" });
@@ -4635,6 +4882,95 @@
     };
   }
 
+  function iframe_rect({ url } = {}) {
+    const iframes = deepQueryAll("iframe");
+    if (!iframes.length) return { x: 0, y: 0, width: 0, height: 0, borderLeft: 0, borderTop: 0 };
+    let match = null;
+    if (url) {
+      const clean = (u) => String(u || "").split(/[?#]/)[0];
+      const targetClean = clean(url);
+      match = iframes.find((f) => {
+        try {
+          return (
+            clean(f.src) === targetClean || clean(f.contentWindow?.location?.href) === targetClean
+          );
+        } catch {
+          return clean(f.src) === targetClean;
+        }
+      });
+    }
+    if (!match && iframes.length === 1) match = iframes[0];
+    if (!match) return { x: 0, y: 0, width: 0, height: 0, borderLeft: 0, borderTop: 0 };
+    const r = match.getBoundingClientRect();
+    const style = window.getComputedStyle ? window.getComputedStyle(match) : {};
+    return {
+      x: r.x,
+      y: r.y,
+      width: r.width,
+      height: r.height,
+      borderLeft: parseFloat(style.borderLeftWidth) || 0,
+      borderTop: parseFloat(style.borderTopWidth) || 0,
+    };
+  }
+
+  function show_help_banner({ reason = "Assistance needed" } = {}) {
+    hide_help_banner();
+    const host = document.createElement("div");
+    host.id = "bctl-help-banner-host";
+    host.setAttribute(
+      "style",
+      "position:fixed;top:0;left:0;width:100%;z-index:2147483647;pointer-events:none;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;"
+    );
+
+    const shadow = host.attachShadow ? host.attachShadow({ mode: "open" }) : host;
+    const banner = document.createElement("div");
+    banner.setAttribute(
+      "style",
+      "pointer-events:auto;background:#0f172a;color:#f8fafc;padding:12px 20px;border-bottom:3px solid #3b82f6;display:flex;align-items:center;justify-content:space-between;box-shadow:0 4px 12px rgba(0,0,0,0.35);"
+    );
+
+    const textSpan = document.createElement("div");
+    textSpan.setAttribute("style", "font-size:14px;line-height:1.4;");
+    textSpan.innerHTML = `<strong>[browserctl agent]</strong> ${reason.replace(/[<>&]/g, "")}`;
+
+    const btn = document.createElement("button");
+    btn.textContent = "Done / Resolved ✓";
+    btn.setAttribute(
+      "style",
+      "background:#2563eb;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer;margin-left:16px;"
+    );
+    btn.addEventListener("click", () => {
+      host.setAttribute("data-bctl-help-resolved", "1");
+      banner.style.background = "#14532d";
+      textSpan.innerHTML = "<strong>[browserctl agent]</strong> Resolved. Resuming automation...";
+      btn.style.display = "none";
+    });
+
+    banner.appendChild(textSpan);
+    banner.appendChild(btn);
+    shadow.appendChild(banner);
+    (document.body || document.documentElement).appendChild(host);
+    return { displayed: true };
+  }
+
+  function hide_help_banner() {
+    const existing = document.getElementById("bctl-help-banner-host");
+    if (existing) {
+      existing.remove();
+      return { removed: true };
+    }
+    return { removed: false };
+  }
+
+  function check_help_resolved() {
+    const existing = document.getElementById("bctl-help-banner-host");
+    if (!existing) return { resolved: false, active: false };
+    return {
+      active: true,
+      resolved: existing.getAttribute("data-bctl-help-resolved") === "1",
+    };
+  }
+
   const handlers = {
     snapshot,
     read_page,
@@ -4650,6 +4986,10 @@
     wait_settle,
     get_page_content,
     element_rect,
+    iframe_rect,
+    show_help_banner,
+    hide_help_banner,
+    check_help_resolved,
     upload_mark,
     describe_element,
     click_selector,
