@@ -17,6 +17,9 @@ import {
   abortRequest,
   abortAll,
   inFlightRequests,
+  computeTransportTimeout,
+  DEFAULT_ACTION_BUDGET_MS,
+  TRANSPORT_GRACE_SLACK_MS,
 } from "../../extension/transport/dispatcher.js";
 
 beforeEach(() => {
@@ -279,4 +282,43 @@ test("TC-PROTO-04: inFlightRequests map does not leak across repeated successful
   }
 
   assert.equal(inFlightRequests.size, 0);
+});
+
+// =====================================================================================
+// 5. Invariants: Object.assign Safe Error Contract & Hierarchical Timing Budget
+// =====================================================================================
+
+test("TC-PROTO-05: RpcError supports Object.assign without getter-only property errors", () => {
+  const err = new RpcError(-32004, "Initial message", { reason: "TIMEOUT" });
+
+  assert.doesNotThrow(() => {
+    Object.assign(err, {
+      reason: "CUSTOM_REASON",
+      error: "Updated message",
+      retriable: true,
+      details: { extra: 123 },
+    });
+  });
+
+  assert.equal(err.reason, "CUSTOM_REASON");
+  assert.equal(err.message, "Updated message");
+  assert.equal(err.error, "Updated message");
+  assert.equal(err.retriable, true);
+  assert.deepEqual(err.details, { extra: 123 });
+  assert.equal(err.data.reason, "CUSTOM_REASON");
+});
+
+test("TC-PROTO-06: computeTransportTimeout strictly enforces Hierarchical Timing Envelope (InnerBudget + GraceSlack)", () => {
+  // Explicit timeoutMs
+  assert.equal(computeTransportTimeout({ timeoutMs: 8000 }), 8000 + TRANSPORT_GRACE_SLACK_MS);
+  assert.equal(computeTransportTimeout({ timeoutMs: 12000 }), 12000 + TRANSPORT_GRACE_SLACK_MS);
+
+  // Fallback timeout property
+  assert.equal(computeTransportTimeout({ timeout: 10000 }), 10000 + TRANSPORT_GRACE_SLACK_MS);
+
+  // Missing or non-numeric timeout falls back to DEFAULT_ACTION_BUDGET_MS
+  assert.equal(computeTransportTimeout({}), DEFAULT_ACTION_BUDGET_MS);
+  assert.equal(computeTransportTimeout(null), DEFAULT_ACTION_BUDGET_MS);
+  assert.equal(computeTransportTimeout({ timeoutMs: -500 }), DEFAULT_ACTION_BUDGET_MS);
+  assert.equal(computeTransportTimeout({ timeoutMs: "invalid" }), DEFAULT_ACTION_BUDGET_MS);
 });

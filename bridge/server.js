@@ -26,7 +26,14 @@ const PORT = envNum("PORT", 8765);
 const HOST = envStr("HOST", "0.0.0.0");
 const COMMAND_TIMEOUT_MS = envNum("COMMAND_TIMEOUT_MS", 30_000);
 const ACTION_TIMEOUT_MS = { replay: 120_000, export_har: 120_000 };
-const WAIT_ACTIONS = new Set(["wait_for", "wait_settle", "wait_network_idle"]);
+const BUDGETED_ACTIONS = new Set([
+  "wait_for",
+  "wait_settle",
+  "wait_network_idle",
+  "download",
+  "request_help",
+  "exec_system_cmd",
+]);
 const TIMEOUT_BUFFER_MS = 5_000;
 const MAX_TIMEOUT_MS = 300_000;
 const HEARTBEAT_MS = envNum("HEARTBEAT_MS", 20_000);
@@ -36,8 +43,8 @@ const MAX_WS_PAYLOAD_BYTES = envNum("MAX_WS_PAYLOAD_BYTES", 100 * 1024 * 1024);
 
 function computeTimeoutMs(action, params) {
   let ms = ACTION_TIMEOUT_MS[action] || COMMAND_TIMEOUT_MS;
-  if (WAIT_ACTIONS.has(action)) {
-    const requested = Number(params && params.timeoutMs);
+  if (BUDGETED_ACTIONS.has(action)) {
+    const requested = Number(params && (params.timeoutMs || params.timeout));
     if (Number.isFinite(requested) && requested > 0) ms = requested + TIMEOUT_BUFFER_MS;
   }
   return Math.min(ms, MAX_TIMEOUT_MS);

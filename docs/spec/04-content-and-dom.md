@@ -135,3 +135,97 @@ export function csv_safe(val) {
    - Direct DOM access is blocked by browser security sandbox.
    - The content script emits frame descriptor metadata (`frameId`, `src`, `rect`).
    - The tool dispatcher routes execution through CDP `driver/frame.js` using `Runtime.evaluate` targeted at the subframe's specific execution context ID.
+
+---
+
+## 6. Stabilization Finite State Machine (`wait_settle`)
+
+### 6.1 Architecture & State Transitions
+Page settling must never rely on passive mutation listeners or unbuffered `setTimeout` calls. The settling engine implements a strict Finite State Machine (FSM):
+
+```mermaid
+stateDiagram-v2
+    [*] --> InitialQuietCheck
+    InitialQuietCheck --> Settled : No DOM mutations within 50ms & no running finite animations
+    InitialQuietCheck --> TrackingMutations : DOM mutation or finite animation detected
+    TrackingMutations --> Debouncing : Mutation recorded (sliding 50ms window)
+    Debouncing --> Settled : Quiet period completed (50ms elapsed with 0 mutations)
+    TrackingMutations --> HardDeadline : Bounded timeoutMs reached
+    Debouncing --> HardDeadline : Bounded timeoutMs reached
+    Settled --> [*] : Return SettleReport(settled=true, reason="quiet")
+    HardDeadline --> [*] : Return SettleReport(settled=false, reason="deadline")
+```
+
+### 6.2 The Three Invariants of the Settle FSM
+1. **Immediate Initial Debounce Invariant**:
+   - When `wait_settle` begins, an active 50ms debounce timer is started immediately.
+   - If the page is already quiet (0 mutations occur), the FSM transitions to `Settled` after 50ms instead of waiting for the full `timeoutMs` budget.
+2. **Finite vs. Infinite Animation Invariant**:
+   - SPA platforms (YouTube, Facebook, GitHub) continuously run infinite CSS keyframes (spinners, skeleton pulses, background ambient animations).
+   - The FSM filters out all non-finite animations:
+     ```javascript
+     function isFiniteRunningAnimation(anim) {
+       if (anim.playState !== "running") return false;
+       if (anim.playbackRate <= 0) return false;
+       const timing = anim.effect ? anim.effect.getTiming() : null;
+       if (timing && timing.iterations === Infinity) return false;
+       return true;
+     }
+     ```
+   - Only finite user transitions or layout animations block the `settled` state.
+3. **No-Throw Structured Contract**:
+   - Reaching `timeoutMs` is a valid domain outcome, not an exceptional crash.
+   - The FSM always resolves with a structured `SettleReport`:
+     ```typescript
+     interface SettleReport {
+       settled: boolean;
+       readyState: DocumentReadyState;
+       waitedMs: number;
+       mutationCount: number;
+       activeAnimations: number;
+       reason: "quiet" | "deadline";
+     }
+     ```
+
+---
+
+## 7. Deterministic Element Resolution Pipeline (`resolveTarget`)
+
+### 7.1 Pipeline Stages
+To prevent false-positive `ambiguous target` errors on responsive websites that duplicate DOM nodes for mobile/desktop layouts:
+
+```
+[Target Query: ref | css | text | role]
+                 │
+                 ▼
+     Stage 1: DOM Connectivity
+     Filter candidates: node.isConnected === true
+                 │
+                 ▼
+     Stage 2: Strict Actionability & Visibility Filter
+     Filter out elements with:
+     - display === "none"
+     - visibility === "hidden"
+     - getBoundingClientRect() has width === 0 && height === 0
+                 │
+                 ▼
+     Stage 3: Viewport Intersection Scoring
+     Rank candidates:
+     - Score 2: Visible & intersects viewport (top < window.innerHeight && bottom > 0)
+     - Score 1: Visible but off-screen
+                 │
+                 ▼
+     Stage 4: Cardinality & Disambiguation Guard
+     - Count === 0 -> Throw ELEMENT_NOT_FOUND (-32002) with candidates/hints
+     - Exactly 1 highest-scoring candidate -> Return target deterministically
+     - >1 equally-ranked actionable candidates -> Throw AMBIGUOUS_TARGET with @e tokens
+```
+
+### 7.2 Disambiguation Exception Format
+If and only if multiple elements pass Stages 1-3 with identical highest scores:
+```json
+{
+  "code": -32003,
+  "message": "ambiguous target \"input[name='search']\" matched 2 visible elements: @e57 <input> \"Search Wikipedia\", @e73 <input> \"Search Wikipedia\". Disambiguate with a ref, prefix (css=, text=, placeholder=), or a more specific string."
+}
+```

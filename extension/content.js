@@ -2036,9 +2036,6 @@
     const hasCssSyntax = /[#.\[\]>+~:]|\s/.test(tStr);
     if (hasCssSyntax && isValidCss(tStr)) {
       const cssMatches = deepQueryAll(tStr);
-      if (cssMatches.length > 1) {
-        ambiguityError(tStr, cssMatches.map(makeCandidate), "CSS selector match");
-      }
       if (cssMatches.length === 1) {
         const el = cssMatches[0];
         el._resolved = {
@@ -2049,6 +2046,56 @@
           matchCount: 1,
         };
         return el;
+      }
+      if (cssMatches.length > 1) {
+        // Stage 1 & 2: Actionability & Visibility Filtering
+        const actionable = cssMatches.filter((el) => el.isConnected !== false && isVisible(el));
+        const candidates = actionable.length > 0 ? actionable : cssMatches;
+
+        if (candidates.length === 1) {
+          const el = candidates[0];
+          el._resolved = {
+            by: "css",
+            ref: "@" + getOrAssignRef(el),
+            tag: el.tagName.toLowerCase(),
+            label: elementText(el).slice(0, 50).trim(),
+            matchCount: 1,
+          };
+          return el;
+        }
+
+        // Stage 3: Viewport Intersection Scoring
+        const inViewport = (el) => {
+          try {
+            const rect = el.getBoundingClientRect();
+            return (
+              rect.width > 0 &&
+              rect.height > 0 &&
+              rect.top < (window.innerHeight || document.documentElement.clientHeight) &&
+              rect.bottom > 0 &&
+              rect.left < (window.innerWidth || document.documentElement.clientWidth) &&
+              rect.right > 0
+            );
+          } catch {
+            return false;
+          }
+        };
+
+        const inViewCandidates = candidates.filter(inViewport);
+        if (inViewCandidates.length === 1) {
+          const el = inViewCandidates[0];
+          el._resolved = {
+            by: "css-viewport-priority",
+            ref: "@" + getOrAssignRef(el),
+            tag: el.tagName.toLowerCase(),
+            label: elementText(el).slice(0, 50).trim(),
+            matchCount: 1,
+          };
+          return el;
+        }
+
+        const toReport = inViewCandidates.length > 1 ? inViewCandidates : candidates;
+        ambiguityError(tStr, toReport.map(makeCandidate), "CSS selector match");
       }
     }
 
@@ -2813,13 +2860,30 @@
   const SUGGESTION_WAIT_MS = 300;
   const SUGGESTIONS_LISTED = 8;
 
+  function isFiniteRunningAnimation(anim) {
+    try {
+      if (anim.playState !== "running") return false;
+      if (anim.playbackRate <= 0) return false;
+      const timing = anim.effect ? anim.effect.getTiming() : null;
+      if (timing && timing.iterations === Infinity) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function wait_settle({ timeoutMs = 150 } = {}) {
     const start = Date.now();
     return new Promise((resolve) => {
       let timer = null;
+      let maxTimer = null;
       let observer = null;
       let mutationCount = 0;
+      let resolved = false;
+
       const done = () => {
+        if (resolved) return;
+        resolved = true;
         if (observer) {
           try {
             observer.disconnect();
@@ -2830,13 +2894,22 @@
           clearTimeout(timer);
           timer = null;
         }
+        if (maxTimer) {
+          clearTimeout(maxTimer);
+          maxTimer = null;
+        }
+
         const ready = document.readyState === "complete";
-        const anims = document.getAnimations ? document.getAnimations().length === 0 : true;
+        const runningAnims = document.getAnimations ? document.getAnimations().filter(isFiniteRunningAnimation).length : 0;
+        const settled = ready && runningAnims === 0;
+
         resolve({
-          settled: ready && anims,
+          settled,
           readyState: document.readyState,
           waitedMs: Date.now() - start,
           mutationCount,
+          activeAnimations: runningAnims,
+          reason: settled ? "quiet" : "deadline",
         });
       };
 
@@ -2854,7 +2927,10 @@
         });
       } catch {}
 
-      setTimeout(done, timeoutMs);
+      // Invariant: Immediate initial debounce (50ms quiet check).
+      // If no mutations occur and finite animations are settled, resolves after 50ms rather than hanging.
+      timer = setTimeout(done, 50);
+      maxTimer = setTimeout(done, Math.max(timeoutMs, 50));
     });
   }
 
@@ -4601,10 +4677,12 @@
     text,
     placeholder,
     attr,
+    attribute,
     all,
     max = 50,
     fields,
   } = {}) {
+    const attrName = attr || attribute;
     if (property === "title") return { property: "title", value: document.title };
     if (property === "url") return { property: "url", value: location.href };
 
@@ -4669,7 +4747,7 @@
         fields && typeof fields === "object" && !Array.isArray(fields) ? fields : null;
       const missingByField = new Map();
       const matches = capped.map((node) => {
-        if (!fieldSpecs) return { ref: getOrAssignRef(node), ...readOneProperty(node, prop, attr) };
+        if (!fieldSpecs) return { ref: getOrAssignRef(node), ...readOneProperty(node, prop, attrName) };
         const row = { ref: getOrAssignRef(node) };
         for (const [name, spec] of Object.entries(fieldSpecs)) {
           const f = typeof spec === "string" ? { selector: spec } : spec || {};
@@ -4752,7 +4830,7 @@
       return out;
     };
 
-    const out = readOneProperty(el, property || "text", attr);
+    const out = readOneProperty(el, property || "text", attrName);
     if (el._resolved) out.resolved = el._resolved;
     return MATCH_COUNTED.has(property || "text") ? withMatchCount(out) : out;
   }

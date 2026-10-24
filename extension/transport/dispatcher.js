@@ -9,6 +9,24 @@ import { RpcError, RPC_ERRORS } from "./errors.js";
  */
 export const inFlightRequests = new Map();
 
+export const DEFAULT_ACTION_BUDGET_MS = 60_000;
+export const TRANSPORT_GRACE_SLACK_MS = 5_000;
+
+/**
+ * Computes the outer transport watchdog timeout following the Hierarchical Timing Envelope:
+ * OuterWatchdog = ActionBudget + GRACE_SLACK (5,000ms).
+ *
+ * @param {object} [params] - Action parameters.
+ * @returns {number} Transport timeout in milliseconds.
+ */
+export function computeTransportTimeout(params) {
+  const actionTimeout = Number(params && (params.timeoutMs || params.timeout));
+  if (Number.isFinite(actionTimeout) && actionTimeout > 0) {
+    return actionTimeout + TRANSPORT_GRACE_SLACK_MS;
+  }
+  return DEFAULT_ACTION_BUDGET_MS;
+}
+
 /**
  * Executes an async operation with abort and timeout management.
  *

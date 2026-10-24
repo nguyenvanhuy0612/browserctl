@@ -66,6 +66,8 @@ flowchart TB
 4. **Multi-Browser & Multi-Tab Isolation**: The bridge multiplexes connections across multiple isolated browser instances and profiles (`chrome-1`, `chrome-2`, `chrome-3`). Mutations in one tab or profile must not poison another.
 5. **Untrusted Page Content Boundary**: Text and DOM structures extracted from web pages are treated strictly as untrusted data, never executed as instructions.
 6. **Backward Compatibility Guarantee**: Existing test suites relying on `tests/unit/source-slice.mjs` must continue to pass during and after modularization via barrel re-exports.
+7. **Hierarchical Timing Budget (Timing Envelope)**: Outer RPC and WebSocket watchdogs must strictly exceed inner execution budgets by `TIMEOUT_BUFFER_MS` (5,000ms): $\text{OuterWatchdog} = \text{ActionBudget} + \text{GRACE\_SLACK}$. Transport layers must never preempt or abort inner actions with the same millisecond deadline.
+8. **Deterministic Actionability & Stabilization FSM**: DOM stabilization (`wait_settle`) must run an immediate quiet check at $t=0$ and filter infinite running animations. Element resolution must filter disconnected/hidden elements and rank candidates by viewport presence before triggering ambiguity guards.
 
 ---
 

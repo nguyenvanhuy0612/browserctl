@@ -79,16 +79,35 @@ export class RpcError extends Error {
     return this.message;
   }
 
+  set error(val) {
+    this.message = String(val || "");
+  }
+
   get reason() {
-    return this.data.reason;
+    return this.data ? this.data.reason : undefined;
+  }
+
+  set reason(val) {
+    if (!this.data) this.data = {};
+    this.data.reason = val;
   }
 
   get retriable() {
-    return this.data.retriable;
+    return this.data ? this.data.retriable : false;
+  }
+
+  set retriable(val) {
+    if (!this.data) this.data = {};
+    this.data.retriable = Boolean(val);
   }
 
   get details() {
-    return this.data.details;
+    return this.data ? this.data.details : null;
+  }
+
+  set details(val) {
+    if (!this.data) this.data = {};
+    this.data.details = val;
   }
 
   toJSON() {

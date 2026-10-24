@@ -129,7 +129,7 @@ async function main() {
 
   try {
     await openMainTab(base + "/");
-    await cmd("wait_settle", { timeoutMs: 3000 });
+    await cmd("wait_settle", {});
 
     // ==========================================
     // 1. STORAGE PROFILE

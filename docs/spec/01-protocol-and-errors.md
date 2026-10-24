@@ -130,13 +130,15 @@ All subsystems must throw or return standardized `RpcError` instances. Ad-hoc st
 
 ## 4. Error Class Definition (`extension/transport/errors.js`)
 
+The `RpcError` class implements the JSON-RPC error contract and guarantees safe object cloning, serialization, and property assignment (`Object.assign` compatibility):
+
 ```javascript
 export class RpcError extends Error {
   /**
    * @param {number} code
    * @param {string} message
    * @param {object} [data]
-   * @param {string} data.reason
+   * @param {string} [data.reason]
    * @param {boolean} [data.retriable=false]
    * @param {*} [data.details]
    */
@@ -147,8 +149,35 @@ export class RpcError extends Error {
     this.data = {
       reason: data.reason || "UNKNOWN_ERROR",
       retriable: Boolean(data.retriable),
-      details: data.details || null
+      details: data.details !== undefined ? data.details : null
     };
+  }
+
+  get reason() {
+    return this.data ? this.data.reason : undefined;
+  }
+
+  set reason(val) {
+    if (!this.data) this.data = {};
+    this.data.reason = val;
+  }
+
+  get retriable() {
+    return this.data ? this.data.retriable : false;
+  }
+
+  set retriable(val) {
+    if (!this.data) this.data = {};
+    this.data.retriable = Boolean(val);
+  }
+
+  get details() {
+    return this.data ? this.data.details : null;
+  }
+
+  set details(val) {
+    if (!this.data) this.data = {};
+    this.data.details = val;
   }
 
   toJSON() {
@@ -172,25 +201,78 @@ export class RpcError extends Error {
 
 ---
 
-## 5. Request Cancellation & Abort Controller Contract
+## 5. Hierarchical Timing Budget & Deadline Envelope Specification
 
-Every in-flight action must accept an `AbortSignal` and register cleanup hooks to prevent zombie browser operations:
+### 5.1 The Anti-Pattern: Unbuffered Watchdog Collision
+When outer transport wrappers (Bridge, Extension WebSocket Dispatcher) use the exact same `timeoutMs` value as the inner action's execution budget, a race condition occurs at millisecond $T$. The transport layer violently aborts the Promise with a generic `NAVIGATION_TIMEOUT` or socket drop, preventing the action from returning its structured timeout report or helpful diagnostics.
+
+### 5.2 The Hierarchical Deadline Invariant
+All multi-tier RPC boundaries must strictly enforce the **Hierarchical Timing Envelope**:
+$$\text{OuterWatchdog} = \text{InnerActionBudget} + \text{GRACE\_SLACK}$$
+where standard $\text{GRACE\_SLACK} = 5,000\,\text{ms}$.
+
+```
+[Agent / MCP Client]       Action Execution Budget: T (e.g. 10,000ms)
+       │
+       ▼ (Slack: +5,000ms)
+[Bridge Daemon]            Bridge Command Timeout: T + 5,000ms (15,000ms)
+       │
+       ▼ (Slack: +5,000ms)
+[Extension Dispatcher]     Transport Watchdog (executeWithAbort): T + 5,000ms (15,000ms)
+       │
+       ▼
+[Content Script / CDP]     Action Execution Budget: T (10,000ms)
+                           -> At 10,000ms, inner action resolves gracefully with
+                              structured status: { settled: false, waitedMs: 10000, ... }
+                              WITHOUT being killed prematurely by the outer watchdog!
+```
+
+### 5.3 Budgeted Actions Registry
+The following actions accept an explicit caller execution budget (`timeoutMs`) and must be granted `TIMEOUT_BUFFER_MS` at both Bridge and Extension transport boundaries:
+- `wait_for`
+- `wait_settle`
+- `wait_network_idle`
+- `download`
+- `request_help`
+- `exec_system_cmd`
+
+---
+
+## 6. Request Cancellation & Abort Controller Contract
+
+Every in-flight action must accept an `AbortSignal` and register cleanup hooks to prevent zombie browser operations. The transport watchdog must only trigger when the inner action has exceeded its budget plus the grace slack:
+
 ```javascript
-// Transport dispatcher pattern
+// Transport dispatcher pattern with Hierarchical Timing Envelope
 const inFlightRequests = new Map();
+const DEFAULT_ACTION_BUDGET_MS = 60_000;
+const TRANSPORT_GRACE_SLACK_MS = 5_000;
+
+export function computeTransportTimeout(params) {
+  const actionTimeout = Number(params && (params.timeoutMs || params.timeout));
+  if (Number.isFinite(actionTimeout) && actionTimeout > 0) {
+    return actionTimeout + TRANSPORT_GRACE_SLACK_MS;
+  }
+  return DEFAULT_ACTION_BUDGET_MS;
+}
 
 export async function executeWithAbort(requestId, timeoutMs, handler) {
   const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort(new RpcError(-32004, "Operation timed out", { reason: "TIMEOUT" }));
-  }, timeoutMs);
+  let timer = null;
 
-  inFlightRequests.set(requestId, controller);
+  if (typeof timeoutMs === "number" && timeoutMs > 0 && timeoutMs < Infinity) {
+    timer = setTimeout(() => {
+      controller.abort(new RpcError(-32004, "Operation timed out", { reason: "TIMEOUT", retriable: true }));
+    }, timeoutMs);
+  }
+
+  if (requestId != null) inFlightRequests.set(requestId, controller);
+
   try {
     return await handler(controller.signal);
   } finally {
-    clearTimeout(timer);
-    inFlightRequests.delete(requestId);
+    if (timer) clearTimeout(timer);
+    if (requestId != null) inFlightRequests.delete(requestId);
   }
 }
 ```

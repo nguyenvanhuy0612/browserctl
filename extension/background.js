@@ -42,6 +42,7 @@ import {
   abortRequest,
   abortAll,
   inFlightRequests,
+  computeTransportTimeout,
 } from "./transport/dispatcher.js";
 import {
   sendCdpCommand,
@@ -352,7 +353,9 @@ async function connect() {
       abortRequest(msg.id, msg.reason);
       return;
     }
-    const timeoutMs = (msg.params && (msg.params.timeoutMs || msg.params.timeout)) || 60000;
+    const timeoutMs = typeof computeTransportTimeout === "function"
+      ? computeTransportTimeout(msg.params)
+      : (msg.params && (msg.params.timeoutMs || msg.params.timeout)) || 60000;
     const runDispatch = () =>
       typeof executeWithAbort === "function" && msg.id
         ? executeWithAbort(msg.id, timeoutMs, (signal) => dispatch({ ...msg, signal }))

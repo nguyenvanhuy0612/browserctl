@@ -93,6 +93,19 @@ Performs multi-step hardware mouse interpolation from source `(fromX, fromY)` to
 ### 3.3 Keyboard Dispatcher
 - Dispatches `rawKeyDown`, `keyDown`, `keyUp`, and `char` events with correct virtual key codes, scan codes, and modifier bitmasks (`Alt: 1, Ctrl: 2, Meta: 4, Shift: 8`).
 
+### 3.4 OS Window Focus Invariant & DOM Fallback Contract
+Chromium drops CDP synthetic mouse and keyboard events if the target tab's browser window is not focused at the operating system level (`win.focused === false`).
+1. **Foreground Guard (`requireForegroundForInput`)**:
+   - Actions requiring hardware input (`coordinate_click`, `coordinate_drag`, `wheel`, `press_key` with physical modifiers) verify that `tab.active && win.focused`.
+   - If not in foreground, the driver throws a descriptive refusal with actionable recovery hints:
+     `"wheel needs the target tab in the foreground (its window is not focused). Either foreground it first (switch_tab {id, focus:true}), or use a DOM-level equivalent that works in the background."`
+2. **DOM-Level Fallback Contract**:
+   - For background automation or automated CI runners where OS focus cannot be stolen, callers should route interactions via DOM-level tools:
+     - `click` / `click_selector` by ref or CSS selector (dispatches DOM PointerEvent).
+     - `type` / `fill_form` (uses the 10-step reactive setter guard).
+     - `scroll` (uses `window.scrollBy` / `element.scrollIntoView`).
+     - `press_key` with `{ allowSynthetic: true }` (dispatches synthetic in-page KeyboardEvent).
+
 ---
 
 ## 4. Emulation & Device Controller (`extension/driver/emulate.js`)
