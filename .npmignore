@@ -14,3 +14,9 @@ tests/
 bridge/calls.jsonl*
 bridge/telemetry.jsonl
 bridge/bridge.log
+
+# Colocated test specifications (never published to npm)
+*.spec.js
+*.spec.mjs
+**/*.spec.js
+**/*.spec.mjs

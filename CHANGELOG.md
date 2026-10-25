@@ -3,6 +3,18 @@
 One entry per published version. The reasoning and measurements behind each change are in the
 commit history and on the GitHub release.
 
+## 0.9.5
+
+Architecture modularization and core stabilization enhancements integrated from BSK, featuring
+hierarchical timing envelopes, settle FSM, target actionability, and colocated unit specifications.
+
+- Modularized extension architecture across dedicated domain subsystems: `transport/` (JSON-RPC dispatch and error taxonomy), `driver/` (CDP input, session, frame, network, emulate), `content/` (DOM observer, registry, setter, snapshot, table matrix), and `tools/` (domain registries).
+- Hierarchical timing envelopes: `computeTransportTimeout` guarantees deterministic request timeouts with explicit grace slack.
+- Stabilization FSM: `wait_settle` reliably detects idle DOM state without blocking on infinite animations.
+- Target actionability pipeline: disambiguates dual candidates when one is off-screen or hidden.
+- Colocated JavaScript Unit Specifications: zero-dependency micro-specs across `bridge/` and `mcp/` core modules running on native Node.js test runner.
+- Packaging guardrail: strict two-tier isolation ensuring test specifications are excluded from npm distribution.
+
 ## 0.9.4
 
 A snapshot names what you ask for and nothing twice: `only` lists just the fields, buttons or

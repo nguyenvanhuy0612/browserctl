@@ -1,6 +1,6 @@
 {
   "name": "browserctl-mcp",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "Universal Browser Control Protocol & MCP Server for AI Agents and Developers",
   "type": "module",
   "main": "cli.js",
@@ -31,6 +31,8 @@
   },
   "scripts": {
     "test": "node --test \"tests/unit/**/*.test.mjs\"",
+    "test:colocated": "node --test \"bridge/**/*.spec.js\" \"mcp/**/*.spec.js\"",
+    "test:all": "npm test && npm run test:colocated",
     "lint": "eslint cli.js bridge/**/*.js mcp/**/*.js extension/**/*.js",
     "format": "prettier --write cli.js bridge/**/*.js mcp/**/*.js extension/**/*.js",
     "format:check": "prettier --check cli.js bridge/**/*.js mcp/**/*.js extension/**/*.js",

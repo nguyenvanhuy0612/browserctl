@@ -1,4 +1,4 @@
-# browserctl Core Tool Reference — v0.9.4
+# browserctl Core Tool Reference — v0.9.5
 
 browserctl provides 25 core tools (78 tools across all profiles) for web automation and agent inspection.
 
