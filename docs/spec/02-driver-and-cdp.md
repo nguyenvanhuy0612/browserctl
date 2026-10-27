@@ -156,6 +156,37 @@ export function resolveJsonPointer(obj, pointer) {
   - `Fetch.failRequest` (simulate connection failure `Failed`, `Aborted`, `AccessDenied`).
   - `Fetch.continueRequest` (passthrough with optional header overrides).
 
-### 5.3 In-Page Session Replay (`network_replay`)
-- Executes fetch calls directly within the active web page context via content script or `Runtime.evaluate`.
-- Reuses active session state (cookies, HTTP-only tokens, Bearer authorization, origin headers) without manual token extraction.
+### 5.3 In-Page Context Request (`make_request`) & Replay (`network_replay`)
+- **Execution Target**: Executes directly in the tab's main execution context using `window.fetch` via content script messaging or `Runtime.evaluate`.
+- **Zero CDP Requirement**: Does not require attaching `chrome.debugger` (`cdp_attach`), eliminating automated test warnings and browser infobars.
+- **Dual Mode: Inherit vs Custom**:
+  - **Inherit Mode (`credentials: "include"`, default)**: Automatically inherits session state, `HttpOnly` and `SameSite` cookies, `Origin`, `Referer`, CORS policies, and client TLS fingerprints.
+  - **Custom Mode (`credentials: "omit" | "same-origin"`)**: Allows isolated, clean HTTP requests with explicit header control (`Authorization`, `X-Custom-*`) without polluting or relying on tab session cookies.
+- **Payload & Query Adaptation**:
+  - Auto-encodes `query` dictionary into URL search params.
+  - Automatically stringifies JSON object payloads and asserts `Content-Type: application/json; charset=utf-8`.
+  - Supports string, form-data, and raw payloads.
+- **Robust Error Handling**:
+  - Does not reject on HTTP 4xx/5xx; returns complete `{ ok: false, status, statusText, headers, data, text, curl }` for diagnostic evaluation.
+  - Rejects with structured errors on network disconnection or AbortController timeout.
+- **RFC 6901 Pointer Plucking**: Supports `pointer` to extract nested target fields from large JSON responses without exceeding model context limits.
+
+### 5.4 Minimal cURL Generator
+Every `make_request` execution produces a sanitized, ready-to-copy `curl` invocation in its result:
+- Strips ephemeral, noisy browser headers (`sec-ch-ua`, `sec-fetch-*`, `:authority`, `:path`).
+- Preserves core headers: `Authorization`, `Content-Type`, `Accept`, custom `X-*`, and session cookies when explicitly requested.
+- Shell-escapes URL, headers, and payload for cross-platform POSIX and PowerShell compatibility.
+
+### 5.5 Unified Network Monitor (`monitor_requests`) & Wait Primitive (`wait_for_request`)
+- **Actions**:
+  - `list`: Enumerates captured network traffic with comprehensive filtering:
+    - `url_pattern`: Wildcard (`*api/v1/*`) or regex substring matching.
+    - `method`: HTTP method filter (`GET`, `POST`, `PUT`, `DELETE`).
+    - `status`: Specific status code or range (e.g. `200`, `4xx`).
+    - `resource_type`: `fetch`, `xhr`, `document`, `websocket`, or `all`.
+    - `include_body`: Inline response body retrieval without secondary round-trips.
+    - `limit` & `since_id`: Pagination and delta retrieval.
+  - `get`: Full fidelity inspect for a single `requestId` including request headers, POST body, response headers, and body with optional JSON pointer.
+  - `clear`: Purges captured network event buffer.
+  - `wait` (`wait_for_request`): Suspends execution until a network request/response matching `url_pattern` and `method` settles or timeout expires.
+- **Backward Compatibility Aliases**: `get_network_requests`, `get_network_request`, `get_response_body`, and `network_replay` remain operational as thin compatibility facades delegating to the unified engine.

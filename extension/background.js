@@ -157,6 +157,7 @@ const CONTENT_ACTIONS = [
   "element_rect",
   "extract",
   "fill_form",
+  "make_request",
   "iframe_rect",
   "show_help_banner",
   "hide_help_banner",
@@ -460,6 +461,10 @@ const ACTION_ALIASES = {
   file_upload: { action: "upload", params: {} },
   evaluate: { action: "eval_js", params: {} },
   get_content: { action: "get_page_content", params: {} },
+  request: { action: "make_request", params: {} },
+  fetch: { action: "make_request", params: {} },
+  monitor: { action: "monitor_requests", params: {} },
+  wait_for_request: { action: "monitor_requests", params: { action: "wait" } },
 };
 
 const NOT_EXTENSION_ACTIONS = {

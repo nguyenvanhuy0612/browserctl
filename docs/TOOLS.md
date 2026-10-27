@@ -1,4 +1,4 @@
-# Tool surface as it actually is — generated 2026-10-25, browserctl 0.9.5
+# Tool surface as it actually is — generated 2026-10-27, browserctl 0.9.5
 
 Generated from the running server (`server._registeredTools`), not written by hand — the last
 hand-written version of this list claimed `all` on a tool that did not have it.
@@ -42,10 +42,12 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 |---|---|---|
 | `exec_system_cmd` | *command, cwd, env, timeoutMs | [SESSION] Execute a shell/system command on the host running the bridge server. Returns exitCode, stdout, stderr, all (combined output), failed, timedOut, and signal. |
 
-### network (11)
+### network (13)
 
 | Tool | Parameters | Description |
 |---|---|---|
+| `make_request` | *url, method, headers, body, json, query, credentials, timeout_ms, pointer, requestId, format | Execute an HTTP request directly inside the target tab context with options to inherit session credentials or run custom isolated requests. Generates executable minimal curl command. |
+| `monitor_requests` | action, url_pattern, method, status, resource_type, limit, since_id, include_body, requestId, pointer, timeout_ms, format | Inspect, filter, or wait for captured network requests. Supports filtering by url_pattern, method, status, type, inline response bodies, inspecting single request details, or waiting for request to finish. |
 | `get_network_requests` | urlContains, format | Return network requests captured since attach (method, url, status, type, size). Requires browser_cdp_attach. |
 | `get_response_body` | *requestId, pointer, format | Fetch the response body of a captured request by its requestId (from get_network_requests). Best-effort; bodies may be evicted. Supports optional pointer (RFC 6901 JSON pointer). Requires browser_cdp_attach. |
 | `get_network_request` | *requestId, part, pointer, format | Inspect full details of a single network request by requestId. Supports slicing by part ('response', 'request', 'headers', 'timing') and querying JSON Pointer. |

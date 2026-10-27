@@ -15,6 +15,8 @@ import {
   emulate,
   createNetworkRule,
   networkReplay,
+  makeRequest,
+  generateCurlCommand,
   getFrameTree,
   flattenFrameTree,
   findFrame,
@@ -38,6 +40,8 @@ export {
   emulate,
   createNetworkRule,
   networkReplay,
+  makeRequest,
+  generateCurlCommand,
   getFrameTree,
   flattenFrameTree,
   findFrame,
@@ -890,6 +894,167 @@ function briefRequest(e) {
   };
 }
 
+async function handleMonitorRequests(tabId, params = {}) {
+  const s = await requireDomains(tabId);
+  const action = params.action || "list";
+
+  if (action === "clear") {
+    s.network.clear();
+    return { ok: true, result: { cleared: true, tabId } };
+  }
+
+  if (action === "get") {
+    if (!params.requestId) {
+      throw new Error("monitor_requests get requires 'requestId'");
+    }
+    const req = s.network.get(params.requestId);
+    if (!req) {
+      throw new Error(`network request ${params.requestId} not found (evicted or never captured)`);
+    }
+
+    let bodyText = undefined;
+    let base64Encoded = false;
+    try {
+      const res = await send(tabId, "Network.getResponseBody", { requestId: params.requestId });
+      bodyText = res.body;
+      base64Encoded = res.base64Encoded;
+    } catch {}
+
+    let parsedJson = null;
+    let pointerValue = undefined;
+    if (bodyText && !base64Encoded) {
+      try {
+        parsedJson = JSON.parse(bodyText);
+        if (params.pointer && parsedJson) {
+          pointerValue = resolveJsonPointer(parsedJson, params.pointer);
+        }
+      } catch {}
+    }
+
+    const curl = generateCurlCommand({
+      url: req.request?.url,
+      method: req.request?.method,
+      headers: req.request?.headers,
+      body: req.request?.postData,
+    });
+
+    const isTruncated = bodyText && bodyText.length > 50000;
+    const safeBody = isTruncated ? truncate(bodyText, 50000) : bodyText;
+
+    return {
+      ok: true,
+      result: {
+        requestId: params.requestId,
+        url: req.request?.url,
+        method: req.request?.method,
+        resourceType: req.resourceType,
+        status: req.response?.status,
+        statusText: req.response?.statusText,
+        requestHeaders: req.request?.headers,
+        postData: req.request?.postData,
+        responseHeaders: req.response?.headers,
+        timing: req.response?.timing,
+        body: safeBody,
+        json: parsedJson,
+        base64Encoded,
+        pointer: params.pointer,
+        pointerValue,
+        curl,
+      },
+    };
+  }
+
+  if (action === "wait") {
+    const pattern = params.url_pattern || params.pattern || params.urlContains;
+    const targetMethod = params.method ? params.method.toUpperCase() : null;
+    const timeoutMs = Number(params.timeout_ms || params.timeoutMs) || 10000;
+    const startTime = Date.now();
+
+    const matches = (e) => {
+      if (!e || !e.request) return false;
+      if (targetMethod && e.request.method.toUpperCase() !== targetMethod) return false;
+      if (pattern && !urlMatchesPattern(e.request.url, pattern)) return false;
+      return true;
+    };
+
+    while (Date.now() - startTime < timeoutMs) {
+      const entries = [...s.network.values()].reverse();
+      const found = entries.find((e) => matches(e) && (e.response || e.failed));
+      if (found) {
+        return await handleMonitorRequests(tabId, { action: "get", requestId: found.requestId });
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error(`Timed out after ${timeoutMs}ms waiting for request matching '${pattern}'`);
+  }
+
+  // action === "list" (default)
+  const all = [...s.network.values()];
+  const pattern = params.url_pattern || params.pattern || params.urlContains;
+  const targetMethod = params.method ? params.method.toUpperCase() : null;
+  const targetType = params.resource_type || params.type;
+  const targetStatus = params.status;
+
+  let filtered = all.filter((e) => {
+    if (!e || !e.request) return false;
+    if (pattern && !urlMatchesPattern(e.request.url, pattern)) return false;
+    if (targetMethod && e.request.method.toUpperCase() !== targetMethod) return false;
+    if (
+      targetType &&
+      (!e.resourceType || !e.resourceType.toLowerCase().includes(targetType.toLowerCase()))
+    )
+      return false;
+    if (targetStatus !== undefined) {
+      const st = e.response?.status;
+      if (typeof targetStatus === "string" && targetStatus.endsWith("xx")) {
+        const prefix = Number(targetStatus[0]);
+        if (!st || Math.floor(st / 100) !== prefix) return false;
+      } else if (st !== Number(targetStatus)) {
+        return false;
+      }
+    }
+    return true;
+  });
+
+  if (params.since_id) {
+    const idx = filtered.findIndex((e) => e.requestId === params.since_id);
+    if (idx !== -1) {
+      filtered = filtered.slice(idx + 1);
+    }
+  }
+
+  const limit = Number(params.limit) || 50;
+  if (filtered.length > limit) {
+    filtered = filtered.slice(-limit);
+  }
+
+  const briefList = filtered.map(briefRequest);
+
+  if (params.include_body) {
+    await Promise.all(
+      briefList.map(async (item) => {
+        try {
+          const res = await send(tabId, "Network.getResponseBody", { requestId: item.requestId });
+          item.body = res.base64Encoded ? res.body : truncate(res.body, 10000);
+          item.base64Encoded = res.base64Encoded;
+          try {
+            item.json = JSON.parse(res.body);
+          } catch {}
+        } catch {}
+      })
+    );
+  }
+
+  return {
+    ok: true,
+    result: {
+      count: briefList.length,
+      total_captured: s.network.size,
+      requests: briefList,
+    },
+  };
+}
+
 export async function handleCdp(action, params, tabId) {
   switch (action) {
     case "cdp_attach": {
@@ -920,15 +1085,15 @@ export async function handleCdp(action, params, tabId) {
     }
 
     case "get_network_requests": {
-      const s = await requireDomains(tabId);
-      const all = [...s.network.values()];
-      const filtered = params.urlContains
-        ? all.filter((e) => e.request.url.includes(params.urlContains))
-        : all;
-      return {
-        ok: true,
-        result: { count: filtered.length, requests: filtered.map(briefRequest) },
-      };
+      return await handleMonitorRequests(tabId, { ...params, action: "list" });
+    }
+
+    case "monitor_requests": {
+      return await handleMonitorRequests(tabId, params);
+    }
+
+    case "wait_for_request": {
+      return await handleMonitorRequests(tabId, { ...params, action: "wait" });
     }
 
     case "export_har": {
@@ -1076,73 +1241,26 @@ export async function handleCdp(action, params, tabId) {
       };
     }
 
+    case "make_request": {
+      requireSession(tabId);
+      return {
+        ok: true,
+        result: await makeRequest(tabId, params),
+      };
+    }
+
     case "network_replay": {
       const s = requireSession(tabId);
-      if (!params.requestId) throw new Error("network_replay requires 'requestId'");
-      const req = s.network.get(params.requestId);
-      if (!req) {
-        throw new Error(`network request ${params.requestId} not found to replay`);
-      }
-      const url = params.url || req.request?.url;
-      const method = params.method || req.request?.method || "GET";
-      const headers = { ...(req.request?.headers || {}), ...(params.headers || {}) };
-      for (const k of Object.keys(headers)) {
-        if (k.startsWith(":")) delete headers[k];
-      }
-      const body = params.body !== undefined ? params.body : req.request?.postData;
-
-      const expression = `
-        (async () => {
-          try {
-            const fetchOpts = {
-              method: ${JSON.stringify(method)},
-              headers: ${JSON.stringify(headers)},
-              credentials: "include",
-            };
-            if (${JSON.stringify(body)} && !["GET", "HEAD"].includes(${JSON.stringify(method)})) {
-              fetchOpts.body = ${JSON.stringify(body)};
-            }
-            const res = await window.fetch(${JSON.stringify(url)}, fetchOpts);
-            const text = await res.text();
-            let json = null;
-            try { json = JSON.parse(text); } catch {}
-            const resHeaders = {};
-            for (const [k, v] of res.headers.entries()) resHeaders[k] = v;
-            return {
-              ok: true,
-              status: res.status,
-              statusText: res.statusText,
-              headers: resHeaders,
-              body: text.length > 50000 ? text.slice(0, 50000) + "... [truncated]" : text,
-              json,
-            };
-          } catch (err) {
-            return { ok: false, error: err.message };
-          }
-        })()
-      `;
-      const evalRes = await send(tabId, "Runtime.evaluate", {
-        expression,
-        awaitPromise: true,
-        returnByValue: true,
-      });
-      const val = evalRes.result?.value;
-      if (!val) throw new Error("network_replay evaluation returned no value");
-      if (!val.ok) throw new Error(`replay failed in page: ${val.error}`);
-      let pointerVal = undefined;
-      if (params.pointer && val.json) {
-        pointerVal = resolveJsonPointer(val.json, params.pointer);
+      let recorded = undefined;
+      if (params.requestId) {
+        recorded = s.network.get(params.requestId);
+        if (!recorded && !params.url) {
+          throw new Error(`network request ${params.requestId} not found to replay`);
+        }
       }
       return {
         ok: true,
-        result: {
-          status: val.status,
-          statusText: val.statusText,
-          headers: val.headers,
-          body: val.body,
-          json: val.json,
-          pointerValue: pointerVal,
-        },
+        result: await makeRequest(tabId, recorded || params, params),
       };
     }
 
@@ -1856,6 +1974,8 @@ export const CDP_ACTIONS = [
   "get_response_body",
   "get_network_request",
   "network_replay",
+  "monitor_requests",
+  "wait_for_request",
   "network_rule_add",
   "network_rule_remove",
   "network_rule_list",

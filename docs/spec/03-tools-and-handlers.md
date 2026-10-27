@@ -30,7 +30,7 @@ classDiagram
 | `navigate.js` | `browser_navigate`, `browser_wait_for`, `browser_reload`, `browser_history_back`, `browser_history_forward` | `core` & `advanced` |
 | `inspect.js` | `browser_snapshot`, `browser_find`, `browser_read_page`, `browser_get_content`, `browser_get_property`, `browser_extract`, `browser_evaluate`, `browser_take_screenshot` | `core` & `advanced` |
 | `tabs.js` | `browser_tabs` (list, switch, create, close, group, duplicate, pin) | `tabs` & `advanced` |
-| `network_tools.js` | `get_network_request`, `get_response_body`, `network_replay`, `network_rule_mock`, `network_rule_block`, `network_rule_clear` | `network` & `advanced`|
+| `network_tools.js` | `browser_make_request`, `browser_monitor_requests`, `wait_for_request`, `network_rule_mock`, `network_rule_block`, `network_rule_clear` | `network` & `advanced`|
 | `emulate_tools.js` | `browser_emulate` (device presets, viewport, userAgent, dark mode, geolocation, offline) | `advanced` |
 | `download_tools.js`| `browser_download` (trigger, track progress, save on disk) | `advanced` |
 | `storage_tools.js` | `cookies_get`, `cookies_set`, `cookies_clear`, `local_storage_get`, `local_storage_set` | `advanced` |

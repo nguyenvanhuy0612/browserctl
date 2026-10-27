@@ -3,6 +3,45 @@
 
 import { RpcError, INVALID_PARAMS } from "../transport/errors.js";
 
+const resolveTab = (ctx, params) =>
+  typeof ctx?.resolveTabId === "function" ? ctx.resolveTabId(params) : params?.tabId;
+
+/**
+ * Handles in-page context request execution or replay.
+ */
+export async function handleMakeRequest(params, ctx) {
+  if (!params || (!params.url && !params.requestId)) {
+    throw new RpcError("make_request requires 'url' or 'requestId'", INVALID_PARAMS, {
+      reason: "invalid_params",
+    });
+  }
+  const tabId = resolveTab(ctx, params);
+  if (ctx?.contentBridge) {
+    return await ctx.contentBridge.send("make_request", params, tabId);
+  }
+  if (ctx?.driver) {
+    return await ctx.driver.makeRequest(tabId, params);
+  }
+  return { ok: true, result: { status: 200, body: "", data: null, tabId } };
+}
+
+/**
+ * Handles monitoring and inspecting network traffic.
+ */
+export async function handleMonitorRequests(params, ctx) {
+  const tabId = resolveTab(ctx, params);
+  const action = params?.action || "list";
+  if (action === "get" && (!params || !params.requestId)) {
+    throw new RpcError("monitor_requests get requires 'requestId'", INVALID_PARAMS, {
+      reason: "invalid_params",
+    });
+  }
+  if (ctx?.driver && ctx.driver.monitorRequests) {
+    return await ctx.driver.monitorRequests(tabId, params);
+  }
+  return { ok: true, result: { count: 0, requests: [], tabId } };
+}
+
 /**
  * Handles fetching individual network request details.
  */
@@ -12,7 +51,7 @@ export async function handleGetNetworkRequest(params, ctx) {
       reason: "invalid_params",
     });
   }
-  const tabId = ctx?.resolveTabId(params);
+  const tabId = resolveTab(ctx, params);
   return { ok: true, result: { requestId: params.requestId, tabId } };
 }
 
@@ -20,7 +59,7 @@ export async function handleGetNetworkRequest(params, ctx) {
  * Handles listing captured network requests.
  */
 export async function handleGetNetworkRequests(params, ctx) {
-  const tabId = ctx?.resolveTabId(params);
+  const tabId = resolveTab(ctx, params);
   return { ok: true, result: { requests: [], tabId } };
 }
 
@@ -33,7 +72,7 @@ export async function handleGetResponseBody(params, ctx) {
       reason: "invalid_params",
     });
   }
-  const tabId = ctx?.resolveTabId(params);
+  const tabId = resolveTab(ctx, params);
   if (ctx?.driver) {
     return await ctx.driver.getResponseBody(tabId, params.requestId);
   }
@@ -44,16 +83,7 @@ export async function handleGetResponseBody(params, ctx) {
  * Handles in-page network replay.
  */
 export async function handleNetworkReplay(params, ctx) {
-  if (!params || !params.url) {
-    throw new RpcError("network_replay requires 'url'", INVALID_PARAMS, {
-      reason: "invalid_params",
-    });
-  }
-  const tabId = ctx?.resolveTabId(params);
-  if (ctx?.driver) {
-    return await ctx.driver.networkReplay(tabId, params);
-  }
-  return { ok: true, result: { status: 200, body: "", tabId } };
+  return await handleMakeRequest(params, ctx);
 }
 
 /**
@@ -65,7 +95,7 @@ export async function handleMockRoute(params, ctx) {
       reason: "invalid_params",
     });
   }
-  const tabId = ctx?.resolveTabId(params);
+  const tabId = resolveTab(ctx, params);
   if (ctx?.driver) {
     return await ctx.driver.addFetchRule(tabId, params);
   }
@@ -73,6 +103,18 @@ export async function handleMockRoute(params, ctx) {
 }
 
 export const networkTools = [
+  {
+    name: "browser_make_request",
+    profile: "network",
+    aliases: ["make_request", "request", "fetch"],
+    handler: handleMakeRequest,
+  },
+  {
+    name: "browser_monitor_requests",
+    profile: "network",
+    aliases: ["monitor_requests", "monitor", "wait_for_request"],
+    handler: handleMonitorRequests,
+  },
   {
     name: "browser_get_network_request",
     profile: "network",

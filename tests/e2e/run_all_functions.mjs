@@ -318,6 +318,28 @@ async function main() {
       assert(har.log && Array.isArray(har.log.entries), "har log must contain entries");
     });
 
+    await test("make_request and monitor_requests: in-page request, curl generation, and monitoring", async () => {
+      // 1. Make request to sample.json directly via make_request
+      const reqRes = await cmd("make_request", {
+        url: `${baseUrl}/api/sample.json`,
+        method: "GET",
+        query: { test: "monitor" },
+        headers: { "X-Custom-Header": "browserctl-test" },
+      });
+      assert(reqRes.ok === true, "make_request must succeed");
+      assert(reqRes.status === 200, "status must be 200");
+      assert(reqRes.data != null || reqRes.text != null, "response body must exist");
+      assert(typeof reqRes.curl === "string" && reqRes.curl.includes("curl"), "curl command must be generated");
+
+      // 2. Monitor requests via monitor_requests
+      const monRes = await cmd("monitor_requests", {
+        action: "list",
+        url_pattern: "*sample.json*",
+        limit: 10,
+      });
+      assert(monRes.ok === true || monRes.count !== undefined, "monitor_requests list must succeed");
+    });
+
     await test("network rules: network_rule_add, network_rule_list, network_rule_clear", async () => {
       await cmd("cdp_attach", {});
 

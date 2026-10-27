@@ -6253,6 +6253,199 @@
     };
   }
 
+  function resolveJsonPointer(obj, pointer) {
+    if (!pointer || pointer === "" || pointer === "/") return obj;
+    if (!pointer.startsWith("/")) return undefined;
+    const parts = pointer
+      .slice(1)
+      .split("/")
+      .map((p) => p.replace(/~1/g, "/").replace(/~0/g, "~"));
+    let cur = obj;
+    for (const part of parts) {
+      if (cur == null || typeof cur !== "object") return undefined;
+      if (Array.isArray(cur)) {
+        const idx = Number(part);
+        if (Number.isNaN(idx) || idx < 0 || idx >= cur.length) return undefined;
+        cur = cur[idx];
+      } else {
+        cur = cur[part];
+      }
+    }
+    return cur;
+  }
+
+  function shellQuoteStr(str) {
+    if (typeof str !== "string") str = String(str);
+    if (/^[a-zA-Z0-9_./:=@%+-]+$/.test(str)) return str;
+    return `'${str.replace(/'/g, `'\\''`)}'`;
+  }
+
+  function generateCurlCommandInContent({
+    url,
+    method = "GET",
+    headers = {},
+    body,
+    query,
+    credentials = "include",
+  } = {}) {
+    let targetUrl = url || "";
+    if (query && typeof query === "object") {
+      const qStr = Object.entries(query)
+        .filter(([_, v]) => v !== undefined && v !== null)
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+        .join("&");
+      if (qStr) targetUrl += (targetUrl.includes("?") ? "&" : "?") + qStr;
+    }
+    const parts = ["curl"];
+    const upperMethod = (method || "GET").toUpperCase();
+    if (upperMethod !== "GET") parts.push(`-X ${upperMethod}`);
+
+    const cleanHeaders = {};
+    for (const [k, v] of Object.entries(headers || {})) {
+      const lower = k.toLowerCase();
+      if (
+        lower.startsWith(":") ||
+        lower.startsWith("sec-ch-ua") ||
+        lower.startsWith("sec-fetch-") ||
+        lower === "host" ||
+        lower === "content-length" ||
+        lower === "connection"
+      )
+        continue;
+      cleanHeaders[k] = v;
+    }
+    for (const [k, v] of Object.entries(cleanHeaders)) {
+      parts.push(`-H ${shellQuoteStr(`${k}: ${v}`)}`);
+    }
+    if (body !== undefined && body !== null && !["GET", "HEAD"].includes(upperMethod)) {
+      const bodyStr = typeof body === "object" ? JSON.stringify(body) : String(body);
+      parts.push(`--data ${shellQuoteStr(bodyStr)}`);
+    }
+    parts.push(shellQuoteStr(targetUrl));
+    return parts.join(" \\\n  ");
+  }
+
+  async function make_request(params = {}) {
+    const startTime = Date.now();
+    let url = params.url || "";
+    let method = (params.method || "GET").toUpperCase();
+    let headers = { ...(params.headers || {}) };
+
+    for (const k of Object.keys(headers)) {
+      if (k.startsWith(":")) delete headers[k];
+    }
+
+    if (params.query && typeof params.query === "object") {
+      const qStr = Object.entries(params.query)
+        .filter(([_, v]) => v !== undefined && v !== null)
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+        .join("&");
+      if (qStr) url += (url.includes("?") ? "&" : "?") + qStr;
+    }
+
+    let bodyPayload = undefined;
+    if (params.json !== undefined) {
+      bodyPayload = JSON.stringify(params.json);
+      if (!Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) {
+        headers["Content-Type"] = "application/json; charset=utf-8";
+      }
+    } else if (params.body !== undefined && params.body !== null) {
+      if (typeof params.body === "object") {
+        bodyPayload = JSON.stringify(params.body);
+        if (!Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) {
+          headers["Content-Type"] = "application/json; charset=utf-8";
+        }
+      } else {
+        bodyPayload = String(params.body);
+      }
+    }
+
+    const credentialsMode =
+      params.credentials || (params.inherit_session === false ? "omit" : "include");
+    const timeoutMs = Number(params.timeout_ms || params.timeoutMs) || 15000;
+
+    let finalUrl = url;
+    try {
+      finalUrl = new URL(finalUrl, window.location.href).toString();
+    } catch {}
+
+    const curl = generateCurlCommandInContent({
+      url: finalUrl,
+      method,
+      headers,
+      body: bodyPayload,
+      credentials: credentialsMode,
+    });
+
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    let timer = null;
+    if (controller) {
+      timer = setTimeout(() => controller.abort(), timeoutMs);
+    }
+
+    try {
+      const fetchOpts = {
+        method,
+        headers,
+        credentials: credentialsMode,
+      };
+      if (controller) fetchOpts.signal = controller.signal;
+      if (bodyPayload !== undefined && !["GET", "HEAD"].includes(method)) {
+        fetchOpts.body = bodyPayload;
+      }
+
+      const res = await window.fetch(finalUrl, fetchOpts);
+      const durationMs = Date.now() - startTime;
+      const text = await res.text();
+
+      let json = null;
+      let pointerValue = undefined;
+      try {
+        json = JSON.parse(text);
+        if (params.pointer && json) {
+          pointerValue = resolveJsonPointer(json, params.pointer);
+        }
+      } catch {}
+
+      const resHeaders = {};
+      if (res.headers && typeof res.headers.entries === "function") {
+        for (const [k, v] of res.headers.entries()) {
+          resHeaders[k] = v;
+        }
+      }
+
+      const isTruncated = text.length > 50000;
+      const safeBody = isTruncated ? text.slice(0, 50000) + "... [truncated]" : text;
+
+      return {
+        ok: res.ok,
+        status: res.status,
+        statusText: res.statusText,
+        headers: resHeaders,
+        body: safeBody,
+        json,
+        data: json,
+        pointer: params.pointer,
+        pointer_value: pointerValue,
+        ...(pointerValue !== undefined ? { pointerValue } : {}),
+        duration_ms: durationMs,
+        curl,
+      };
+    } catch (err) {
+      const isTimeout = err.name === "AbortError";
+      return {
+        ok: false,
+        status: isTimeout ? 408 : 0,
+        statusText: isTimeout ? "Request Timeout" : "Network Error",
+        error: err.message,
+        duration_ms: Date.now() - startTime,
+        curl,
+      };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   const handlers = {
     snapshot,
     read_page,
@@ -6286,6 +6479,7 @@
     extract,
     fill_form,
     paste,
+    make_request,
     fill: type,
     clear: clear_input,
     check: (params) => set_checked({ ...params, checked: true }),

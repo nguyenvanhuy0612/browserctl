@@ -133,6 +133,8 @@ Capture & Export:
   browserctl screenshot [file.png] [-f] Take viewport or fullpage screenshot (saves to file or returns base64)
   browserctl pdf [file.pdf]             Print page to PDF (saves to file or returns base64)
   browserctl eval <expression> [-r]     Evaluate JavaScript (auto-bypasses CSP/Trusted Types via CDP)
+  browserctl request <url> [options]    Make in-page HTTP request (e.g. -X POST -d '...' --json '...' --curl)
+  browserctl monitor [options]          Inspect or wait for network traffic (--filter, --status, --include-body, --wait)
 
 System & Raw Protocols:
   browserctl exec_system_cmd <cmd>      Run host system command
@@ -1046,6 +1048,102 @@ async function main() {
         break;
       }
 
+      case "request":
+      case "fetch":
+      case "make_request": {
+        action = "make_request";
+        let i = 0;
+        while (i < args.length) {
+          const arg = args[i];
+          if ((arg === "-X" || arg === "--method") && args[i + 1]) {
+            params.method = args[++i].toUpperCase();
+          } else if ((arg === "-H" || arg === "--header") && args[i + 1]) {
+            const hStr = args[++i];
+            const colonIdx = hStr.indexOf(":");
+            if (colonIdx > 0) {
+              const k = hStr.slice(0, colonIdx).trim();
+              const v = hStr.slice(colonIdx + 1).trim();
+              if (!params.headers) params.headers = {};
+              params.headers[k] = v;
+            }
+          } else if ((arg === "-d" || arg === "--data" || arg === "--body") && args[i + 1]) {
+            params.body = args[++i];
+          } else if (arg === "--json" && args[i + 1]) {
+            try {
+              params.json = JSON.parse(args[++i]);
+            } catch {
+              params.body = args[i];
+            }
+          } else if (arg === "--query" && args[i + 1]) {
+            const qStr = args[++i];
+            if (qStr.startsWith("{")) {
+              try {
+                params.query = JSON.parse(qStr);
+              } catch {}
+            } else {
+              const eqIdx = qStr.indexOf("=");
+              if (eqIdx > 0) {
+                if (!params.query) params.query = {};
+                params.query[qStr.slice(0, eqIdx)] = qStr.slice(eqIdx + 1);
+              }
+            }
+          } else if (arg === "--credentials" && args[i + 1]) {
+            params.credentials = args[++i];
+          } else if (arg === "--timeout" && args[i + 1]) {
+            params.timeout_ms = parseInt(args[++i], 10);
+          } else if (arg === "--pointer" && args[i + 1]) {
+            params.pointer = args[++i];
+          } else if (arg === "--curl") {
+            params.only_curl = true;
+          } else if (!params.url && !arg.startsWith("-")) {
+            params.url = arg;
+          }
+          i++;
+        }
+        break;
+      }
+
+      case "monitor":
+      case "monitor_requests": {
+        action = "monitor_requests";
+        let i = 0;
+        while (i < args.length) {
+          const arg = args[i];
+          if (
+            (arg === "--filter" || arg === "--pattern" || arg === "--url-pattern") &&
+            args[i + 1]
+          ) {
+            params.url_pattern = args[++i];
+          } else if ((arg === "-X" || arg === "--method") && args[i + 1]) {
+            params.method = args[++i].toUpperCase();
+          } else if (arg === "--status" && args[i + 1]) {
+            const sVal = args[++i];
+            params.status = /^\d+$/.test(sVal) ? parseInt(sVal, 10) : sVal;
+          } else if (arg === "--type" && args[i + 1]) {
+            params.resource_type = args[++i];
+          } else if (arg === "--limit" && args[i + 1]) {
+            params.limit = parseInt(args[++i], 10);
+          } else if (arg === "--include-body") {
+            params.include_body = true;
+          } else if (arg === "--clear") {
+            params.action = "clear";
+          } else if (arg === "--wait") {
+            params.action = "wait";
+          } else if (arg === "--timeout" && args[i + 1]) {
+            params.timeout_ms = parseInt(args[++i], 10);
+          } else if (arg === "--get" && args[i + 1]) {
+            params.action = "get";
+            params.requestId = args[++i];
+          } else if (arg === "--pointer" && args[i + 1]) {
+            params.pointer = args[++i];
+          } else if (!params.url_pattern && !arg.startsWith("-")) {
+            params.url_pattern = arg;
+          }
+          i++;
+        }
+        break;
+      }
+
       case "dismiss": {
         let i = 0;
         while (i < args.length) {
@@ -1267,6 +1365,46 @@ async function main() {
     if (jsonOutput) {
       console.log(JSON.stringify(result));
       return;
+    }
+
+    if (action === "make_request") {
+      if (params.only_curl && result?.curl) {
+        console.log(result.curl);
+        return;
+      }
+      const st = result?.status
+        ? `HTTP ${result.status} ${result.statusText || ""}`.trim()
+        : "Request Result";
+      console.log(`[${st}] (${result?.duration_ms || 0}ms)`);
+      if (result?.pointer_value !== undefined) {
+        console.log(
+          `Pointer (${result.pointer}): ${typeof result.pointer_value === "object" ? JSON.stringify(result.pointer_value, null, 2) : result.pointer_value}`
+        );
+      } else if (result?.data) {
+        console.log(JSON.stringify(result.data, null, 2));
+      } else if (result?.text || result?.body) {
+        console.log(result.text || result.body);
+      }
+      if (result?.curl) {
+        console.log(`\ncURL:\n${result.curl}`);
+      }
+      return;
+    }
+
+    if (action === "monitor_requests") {
+      if (Array.isArray(result?.requests)) {
+        console.log(
+          `Captured ${result.count} request(s) (total buffered: ${result.total_captured ?? result.count}):\n`
+        );
+        for (const req of result.requests) {
+          const st = req.status ? `[${req.status}]` : "[pending]";
+          const sz = req.size ? `${req.size}B` : "";
+          console.log(
+            `  ${String(req.requestId).padEnd(6)}  ${String(req.method || "GET").padEnd(6)}  ${st.padEnd(9)}  ${(req.resourceType || "other").padEnd(8)}  ${req.url}  ${sz}`
+          );
+        }
+        return;
+      }
     }
 
     if (action === "list_tabs" && Array.isArray(result?.tabs)) {

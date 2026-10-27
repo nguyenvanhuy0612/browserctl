@@ -176,53 +176,207 @@ export async function getResponseBody(tabId, requestId, pointer) {
 }
 
 /**
- * Replays a recorded network request inside the target web page context,
- * preserving active session credentials, cookies, and tokens.
+ * Quotes a string for safe usage in shell/curl commands.
+ * @param {string} str
+ * @returns {string}
+ */
+export function shellQuote(str) {
+  if (typeof str !== "string") str = String(str);
+  if (/^[a-zA-Z0-9_./:=@%+-]+$/.test(str)) {
+    return str;
+  }
+  return `'${str.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Generates an executable, minimal curl command string representing the HTTP request.
+ *
+ * @param {object} options
+ * @param {string} options.url
+ * @param {string} [options.method="GET"]
+ * @param {object} [options.headers={}]
+ * @param {string|object} [options.body]
+ * @param {object} [options.query]
+ * @param {string} [options.credentials="include"]
+ * @returns {string} Ready-to-copy curl invocation
+ */
+export function generateCurlCommand({
+  url,
+  method = "GET",
+  headers = {},
+  body,
+  query,
+  credentials = "include",
+} = {}) {
+  let targetUrl = url || "";
+  if (query && typeof query === "object") {
+    const qStr = Object.entries(query)
+      .filter(([_, v]) => v !== undefined && v !== null)
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+      .join("&");
+    if (qStr) {
+      targetUrl += (targetUrl.includes("?") ? "&" : "?") + qStr;
+    }
+  }
+
+  const parts = ["curl"];
+  const upperMethod = (method || "GET").toUpperCase();
+  if (upperMethod !== "GET") {
+    parts.push(`-X ${upperMethod}`);
+  }
+
+  const cleanHeaders = {};
+  for (const [k, v] of Object.entries(headers || {})) {
+    const lower = k.toLowerCase();
+    // Exclude noisy browser pseudo-headers and ephemeral headers
+    if (
+      lower.startsWith(":") ||
+      lower.startsWith("sec-ch-ua") ||
+      lower.startsWith("sec-fetch-") ||
+      lower === "host" ||
+      lower === "content-length" ||
+      lower === "connection"
+    ) {
+      continue;
+    }
+    cleanHeaders[k] = v;
+  }
+
+  for (const [k, v] of Object.entries(cleanHeaders)) {
+    parts.push(`-H ${shellQuote(`${k}: ${v}`)}`);
+  }
+
+  if (body !== undefined && body !== null && !["GET", "HEAD"].includes(upperMethod)) {
+    const bodyStr = typeof body === "object" ? JSON.stringify(body) : String(body);
+    parts.push(`--data ${shellQuote(bodyStr)}`);
+  }
+
+  parts.push(shellQuote(targetUrl));
+  return parts.join(" \\\n  ");
+}
+
+/**
+ * Replays or initiates an in-page HTTP request inside the target web page context,
+ * with options to inherit active session state or run isolated with custom headers.
  *
  * @param {number} tabId
- * @param {object} recordedRequest
+ * @param {object} [paramsOrRecorded={}]
  * @param {object} [overrides={}]
- * @returns {Promise<any>}
+ * @returns {Promise<object>} Standard MakeRequestResult
  */
-export async function networkReplay(tabId, recordedRequest, overrides = {}) {
-  const url = overrides.url || recordedRequest?.url;
-  const method = overrides.method || recordedRequest?.method || "GET";
-  const headers = { ...(recordedRequest?.headers || {}), ...(overrides.headers || {}) };
+export async function makeRequest(tabId, paramsOrRecorded = {}, overrides = {}) {
+  const isRecorded =
+    paramsOrRecorded?.request !== undefined || paramsOrRecorded?.requestId !== undefined;
+  const recorded = isRecorded ? paramsOrRecorded : null;
+  const opts = isRecorded
+    ? { ...recorded.request, ...overrides }
+    : { ...paramsOrRecorded, ...overrides };
+
+  let url = opts.url || recorded?.url || "";
+  let method = (opts.method || recorded?.method || "GET").toUpperCase();
+  let headers = { ...(recorded?.headers || {}), ...(opts.headers || {}) };
 
   // Strip pseudo-headers
   for (const k of Object.keys(headers)) {
     if (k.startsWith(":")) delete headers[k];
   }
 
-  const body = overrides.body !== undefined ? overrides.body : recordedRequest?.postData;
+  // Handle query parameter serialization
+  if (opts.query && typeof opts.query === "object") {
+    const qStr = Object.entries(opts.query)
+      .filter(([_, v]) => v !== undefined && v !== null)
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+      .join("&");
+    if (qStr) {
+      url += (url.includes("?") ? "&" : "?") + qStr;
+    }
+  }
+
+  let bodyPayload = undefined;
+  if (opts.json !== undefined) {
+    bodyPayload = JSON.stringify(opts.json);
+    if (!Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) {
+      headers["Content-Type"] = "application/json; charset=utf-8";
+    }
+  } else if (opts.body !== undefined && opts.body !== null) {
+    if (typeof opts.body === "object") {
+      bodyPayload = JSON.stringify(opts.body);
+      if (!Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) {
+        headers["Content-Type"] = "application/json; charset=utf-8";
+      }
+    } else {
+      bodyPayload = String(opts.body);
+    }
+  } else if (recorded?.postData !== undefined) {
+    bodyPayload = recorded.postData;
+  }
+
+  const credentialsMode = opts.credentials || (opts.inherit_session === false ? "omit" : "include");
+  const timeoutMs = Number(opts.timeout_ms || opts.timeoutMs) || 15000;
 
   const expression = `
     (async () => {
+      const startTime = Date.now();
       try {
+        let finalUrl = ${JSON.stringify(url)};
+        try {
+          finalUrl = new URL(finalUrl, window.location.href).toString();
+        } catch {}
+
         const fetchOpts = {
           method: ${JSON.stringify(method)},
           headers: ${JSON.stringify(headers)},
-          credentials: "include",
+          credentials: ${JSON.stringify(credentialsMode)},
         };
-        if (${JSON.stringify(body)} && !["GET", "HEAD"].includes(${JSON.stringify(method)})) {
-          fetchOpts.body = ${JSON.stringify(body)};
+
+        if (${JSON.stringify(bodyPayload !== undefined)} && !["GET", "HEAD"].includes(${JSON.stringify(method)})) {
+          fetchOpts.body = ${JSON.stringify(bodyPayload)};
         }
-        const res = await window.fetch(${JSON.stringify(url)}, fetchOpts);
+
+        const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+        let timer = null;
+        if (controller) {
+          fetchOpts.signal = controller.signal;
+          timer = setTimeout(() => controller.abort(), ${timeoutMs});
+        }
+
+        let res;
+        try {
+          res = await window.fetch(finalUrl, fetchOpts);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+
+        const durationMs = Date.now() - startTime;
         const text = await res.text();
         let json = null;
         try { json = JSON.parse(text); } catch {}
+
         const resHeaders = {};
-        for (const [k, v] of res.headers.entries()) resHeaders[k] = v;
+        if (res.headers && typeof res.headers.entries === "function") {
+          for (const [k, v] of res.headers.entries()) {
+            resHeaders[k] = v;
+          }
+        }
+
         return {
-          ok: true,
+          ok: res.ok,
           status: res.status,
           statusText: res.statusText,
           headers: resHeaders,
           body: text.length > 50000 ? text.slice(0, 50000) + "... [truncated]" : text,
           json,
+          duration_ms: durationMs,
         };
       } catch (err) {
-        return { ok: false, error: err.message };
+        const isTimeout = err.name === "AbortError";
+        return {
+          ok: false,
+          status: isTimeout ? 408 : 0,
+          statusText: isTimeout ? "Request Timeout" : "Network Error",
+          error: err.message,
+          duration_ms: Date.now() - startTime,
+        };
       }
     })()
   `;
@@ -234,22 +388,45 @@ export async function networkReplay(tabId, recordedRequest, overrides = {}) {
   });
 
   const val = evalRes.result?.value;
-  if (!val) throw new Error("network_replay evaluation returned no value");
-  if (!val.ok) throw new Error(`replay failed in page: ${val.error}`);
+  if (!val) throw new Error("make_request evaluation returned no value");
 
   let pointerVal = undefined;
-  if (overrides.pointer && val.json) {
-    pointerVal = resolveJsonPointer(val.json, overrides.pointer);
+  if (opts.pointer && val.json) {
+    pointerVal = resolveJsonPointer(val.json, opts.pointer);
   }
 
+  const curl = generateCurlCommand({
+    url,
+    method,
+    headers,
+    body: bodyPayload,
+    credentials: credentialsMode,
+  });
+
   return {
+    ok: val.ok ?? false,
     status: val.status,
     statusText: val.statusText,
-    headers: val.headers,
-    body: val.body,
-    json: val.json,
-    ...(overrides.pointer ? { pointer: overrides.pointer, pointerValue: pointerVal } : {}),
+    headers: val.headers || {},
+    body: val.body || "",
+    json: val.json || null,
+    data: val.json || null,
+    pointer: opts.pointer,
+    pointer_value: pointerVal,
+    ...(pointerVal !== undefined ? { pointerValue: pointerVal } : {}),
+    duration_ms: val.duration_ms || 0,
+    curl,
+    ...(val.error ? { error: val.error } : {}),
   };
+}
+
+/**
+ * Replays a recorded network request inside the target web page context,
+ * preserving active session credentials, cookies, and tokens.
+ * Retained for 100% backward compatibility.
+ */
+export async function networkReplay(tabId, recordedRequest, overrides = {}) {
+  return await makeRequest(tabId, recordedRequest, overrides);
 }
 
 export const network_replay = networkReplay;

@@ -749,6 +749,8 @@ const TOOL_CATEGORIES = {
   ],
   system: ["browser_exec_system_cmd"],
   network: [
+    "browser_make_request",
+    "browser_monitor_requests",
     "browser_get_network_requests",
     "browser_get_response_body",
     "browser_get_network_request",
@@ -1393,6 +1395,10 @@ const ACTION_ALIASES = {
   file_upload: { action: "upload", params: {} },
   evaluate: { action: "eval_js", params: {} },
   get_content: { action: "get_page_content", params: {} },
+  request: { action: "make_request", params: {} },
+  fetch: { action: "make_request", params: {} },
+  monitor: { action: "monitor_requests", params: {} },
+  wait_for_request: { action: "monitor_requests", params: { action: "wait" } },
 };
 
 const MCP_ONLY_TOOLS = new Set([
@@ -3251,6 +3257,87 @@ server.registerTool(
     },
   },
   tool("network_replay", async (params) => text(await callBridge("network_replay", params)))
+);
+
+server.registerTool(
+  "browser_make_request",
+  {
+    title: "Make HTTP request inside page context",
+    description:
+      "Execute an HTTP request directly inside the target tab context with options to inherit session credentials or run custom isolated requests. Generates executable minimal curl command.",
+    inputSchema: {
+      url: z.string().describe("Target URL (absolute or relative to current page)"),
+      method: z
+        .enum(["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+        .optional()
+        .describe("HTTP method (default: GET)"),
+      headers: z.record(z.string()).optional().describe("Request headers dictionary"),
+      body: z.string().optional().describe("Request body payload"),
+      json: z
+        .any()
+        .optional()
+        .describe("JSON payload object (auto-serializes and sets Content-Type)"),
+      query: z.record(z.any()).optional().describe("Query parameters dictionary to append to URL"),
+      credentials: z
+        .enum(["include", "same-origin", "omit"])
+        .optional()
+        .describe("Credentials mode (default: 'include' inherits session cookies)"),
+      timeout_ms: z
+        .number()
+        .optional()
+        .describe("Request timeout in milliseconds (default: 15000)"),
+      pointer: z
+        .string()
+        .optional()
+        .describe("RFC 6901 JSON pointer to extract from response JSON"),
+      requestId: z
+        .string()
+        .optional()
+        .describe("Optional requestId of a recorded request to replay"),
+    },
+  },
+  tool("make_request", async (params) => text(await callBridge("make_request", params)))
+);
+
+server.registerTool(
+  "browser_monitor_requests",
+  {
+    title: "Monitor network traffic",
+    description:
+      "Inspect, filter, or wait for captured network requests. Supports filtering by url_pattern, method, status, type, inline response bodies, inspecting single request details, or waiting for request to finish.",
+    inputSchema: {
+      action: z
+        .enum(["list", "get", "clear", "wait"])
+        .optional()
+        .describe("Action to perform (default: 'list')"),
+      url_pattern: z.string().optional().describe("Wildcard or substring URL pattern to match"),
+      method: z.string().optional().describe("Filter by HTTP method"),
+      status: z
+        .union([z.number(), z.string()])
+        .optional()
+        .describe("Filter by status code or range (e.g. 200 or '4xx')"),
+      resource_type: z
+        .string()
+        .optional()
+        .describe("Filter by resource type (e.g. 'fetch', 'xhr')"),
+      limit: z.number().optional().describe("Maximum requests to return (default: 50)"),
+      since_id: z
+        .string()
+        .optional()
+        .describe("Only return requests recorded after this requestId"),
+      include_body: z
+        .boolean()
+        .optional()
+        .describe("Inline response bodies into returned request list"),
+      requestId: z.string().optional().describe("Specific requestId to inspect when action='get'"),
+      pointer: z
+        .string()
+        .optional()
+        .describe("RFC 6901 JSON pointer to extract from response body"),
+      timeout_ms: z.number().optional().describe("Timeout in milliseconds when action='wait'"),
+    },
+  },
+  tool("monitor_requests", async (params) => text(await callBridge("monitor_requests", params)))
 );
 
 server.registerTool(
