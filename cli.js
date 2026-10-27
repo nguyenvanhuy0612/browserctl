@@ -1000,8 +1000,24 @@ async function main() {
         while (i < args.length) {
           if (args[i] === "--selector" && args[i + 1]) {
             params.selector = args[++i];
+          } else if (args[i] === "--action" && args[i + 1]) {
+            params.action = args[++i];
+          } else if (args[i] === "--item-selector" && args[i + 1]) {
+            params.item_selector = args[++i];
           } else if (args[i] === "--max" && args[i + 1]) {
             params.max = parseInt(args[++i], 10);
+          } else if (args[i] === "--max-rows" && args[i + 1]) {
+            params.max_rows = parseInt(args[++i], 10);
+          } else if (args[i] === "--max-columns" && args[i + 1]) {
+            params.max_columns = parseInt(args[++i], 10);
+          } else if (args[i] === "--format" && args[i + 1]) {
+            params.format = args[++i];
+          } else if (args[i] === "--csv") {
+            params.format = "csv";
+          } else if (args[i] === "--csv-safe") {
+            params.csv_safe = true;
+          } else if (args[i] === "discover" || args[i] === "table" || args[i] === "list") {
+            params.action = args[i];
           } else if (!params.selector && !args[i].startsWith("{") && !args[i].startsWith("-")) {
             params.selector = args[i];
           } else if (args[i].startsWith("{")) {

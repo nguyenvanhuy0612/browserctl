@@ -102,17 +102,136 @@ export function setElementValue(element, value) {
 
 ---
 
-## 4. Table Matrix Reconciler & CSV Injection Guard (`extension/content/table.js`)
+## 4. Structured Extraction Engine: Table, Grid, List & Discovery (`extension/content/table.js`)
 
-### 4.1 2D Matrix Grid Algorithm
-When extracting tables via `extract_table`, multi-row (`rowspan`) and multi-column (`colspan`) spans must be correctly reconciled into a normalized rectangular grid:
-1. Initialize a dynamic 2D grid matrix `grid[row][col]`.
-2. Iterate through each row `<tr>`.
-3. Track active column index, skipping cells already occupied by previous `rowspan` declarations.
-4. Fill all cells spanned by `colspan` and `rowspan` with the cell value.
+The structured extraction engine provides passive, declarative data extraction across HTML tables, ARIA grids, virtualized lists, and nested components without mutating DOM state or triggering navigation.
 
-### 4.2 CSV Formula Injection (CWE-1236) Invariant
-Any cell string starting with a formula trigger character must be escaped by prepending an apostrophe (`'`):
+```
++---------------------------------------------------------------------------------------+
+|                                    Document DOM                                       |
+|  <table> / [role="table|grid|treegrid"]  |  <ul>, <ol> / [role="list"]  |  Shadow DOM |
++-------------------------------------------+-------------------------------------------+
+                                            │
+                                            ▼
+                    +-----------------------------------------------+
+                    |       Collector: collectExtractDom()          |
+                    |  - Action modes: discover | table | list      |
+                    |  - Nested container boundary isolation        |
+                    |  - Text normalization & input value reading   |
+                    |  - Omit hidden subtrees & overlays            |
+                    |  - Collect ARIA indices & spans               |
+                    +-----------------------------------------------+
+                                            │
+                                            ▼
+                    +-----------------------------------------------+
+                    |       Normalizer: normalizeExtract()          |
+                    |  - Logical 2D matrix resolution               |
+                    |  - Multi-tier header hierarchy (header_path)  |
+                    |  - Split ARIA row fragment joining            |
+                    |  - Cell spans & row provenance tracking       |
+                    |  - Coverage & dataset completeness check      |
+                    +-----------------------------------------------+
+                                            │
+                                            ▼
+                    +-----------------------------------------------+
+                    |       Budget Guard: fitExtractBudget()        |
+                    |  - Binary search row pruning within max_bytes |
+                    |  - Atomic complete-row guarantee              |
+                    +-----------------------------------------------+
+                                            │
+                                            ▼
+                                  ExtractResult JSON
+```
+
+### 4.1 Action Modes
+
+1. **`action: "discover"`**:
+   - Scans document DOM, open shadow roots, and available frames for semantic table and list containers (`table`, `[role="table"]`, `[role="grid"]`, `[role="treegrid"]`, `ul`, `ol`, `[role="list"]`).
+   - Filters out layout tables (`role="presentation"`, `role="none"`).
+   - Generates bounded candidate handles (`target_id`), container kinds, preview column headers (up to 8 headers), and labels/captions.
+   - Capped at 32 returned targets; marks truncation with `stop_reason: "target_limit"`.
+
+2. **`action: "table"`**:
+   - Reconciles native HTML tables and ARIA tables/grids/treegrids into a normalized rectangular dataset.
+   - Outputs canonical column keys (`c1`, `c2`, ...), human-readable column names, hierarchical `header_path`, cell values (or `null` for span-covered cells), cell `spans`, `row_sources`, and `coverage`.
+
+3. **`action: "list"`**:
+   - Extracts repeating items from containers (via `item_selector` or semantic `li, [role="listitem"]`).
+   - Supports declarative field schemas (`fields: [{ key, selector, read: "text"|"href"|"attribute", attribute? }]`).
+   - Resolves links absolutely against `element.baseURI`, flags ambiguous multiple matches per row (`extract_field_ambiguous`), and maps scoped fields via `:scope`.
+
+### 4.2 Semantic Containers & Nested Table Boundary Isolation
+
+> [!IMPORTANT]
+> **Nested Container Boundary Invariant**:
+> Nested tables and lists are independent targets. When collecting rows and cells for an active container, any element whose closest matching semantic container is not the target root must be excluded:
+> `element.closest(tableSelector) === rootContainer`
+> Cells or rows of an inner table must never leak into the parent table's 2D matrix or text content.
+
+1. **Native HTML Tables**:
+   - Root: `<table>`, rows: `<tr>` (or `table.rows`), cells: `<th>` and `<td>`.
+   - Headers: `<thead>`, `<th>`, or cells with `scope="col"` or `scope="colgroup"`.
+   - Footers: `<tfoot>`.
+   - Cell spanning: `rowspan` and `colspan`, including `rowspan="0"` (extending to the end of the current row group `<tbody>`).
+
+2. **ARIA Tables, Grids, and Treegrids**:
+   - Roles: `[role="table"]`, `[role="grid"]`, `[role="treegrid"]`.
+   - Rows: `[role="row"]`.
+   - Cells: `[role="cell"]`, `[role="gridcell"]`, `[role="columnheader"]`, `[role="rowheader"]`.
+   - Cell spanning: `aria-rowspan` and `aria-colspan` (defaulting to 1 if omitted or invalid).
+
+### 4.3 Multi-Tier Column Header Hierarchy (`header_path`)
+
+Complex financial, scientific, or reporting tables feature multi-row grouped headers (e.g. `Year > 2024 > Q1`).
+1. For each column, all active header cells spanning that column index across header rows are accumulated into an ordered array: `header_path = ["Year", "2024", "Q1"]`.
+2. Column display names are formatted by joining the path: `header_path.join(" / ")` (e.g. `"Year / 2024 / Q1"`).
+3. If no header text exists, generated names are assigned (`name_source: "generated"`, e.g. `"Column 1"`), and `generated_column_names` is recorded in `warnings`.
+4. When cells declare explicit `headers` attributes (e.g. `<td headers="hdr-id1 hdr-id2">`), explicit header IDs take precedence over physical column alignment.
+
+### 4.4 Virtualized Grids & Split ARIA Row Joining
+
+Modern enterprise grids (AG-Grid, Datatables, SlickGrid) implement virtualization and sticky/pinned columns where:
+- Rows may be rendered out of DOM order.
+- A single logical row is split across multiple container fragments (e.g. pinned left columns in container A, scrollable columns in container B).
+
+**Algorithm**:
+1. Check `aria-rowindex` on each `[role="row"]`. If explicit indices are present:
+   - Sort rows logically by `source_row = aria-rowindex`.
+   - If adjacent fragments share the same `source_row` and agree on row kind (`data` vs `footer`):
+     - Verify both fragments declare explicit, non-overlapping `aria-colindex` values.
+     - Join fragments into a unified `RawRow`: merge cell lists, combine locators (`locA + " | " + locB"`), and record warning `split_aria_rows_merged`.
+     - Reject conflicting/overlapping cells with `extract_structure_invalid`.
+
+### 4.5 Cell Spans & Row Provenance Metadata
+
+1. **Cell Spans (`spans`)**:
+   - For any cell with `row_span > 1` or `column_span > 1`, a span record is emitted:
+     `{ row: outputRowIndex, column: "c1", row_span: 2, column_span: 1 }`.
+   - In the data rows, the anchor cell holds the extracted text. All other coordinates covered by the span are set to `null` (not duplicate copies).
+2. **Row Provenance (`row_sources`)**:
+   - Every extracted row records its origin:
+     - `row`: 0-based index in the returned `rows` array.
+     - `source_row`: 1-based logical DOM or ARIA row position.
+     - `row_kind`: `"data"` or `"footer"`.
+     - `locator`: Diagnostic CSS path (e.g. `table#orders > tbody > tr:nth-of-type(2)` or `#order-123`).
+
+### 4.6 Coverage Determination & Progressive Truncation
+
+1. **Coverage Metadata (`coverage`)**:
+   - `rows_returned`: Exact count of complete rows in the result.
+   - `truncated`: Boolean indicating whether collection was stopped early by resource limits.
+   - `dataset_complete`: `"unknown"` (loaded DOM provides no proof of total size) or `"incomplete"` (gaps detected in `aria-rowindex`, declared `aria-rowcount` exceeds returned count, or budget stopped collection).
+   - `declared_rows` / `declared_columns`: Parsed from `aria-rowcount` and `aria-colcount` on the container.
+   - `stop_reason`: `"row_limit"`, `"byte_limit"`, `"target_limit"`, or `"time_limit"`.
+
+2. **Defensive Budget Enforcement (`fitExtractBudget`)**:
+   - The overall JSON output size is strictly constrained by `max_bytes` (default 1,048,576 bytes; MCP default 262,144 bytes).
+   - If serialized output exceeds `max_bytes`, binary search row pruning (`use(mid)`) is executed to return the maximum number of **complete rows** that fit within budget.
+   - Metadata and individual rows are never sliced mid-object or mid-string. If the first complete row cannot fit, it throws `extract_limit`.
+
+### 4.7 CSV Formula Injection Guard (CWE-1236)
+
+When exporting extracted data to CSV, any cell string beginning with an executable trigger character (`=`, `+`, `-`, `@`, `\t`, `\r`) must be escaped by prepending an apostrophe (`'`) when `csv_safe: true` (the default):
 ```javascript
 export function csv_safe(val) {
   if (val == null) return "";
@@ -121,6 +240,60 @@ export function csv_safe(val) {
     return "'" + s;
   }
   return s;
+}
+```
+
+### 4.8 Canonical Extraction Result Schema
+
+```typescript
+export interface ExtractResult {
+  schema_version: 1;
+  kind: "discover" | "table" | "list";
+  tab_id: number;
+  source: {
+    page_url: string;
+    frame_url: string;
+    frame_id: string;
+    title: string;
+    captured_at: string;
+    selector?: string;
+    target_id?: string;
+  };
+  columns: Array<{
+    key: string;               // "c1", "c2", ...
+    name: string;              // "Header Name" or "Group / Subgroup"
+    header_path: string[];     // ["Group", "Subgroup"]
+    name_source: "header" | "generated" | "field";
+  }>;
+  rows: Array<Record<string, string | null>>; // [{ c1: "val", c2: null }]
+  row_sources: Array<{
+    row: number;               // 0-based returned row index
+    source_row: number;        // 1-based DOM/ARIA source row
+    row_kind: "data" | "footer";
+    locator: string;           // Diagnostic CSS locator
+  }>;
+  spans: Array<{
+    row: number;
+    column: string;            // "c1"
+    row_span: number;
+    column_span: number;
+  }>;
+  coverage: {
+    scope: "loaded_dom";
+    rows_returned: number;
+    truncated: boolean;
+    dataset_complete: "unknown" | "incomplete";
+    stop_reason?: string;
+    declared_rows?: number;
+    declared_columns?: number;
+  };
+  warnings: string[];
+  targets?: Array<{
+    target_id: string;
+    kind: "table" | "list";
+    name: string;
+    columns: string[];
+  }>;
 }
 ```
 
