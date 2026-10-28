@@ -238,7 +238,8 @@ test("CLI: prints full subcommands in help output", async () => {
 test("MCP: core registers the readers, and the names it dropped stay dropped", async () => {
   const script = `
     import { TOOL_CATEGORIES } from "./mcp/index.js";
-    if (!TOOL_CATEGORIES.core.includes("browser_get_property")) throw new Error("missing browser_get_property in core");
+    if (!TOOL_CATEGORIES.advanced.includes("browser_get_property")) throw new Error("missing browser_get_property in advanced");
+    if (!TOOL_CATEGORIES.core.includes("browser_make_request")) throw new Error("missing browser_make_request in core");
     if (!TOOL_CATEGORIES.core.includes("browser_navigate")) throw new Error("missing browser_navigate in core");
     for (const gone of ["browser_get_text", "browser_get_attribute", "browser_get_count"]) {
       if (TOOL_CATEGORIES.core.includes(gone)) throw new Error(gone + " came back — it is browser_get_property now");
@@ -1685,7 +1686,7 @@ test("MCP: the default profile is exactly the core list, and nothing else", asyn
   // Derived from the registry on both sides: what a default session is handed IS the core
   // list, no more and no less. A tool added to core without a decision fails here.
   assert.deepEqual(on, core, "the default profile must be exactly TOOL_CATEGORIES.core");
-  assert.equal(core.length, 25, "core is 25 tools; changing that is a decision, not a drift");
+  assert.equal(core.length, 19, "core is 19 tools; changing that is a decision, not a drift");
 });
 
 test("Versions do not drift: package.json, the MCP server and the extension manifest agree", async () => {

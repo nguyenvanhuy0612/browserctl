@@ -32,7 +32,7 @@ flowchart TD
 | :--- | :--- | :--- | :--- |
 | `TC-PROTO-01` | JSON-RPC 2.0 framing compliance | Request, response, and error objects strictly conform to JSON-RPC 2.0 spec. | Missing `id`, malformed JSON string, batch requests. |
 | `TC-PROTO-02` | Standard `RpcError` taxonomy | All errors map to codes `-32700` to `-32010` with `data.reason` enum. | Unhandled JS exception wrapped into `-32603`, target not found into `-32001`. |
-| `TC-PROTO-03` | Core Profile Token Budget | Consolidated tool descriptions and schemas for `core` profile `<= 20,200` characters. | Schema whitespace trimming, boundary threshold check (currently `19,994`). |
+| `TC-PROTO-03` | Core Profile Token Budget | Consolidated tool descriptions and schemas for `core` profile `<= 20,200` characters. | Schema whitespace trimming, boundary threshold check (currently `13,311`). |
 | `TC-PROTO-04` | In-flight request cancellation | `AbortSignal` interrupts pending CDP or bridge calls and cleans up timers. | Disconnection during in-flight network call, rapid double cancellation. |
 
 ### 2.2 CDP Driver & Low-Level Automation (`02-driver-and-cdp.md`)

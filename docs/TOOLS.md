@@ -1,4 +1,4 @@
-# Tool surface as it actually is — generated 2026-10-27, browserctl 0.9.5
+# Tool surface as it actually is — generated 2026-10-28, browserctl 0.9.6
 
 Generated from the running server (`server._registeredTools`), not written by hand — the last
 hand-written version of this list claimed `all` on a tool that did not have it.
@@ -6,35 +6,29 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 `*` = required. `tabId`/`tab_id` accepted on every tab-scoped tool, omitted from the tables.
 
 
-### core (25)
+### core (19)
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `status` | format | [SESSION] Whether the bridge is reachable, the daemon's state, and whether the Chrome extension is connected. |
-| `start` | (none) | [SESSION] Start the bridge daemon if it is not running. It starts itself on demand, so this is rarely needed. |
-| `stop` | (none) | [SESSION] Stop the local browserctl bridge daemon. DO NOT call this to tidy up when a task is finished — |
-| `snapshot` | scope, only, elements, format, maxText, limit, cursor | [READ] A text census of the page's controls: one line per element with a stable 'ref' to act on, in reading order. Start here to see what is on a page. |
-| `read_page` | mode, depth, target, maxChars, format | [READ] The accessibility tree as indented text — which control sits inside which group, form or region — with a ref on each interactive element. Structure, not prose. |
-| `find` | query, selector, in, regex, contextChars, max, format | [READ] Find things on the page and get a ref back for each. in: 'controls' (default) matches interactive elements by accessible name, text, placeholder, aria-label or title, and 'matchedBy' says which of those hit; in: 'text' searches the page's prose instead and each match carries 'nearestInteractive'. |
+| `status` | format | [SESSION] Check bridge daemon status, connection state, and Chrome extension connectivity. |
+| `start` | (none) | [SESSION] Start the local bridge daemon if stopped. The bridge auto-starts on demand, so manual start is rarely required. |
+| `stop` | (none) | [SESSION] Stop the local bridge daemon. DO NOT call this to tidy up when a task is finished — |
+| `snapshot` | scope, only, elements, format, maxText, limit, cursor | [READ] Capture text census of interactive controls with stable tokens (@e1, @e2) in reading order. |
 | `extract` | *selector, fields, max, format | [READ] Extract structured rows from repeating containers without writing JavaScript. |
-| `get_content` | maxChars, format | [READ] The page's main readable prose — title, url, cleaned article text. For documentation, articles and postings. |
-| `get_property` | target, property, attr, format | [READ] Read an element's text, value, HTML, box, an attribute, or how many match. |
-| `click` | *target, doubleClick, button, waitFor, autoSettle, settleMs, format | [ACT] Click an element by 'target' (ref '@e1', CSS selector, visible text, or snapshot index). |
-| `type` | *target, *text, method, submit, waitFor, autoSettle, settleMs, format | [ACT] Put text into any editable target — input, textarea, contenteditable, or rich-text editor. |
-| `fill_form` | *fields, submitTarget, format | [ACT] Set several form controls in one round-trip: text fields, checkboxes, radios and <select>s. On failure, stops and reports the failed index and which fields were already written. |
-| `select_option` | *target, values, value, option, label, format | [ACT] Select one or more options in a <select> element. Values are matched by value first, then by visible label. |
-| `press_key` | *key, target, modifiers, allowSynthetic, format | [ACT] Send a key, or a chord with modifiers, to an element or to whatever has focus. |
-| `scroll` | direction, amount, target, format | [ACT] Scroll the page, or a specific container when the window itself does not move — a drawer, a table, an overflow:auto div. |
-| `hover` | *target, format | [ACT] Send the pointer and mouse events of hovering an element, to open a flyout menu or raise a tooltip. A menu shown by CSS :hover alone does not open this way; its items are usually already in browser_snapshot, tagged [hidden until hover/focus]. |
-| `file_upload` | target, files, file, format | [ACT] Attach one or more local files to an <input type=file> and fire the page's change/input handlers, the way a human's file picker does. |
-| `wait_for` | for, selector, text, gone, timeoutMs, format | [WAIT] Wait for a selector or page text to appear, or to disappear with gone: true. |
-| `take_screenshot` | fullPage, target, format, quality | [WAIT] Capture the target tab as an image, without activating it. JPEG by default; format: 'png' for a lossless one. |
-| `navigate` | url, reload, format | [NAV] Navigate your session's target tab to a URL, or reload it. |
-| `tabs` | *action, url, browser, query, activate, force | [NAV] List every connected browser's tabs, open a tab, select this session's target tab, or close a tab. |
-| `evaluate` | *expression, format | [EXTEND] Run a JavaScript expression in the target page and return its value. The value must be JSON-serializable. |
-| `action` | action, params, format | [EXTEND] Dispatch any protocol action by name, including ones whose tool is not loaded: browser_action({action, params}). |
-| `load_tools` | profile, tools, format | [EXTEND] Load a profile of tools that are not currently visible: network (capture every request, read response bodies, export a HAR, wait for network idle), cookies (read, set, delete), storage (localStorage, sessionStorage), console (console messages and page errors), cdp (raw CDP, coordinate input, audit), record (record and replay), tabs (windows, groups, visibility), advanced (a11y tree, PDF, history, element screenshots), system (a shell command on the bridge host, not the page), or all. |
-| `list_available_tools` | format | [EXTEND] Every capability this server has, loaded or not, with its parameters. |
+| `click` | *target, doubleClick, button, waitFor, autoSettle, settleMs, format | [ACT] Click an element by target (@e token like '@e1', CSS selector, visible text, or index). |
+| `type` | *target, *text, method, submit, waitFor, autoSettle, settleMs, format | [ACT] Enter text into an input, textarea, contenteditable, or rich text editor. |
+| `fill_form` | *fields, submitTarget, format | [ACT] Fill multiple form inputs, checkboxes, radios, and selects in a single batch. |
+| `scroll` | direction, amount, target, format | [ACT] Scroll the window or a specific scrollable container (modal, table, overflow div). |
+| `file_upload` | target, files, file, format | [ACT] Attach local files to an <input type=file> and trigger input/change events. |
+| `wait_for` | for, selector, text, gone, timeoutMs, format | [WAIT] Wait for element, text, or page settle condition. |
+| `take_screenshot` | fullPage, target, format, quality | [WAIT] Capture viewport or element image without activating the window. Default format: JPEG (or 'png' for lossless). |
+| `navigate` | url, reload, format | [NAV] Navigate session target tab to a URL, or reload it. |
+| `tabs` | *action, url, browser, query, activate, force | [NAV] List, open, select, close, release, or yield tabs across connected browsers. |
+| `make_request` | *url, method, headers, body, json, query, credentials, timeout_ms, pointer, requestId, format | [NET] Execute an HTTP request directly inside the target tab context with options to inherit session credentials or run custom isolated requests. Generates executable minimal curl command. |
+| `monitor_requests` | action, url_pattern, method, status, resource_type, limit, since_id, include_body, requestId, pointer, timeout_ms, format | [NET] Inspect, filter, or wait for captured network requests. Supports filtering by url_pattern, method, status, type, inline response bodies, inspecting single request details, or waiting for request to finish. |
+| `evaluate` | *expression, format | [EXTEND] Evaluate a JavaScript expression in the page context and return serialized result. |
+| `action` | action, params, format | [EXTEND] Dispatch any protocol action by name without loading its profile: browser_action({action, params}). |
+| `load_tools` | profile, tools, format | [EXTEND] Load additional tool profile into session (profiles: 'network' [capture every request], 'cookies', 'storage' [localStorage], 'console' [console messages], 'cdp', 'record', 'tabs', 'advanced', 'system', 'all'). |
 
 ### system (1)
 
@@ -42,12 +36,10 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 |---|---|---|
 | `exec_system_cmd` | *command, cwd, env, timeoutMs | [SESSION] Execute a shell/system command on the host running the bridge server. Returns exitCode, stdout, stderr, all (combined output), failed, timedOut, and signal. |
 
-### network (13)
+### network (11)
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `make_request` | *url, method, headers, body, json, query, credentials, timeout_ms, pointer, requestId, format | Execute an HTTP request directly inside the target tab context with options to inherit session credentials or run custom isolated requests. Generates executable minimal curl command. |
-| `monitor_requests` | action, url_pattern, method, status, resource_type, limit, since_id, include_body, requestId, pointer, timeout_ms, format | Inspect, filter, or wait for captured network requests. Supports filtering by url_pattern, method, status, type, inline response bodies, inspecting single request details, or waiting for request to finish. |
 | `get_network_requests` | urlContains, format | Return network requests captured since attach (method, url, status, type, size). Requires browser_cdp_attach. |
 | `get_response_body` | *requestId, pointer, format | Fetch the response body of a captured request by its requestId (from get_network_requests). Best-effort; bodies may be evicted. Supports optional pointer (RFC 6901 JSON pointer). Requires browser_cdp_attach. |
 | `get_network_request` | *requestId, part, pointer, format | Inspect full details of a single network request by requestId. Supports slicing by part ('response', 'request', 'headers', 'timing') and querying JSON Pointer. |
@@ -116,10 +108,18 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 | `spoof_visibility` | restore, format | Make the target tab's page JS believe it's visible/focused (document.hidden=false, document.visibilityState='visible', fires a visibilitychange event), WITHOUT actually foregrounding the tab or stealing the user's focus. Use this when scrolling a backgrounded tab isn't loading new content — many sites (e.g. infinite-scroll feeds) deliberately pause lazy-loading via the Page Visibility API while a tab is hidden, as a resource-saving pattern. This is explicit and opt-in on purpose: call it once before scrolling a background tab that needs to lazy-load, not automatically on every scroll — visibility state is also used for other things a site might not want spoofed unconditionally (video autoplay, polling/websocket resume, analytics time-on-page). Attaches the CDP debugger if not already attached (shows the 'is being debugged' bar). KNOWN LIMITATION: this patches JS-visible state only — it does not lift Chrome's renderer-level throttling of a backgrounded tab (requestAnimationFrame doesn't fire, IntersectionObserver rides the same throttled pipeline). If a site's lazy-load is driven by rAF/IO rather than a visibilitychange or scroll listener, this may not help; there is no further automatic fallback (foregrounding the tab, even briefly, is a deliberate manual decision this tool will never make for you). The spoof lasts until the page navigates or reloads; call it again on the new page, or pass restore: true to undo it. |
 | `current_tab` | format | Report which tab commands currently act on (id, url, title). Your session's target is resolved on your first command and held across user tab switches. Call this to confirm you're on the right page before snapshotting or reading sensitive content. |
 
-### advanced (15)
+### advanced (23)
 
 | Tool | Parameters | Description |
 |---|---|---|
+| `find` | query, selector, in, regex, contextChars, max, format | Find things on the page and get a ref back for each. in: 'controls' (default) matches interactive elements by accessible name, text, placeholder, aria-label or title, and 'matchedBy' says which of those hit; in: 'text' searches the page's prose instead and each match carries 'nearestInteractive'. |
+| `read_page` | mode, depth, target, maxChars, format | The accessibility tree as indented text — which control sits inside which group, form or region — with a ref on each interactive element. Structure, not prose. |
+| `get_content` | maxChars, format | The page's main readable prose — title, url, cleaned article text. For documentation, articles and postings. |
+| `get_property` | target, property, attr, format | Read an element's text, value, HTML, box, an attribute, or how many match. |
+| `select_option` | *target, values, value, option, label, format | Select one or more options in a <select> element. Values are matched by value first, then by visible label. |
+| `press_key` | *key, target, modifiers, allowSynthetic, format | Send a key, or a chord with modifiers, to an element or to whatever has focus. |
+| `hover` | *target, format | Send the pointer and mouse events of hovering an element, to open a flyout menu or raise a tooltip. A menu shown by CSS :hover alone does not open this way; its items are usually already in browser_snapshot, tagged [hidden until hover/focus]. |
+| `list_available_tools` | format | Every capability this server has, loaded or not, with its parameters. |
 | `unload_tools` | profile, tools, format | [EXTEND] Unload specific tool categories or reset active tools back to the lightweight 'core' profile. Frees system prompt tokens when specialized tools are no longer needed. |
 | `describe_element` | *target, format | Given a 'target' (ref '@e1', CSS selector, visible text, or snapshot index), return everything useful for debugging it: tag, full attribute dump, bounding rect, visibility verdict WITH the specific reason ('visible' \| 'display:none' \| 'visibility:hidden' \| 'zero-size rect' \| 'opacity:0' \| 'disabled'), and whether it matches the interactive selector. Pierces open Shadow DOM. |
 | `a11y_snapshot` | max, format | SECOND OPINION on the page, from Chrome itself. Returns Chrome's own accessibility tree — the role, name and state it computes for every control by the HTML-AAM spec — not browserctl's census. Each node carries a 'ref' where the census has the same control, so results are directly actionable. |

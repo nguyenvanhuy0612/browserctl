@@ -1,6 +1,6 @@
 # Specification 03: Tool Domain Registry & Handler Contracts
 
-## 1. Tool Domain Organization (78 Tools Total)
+## 1. Tool Domain Organization (80 Tools Total)
 
 To prevent a single monolithic tool switch-case statement, tools are partitioned into domain-specific modules under `extension/tools/`. Each module exports an array or map of tool descriptors.
 
@@ -26,14 +26,19 @@ classDiagram
 
 | Domain Module | Primary Tools Included | Profile |
 | :--- | :--- | :--- |
-| `action.js` | `browser_click`, `browser_fill_form`, `browser_type`, `browser_hover`, `browser_press_key`, `browser_select_option`, `browser_wheel`, `browser_drag` | `core` & `advanced` |
-| `navigate.js` | `browser_navigate`, `browser_wait_for`, `browser_reload`, `browser_history_back`, `browser_history_forward` | `core` & `advanced` |
-| `inspect.js` | `browser_snapshot`, `browser_find`, `browser_read_page`, `browser_get_content`, `browser_get_property`, `browser_extract`, `browser_evaluate`, `browser_take_screenshot` | `core` & `advanced` |
-| `tabs.js` | `browser_tabs` (list, switch, create, close, group, duplicate, pin) | `tabs` & `advanced` |
-| `network_tools.js` | `browser_make_request`, `browser_monitor_requests`, `wait_for_request`, `network_rule_mock`, `network_rule_block`, `network_rule_clear` | `network` & `advanced`|
+| `action.js` | `browser_click`, `browser_fill_form`, `browser_type`, `browser_scroll` (`core`); `browser_hover`, `browser_press_key`, `browser_select_option`, `browser_wheel`, `browser_drag` (`advanced`) | `core` & `advanced` |
+| `navigate.js` | `browser_navigate`, `browser_wait_for` (`core`); `browser_go_back`, `browser_go_forward` (`advanced`) | `core` & `advanced` |
+| `inspect.js` | `browser_snapshot`, `browser_extract`, `browser_evaluate`, `browser_take_screenshot` (`core`); `browser_find`, `browser_read_page`, `browser_get_content`, `browser_get_property` (`advanced`) | `core` & `advanced` |
+| `tabs.js` | `browser_tabs` (`core`); `browser_group_tab`, `browser_ungroup_tab`, `browser_current_tab`, `browser_list_windows`, `browser_focus_window` (`tabs` & `advanced`) | `core`, `tabs`, `advanced` |
+| `network_tools.js` | `browser_make_request`, `browser_monitor_requests` (`core` & `network`); `browser_mock_route`, `browser_net_start`, `browser_net_stop`, `browser_net_get`, `browser_net_clear`, `browser_get_response_body`, `browser_wait_network_idle`, `browser_get_network_request`, `browser_network_replay` (`network`) | `core` & `network` |
+| `daemon / lifecycle` | `browser_status`, `browser_start`, `browser_stop` (`core`) | `core` |
+| `meta / dispatch` | `browser_action`, `browser_load_tools` (`core`) | `core` |
 | `emulate_tools.js` | `browser_emulate` (device presets, viewport, userAgent, dark mode, geolocation, offline) | `advanced` |
 | `download_tools.js`| `browser_download` (trigger, track progress, save on disk) | `advanced` |
-| `storage_tools.js` | `cookies_get`, `cookies_set`, `cookies_clear`, `local_storage_get`, `local_storage_set` | `advanced` |
+| `storage_tools.js` | `browser_storage_get`, `browser_storage_set`, `browser_storage_remove`, `browser_storage_clear` | `storage` & `advanced` |
+| `cookie_tools` | `browser_get_cookies`, `browser_set_cookie`, `browser_delete_cookies` | `cookies` & `advanced` |
+| `cdp_tools` | `browser_cdp_send`, `browser_cdp_attach`, `browser_cdp_detach`, `browser_coordinate_click`, `browser_insert_text`, `browser_coordinate_drag`, `browser_audit` | `cdp` & `advanced` |
+| `record_tools` | `browser_record_start`, `browser_record_stop`, `browser_record_get`, `browser_replay` | `record` & `advanced` |
 
 ---
 
@@ -104,5 +109,5 @@ flowchart LR
 ## 4. Agent Reading Budget Invariant
 
 - **Hard Limit**: Consolidated text for `core` profile descriptions and schemas must remain strictly `<= 20,200 characters`.
-- **Current Core Usage**: `19,994` characters (budget headroom: 206 chars).
+- **Current Core Usage**: `13,311` characters (budget headroom: 6,889 chars across 19 core tools).
 - **Rule**: No new tool may be assigned to the `core` profile without removing or condensing existing tool definitions to maintain the `< 20,200` budget. Specialized tools (emulate, drag, wheel, network replay, download) must default to `advanced` or their respective domain profiles. Optional parameters (such as `format: "vom"` for layout inspection in `browser_snapshot`) must remain concise to stay within the profile budget headroom.

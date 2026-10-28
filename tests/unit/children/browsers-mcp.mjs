@@ -671,7 +671,7 @@ const CASES = {
       { type: "chrome", tabs: [tab(141, "https://mail.google.com/", "Gmail")] },
       { type: "edge", tabs: [tab(142, "https://portal.example/", "Portal")] }
     );
-    const A = await session();
+    const A = await session({ BROWSERCTL_MCP_PROFILE: "all" });
     ok(await A.call("browser_tabs", { action: "select", tabId: 142 }), "select");
     const mail = ok(await A.call("browser_get_content", { tabId: 141 }), "get_content");
     assert.equal(mail.by, "chrome-1");

@@ -252,21 +252,20 @@ Agent:  It links to IANA's "Example Domains" page, which explains these domains 
 | Stage | Representative tools | Purpose |
 |---|---|---|
 | **1. Navigate** | `browser_navigate`, `browser_tabs` | Open a URL or reload; list, open, select or release tabs |
-| **2. Read** | `browser_snapshot`, `browser_read_page`, `browser_find`, `browser_get_content` | List the page's controls with `@eN` refs, read the accessibility tree, find an element, read article text |
-| **3. Act** | `browser_click`, `browser_type`, `browser_fill_form`, `browser_press_key` | Click, type, fill several fields at once, send keys |
-| **4. Verify** | `browser_wait_for`, `browser_take_screenshot`, `browser_status` | Wait for an element or text, capture the page, check the bridge and extension |
+| **2. Read** | `browser_snapshot`, `browser_extract` | List the page's controls with `@e` tokens, extract structured rows from tables and lists |
+| **3. Act** | `browser_click`, `browser_type`, `browser_fill_form` | Click, type with Enter submission, fill several fields at once |
+| **4. Network** | `browser_make_request`, `browser_monitor_requests` | Make in-page HTTP requests with session cookies, monitor network traffic and response bodies |
+| **5. Verify** | `browser_wait_for`, `browser_take_screenshot`, `browser_status` | Wait for an element or text, capture the page, check bridge and extension |
 
-The core tools, visible at connect:
+The 19 core tools, visible at connect:
 
 - **Daemon and session:** `browser_status`, `browser_start`, `browser_stop`.
 - **Navigation and tabs:** `browser_navigate`, `browser_tabs`.
-- **Reading:** `browser_snapshot`, `browser_read_page`, `browser_find`, `browser_extract`,
-  `browser_get_content`, `browser_get_property`.
-- **Acting:** `browser_click`, `browser_type`, `browser_fill_form`, `browser_select_option`,
-  `browser_press_key`, `browser_scroll`, `browser_hover`, `browser_file_upload`.
-- **Waiting and utilities:** `browser_wait_for`, `browser_take_screenshot`, `browser_evaluate`,
-  `browser_action`.
-- **Loading more tools:** `browser_load_tools`, `browser_list_available_tools`.
+- **Reading:** `browser_snapshot`, `browser_extract`.
+- **Acting:** `browser_click`, `browser_type`, `browser_fill_form`, `browser_scroll`, `browser_file_upload`.
+- **Waiting and visual verification:** `browser_wait_for`, `browser_take_screenshot`.
+- **Network and in-page API:** `browser_make_request`, `browser_monitor_requests`.
+- **Scripting and loading:** `browser_evaluate`, `browser_action`, `browser_load_tools`.
 
 More tools load on demand with `browser_load_tools({ profile: "..." })`: `network`, `cookies`,
 `storage`, `console`, `cdp`, `record`, `tabs`, `advanced` and `system`.

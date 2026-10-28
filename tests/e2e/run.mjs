@@ -797,6 +797,16 @@ async function main() {
       await cmd("reload", {});
     });
 
+    // --- network domain additions ---
+    await test("make_request executes in-page fetch", async () => {
+      const res = await cmd("make_request", { url: base + "/" });
+      assert(res.ok !== false, "make_request should succeed");
+    });
+    await test("monitor_requests lists traffic", async () => {
+      const res = await cmd("monitor_requests", { action: "list" });
+      assert(res.ok !== false, "monitor_requests should succeed");
+    });
+
     // --- recorder ---
 
     // --- switch_tab without focus (no window raise) ---

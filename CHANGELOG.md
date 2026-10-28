@@ -3,6 +3,16 @@
 One entry per published version. The reasoning and measurements behind each change are in the
 commit history and on the GitHub release.
 
+## 0.9.6
+
+Structured table and container extraction engine, in-page HTTP client and CDP network monitor suite, and streamlined core tools profile with agent-first instructions and token audit.
+
+- **Structured Extraction Engine (`browser_extract`, CLI `extract`)**: Native matrix extractor for HTML `<table>`, CSS grids, lists, and repeated container cards without client-side JavaScript. Features automatic pattern discovery, declarative field selector mapping, RFC 6901 JSON pointer support, and structured streaming.
+- **In-Page HTTP Client (`browser_make_request`, CLI `make-request`)**: Dispatches HTTP requests directly from the page context, seamlessly inheriting active session cookies, authentication headers, and origins, while automatically generating reproducible `curl` commands.
+- **CDP Network Traffic Suite (`browser_monitor_requests`, `browser_mock_route`, CLI `monitor-requests`)**: Inspects, filters, and waits for in-flight network requests with inline response body extraction, RFC 6901 pointer navigation, and declarative URL mocking/blocking via DevTools Fetch domain.
+- **Streamlined Core Profile & Token Budget**: Consolidated default MCP profile to 19 lean, high-signal tools with agent-first parameter hints. Server instructions restructured into an actionable 4-step Loop, explicit 6-tier target resolution, and clear core vs. advanced routing.
+- **Exhaustive Core Tools Audit (`docs/CORE_TOOLS_AUDIT.md`)**: Complete per-tool schema, description, and token footprint specification verifying a strict reading budget of 13,515 characters (33.1% margin below the 20,200 hard limit).
+
 ## 0.9.5
 
 Architecture modularization and core stabilization enhancements integrated from BSK, featuring

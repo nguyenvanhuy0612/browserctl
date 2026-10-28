@@ -223,7 +223,7 @@ test("ToolRegistry.execute: honors AbortSignal pre-check and mid-execution cance
 });
 
 // =====================================================================================
-// 3. Default Registry All 78 Tools & 25 Core Profile Invariants
+// 3. Default Registry All 80 Tools & 19 Core Profile Invariants
 // =====================================================================================
 
 test("defaultRegistry: contains exactly 80 unique tools across all profiles", () => {
@@ -231,7 +231,7 @@ test("defaultRegistry: contains exactly 80 unique tools across all profiles", ()
   assert.equal(allTools.length, 80, "Must contain exactly 80 unique domain tools");
 
   const coreTools = defaultRegistry.list("core");
-  assert.equal(coreTools.length, 25, "Core profile must contain exactly 25 tools");
+  assert.equal(coreTools.length, 19, "Core profile must contain exactly 19 tools");
 });
 
 test("defaultRegistry: every tool can be queried by name", () => {

@@ -105,13 +105,13 @@ export async function handleMockRoute(params, ctx) {
 export const networkTools = [
   {
     name: "browser_make_request",
-    profile: "network",
+    profile: "core",
     aliases: ["make_request", "request", "fetch"],
     handler: handleMakeRequest,
   },
   {
     name: "browser_monitor_requests",
-    profile: "network",
+    profile: "core",
     aliases: ["monitor_requests", "monitor", "wait_for_request"],
     handler: handleMonitorRequests,
   },

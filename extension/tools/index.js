@@ -104,7 +104,7 @@ export function createDefaultRegistry() {
 
   registry.register({
     name: "browser_list_available_tools",
-    profile: "core",
+    profile: "advanced",
     aliases: ["list_available_tools"],
     handler: async () => ({
       ok: true,

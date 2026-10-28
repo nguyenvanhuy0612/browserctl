@@ -667,6 +667,7 @@ gate("every tool call in a string names real parameters", () => {
 gate("e2e covers every core tool", () => {
   const suites = [
     "run.mjs",
+    "run_all_functions.mjs",
     "run_editors.mjs",
     "run_labels.mjs",
     "run_multiframe.mjs",

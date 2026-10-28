@@ -487,6 +487,7 @@ async function openSession(bridgeUrl) {
   delete env.BROWSERCTL_CALL_LOG;
   env.BROWSERCTL_BRIDGE_URL = bridgeUrl;
   env.BROWSERCTL_AUTO_START = "manual";
+  env.BROWSERCTL_MCP_PROFILE = env.BROWSERCTL_MCP_PROFILE || "all";
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [MCP_PATH],

@@ -1,6 +1,6 @@
-# browserctl Core Tool Reference — v0.9.5
+# browserctl Core Tool Reference — v0.9.6
 
-browserctl provides 25 core tools (80 tools across all profiles) for web automation and agent inspection.
+browserctl provides 19 core tools (80 tools across all profiles) for web automation and agent inspection.
 
 ## Targeting an element
 
@@ -317,6 +317,35 @@ focus emulation on for the moment of the capture, so Chrome, Brave and Edge all 
 the tab coming to the front. The page sees `visibilitychange` to visible and back. A browser that
 still paints nothing fails the capture after 5 s with a hint to select the tab with
 `activate: true` first.
+
+### browser_make_request
+
+- url: Target URL (absolute or relative to current page).
+- method: HTTP method ('GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'HEAD' | 'OPTIONS').
+- headers: Request headers dictionary.
+- body: Request body payload string.
+- json: JSON payload object (auto-serializes and sets Content-Type).
+- query: Query parameters dictionary to append to URL.
+- credentials: Credentials mode ('include' | 'same-origin' | 'omit').
+- timeout_ms: Request timeout in milliseconds (default: 15000).
+- pointer: RFC 6901 JSON pointer to extract from response JSON.
+- requestId: Optional requestId of a recorded request to replay.
+- format: Output format ('json' | 'pretty' | 'smart').
+
+### browser_monitor_requests
+
+- action: Action to perform ('list' | 'get' | 'clear' | 'wait').
+- url_pattern: Wildcard or substring URL pattern to match.
+- method: Filter by HTTP method.
+- status: Filter by status code or range.
+- resource_type: Filter by resource type.
+- limit: Maximum requests to return (default: 50).
+- since_id: Only return requests recorded after this requestId.
+- include_body: Boolean flag to retrieve response bodies inline.
+- requestId: Inspect single request by requestId when action is get.
+- pointer: RFC 6901 JSON pointer to pluck from response body.
+- timeout_ms: Timeout in milliseconds when waiting for requests.
+- format: Output format ('json' | 'pretty' | 'smart').
 
 ### browser_evaluate
 

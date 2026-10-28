@@ -62,7 +62,7 @@ flowchart TB
 
 1. **Zero-Build Native ESM**: The runtime executes pure modern ECMAScript modules (ESM) natively in Node.js (>= 20) and Chromium MV3. No bundlers (Vite, Webpack, WXT, Rollup) or compilation toolchains are required.
 2. **Strict Token Economy & @e Indexing**: Interactive DOM elements are indexed with compact `@e` tokens (`@e1`, `@e2`). Default observations use topological pruning and text census to minimize LLM token consumption. Heavy structural or geometric representations are strictly opt-in.
-3. **Strict Agent Reading Budget**: The consolidated prompt and tool schemas for the `core` profile must never exceed **20,200 characters** (current baseline: 19,994 chars). Tools are tiered into `core`, `advanced`, `tabs`, and `network`.
+3. **Strict Agent Reading Budget**: The consolidated prompt and tool schemas for the `core` profile must never exceed **20,200 characters** (current baseline: 13,311 chars across 19 core tools). Tools are tiered into `core`, `advanced`, `tabs`, `network`, `cdp`, `storage`, `console`, `cookies`, `record`, and `system`.
 4. **Multi-Browser & Multi-Tab Isolation**: The bridge multiplexes connections across multiple isolated browser instances and profiles (`chrome-1`, `chrome-2`, `chrome-3`). Mutations in one tab or profile must not poison another.
 5. **Untrusted Page Content Boundary**: Text and DOM structures extracted from web pages are treated strictly as untrusted data, never executed as instructions.
 6. **Backward Compatibility Guarantee**: Existing test suites relying on `tests/unit/source-slice.mjs` must continue to pass during and after modularization via barrel re-exports.
