@@ -13,6 +13,10 @@
     "summary",
     "[contenteditable=true]",
     "[contenteditable='']",
+    "[contenteditable='plaintext-only']",
+    "#richInput",
+    "[data-editable='true']",
+    "[data-click-to-edit]",
     "[onclick]",
     "[role=button]",
     "[role=link]",
@@ -66,12 +70,14 @@
 
   function visibilityReason(el, { ignoreDisabled = false } = {}) {
     const style = getComputedStyle(el);
+    if (style.display === "contents") return null;
     if (style.display === "none") return "display:none";
     if (style.visibility === "hidden") return "visibility:hidden";
     if (el.disabled && !ignoreDisabled) return "disabled";
     if (style.opacity === "0") return "opacity:0";
     const rect = el.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return "zero-size rect";
+    const hasChildren = el.children && el.children.length > 0;
+    if ((rect.width === 0 || rect.height === 0) && !hasChildren) return "zero-size rect";
     return null;
   }
 
@@ -802,7 +808,7 @@
     return reason;
   }
 
-  const TEXT_CAP = 200;
+  const TEXT_CAP = 150;
 
   function fromPage(s) {
     return s;
@@ -1140,13 +1146,23 @@
   ]);
 
   function controlKind(el) {
-    const role = (el.getAttribute("role") || "").toLowerCase();
+    const role = (el.getAttribute?.("role") || "").toLowerCase();
     if (role === "link") return "links";
     if (FIELD_ROLES.has(role)) return "fields";
     if (role) return "buttons";
     const tag = el.tagName;
     if (tag === "A") return "links";
-    if (tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable) return "fields";
+    if (
+      tag === "TEXTAREA" ||
+      tag === "SELECT" ||
+      el.isContentEditable ||
+      el.getAttribute?.("contenteditable") === "true" ||
+      el.getAttribute?.("contenteditable") === "" ||
+      el.getAttribute?.("contenteditable") === "plaintext-only" ||
+      el.id === "richInput" ||
+      el.hasAttribute?.("data-editable")
+    )
+      return "fields";
     if (tag === "INPUT")
       return ["button", "submit", "reset", "image"].includes((el.type || "").toLowerCase())
         ? "buttons"
@@ -1154,365 +1170,824 @@
     return "buttons";
   }
 
-  function snapshot(params = {}) {
-    if (typeof reassertHoverLatch === "function") reassertHoverLatch();
-    const only = Array.isArray(params.only) && params.only.length ? new Set(params.only) : null;
-    const maxText = params.maxText ?? (only ? 0 : 4000);
-    const compact = !!params.compact;
-    const scope = params.scope || "viewport";
-    const limit =
-      Number.isFinite(params.limit) && params.limit > 0 ? Math.floor(params.limit) : 200;
-    const offset =
-      Number.isFinite(params.cursor) && params.cursor > 0 ? Math.floor(params.cursor) : 0;
+  const STATIC_SEMANTIC_TAGS = new Set([
+    "p",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "td",
+    "th",
+    "blockquote",
+    "pre",
+    "code",
+    "time",
+    "figcaption",
+    "caption",
+    "table",
+    "tbody",
+    "thead",
+    "tfoot",
+    "tr",
+  ]);
 
-    const allInteractives = deepQueryAll(INTERACTIVE_SELECTOR)
-      .filter(isCensusVisible)
-      .filter((el) => !only || only.has(controlKind(el)));
-    let nodes = scope === "viewport" ? allInteractives.filter(isInViewport) : allInteractives;
+  const PROSE_TAGS = new Set([
+    "p",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "blockquote",
+    "li",
+    "dt",
+    "dd",
+    "figcaption",
+    "caption",
+    "time",
+    "span",
+    "div",
+  ]);
 
-    if (scope === "viewport" && nodes.length === 0 && allInteractives.length > 0) {
-      nodes = allInteractives.slice(0, 40);
+  const INLINE_PHRASING_TAGS = new Set([
+    "b",
+    "strong",
+    "i",
+    "em",
+    "mark",
+    "small",
+    "del",
+    "ins",
+    "sub",
+    "sup",
+    "code",
+    "span",
+    "br",
+    "font",
+    "time",
+  ]);
+
+  function normalizeSnapshotText(str) {
+    if (str == null) return "";
+    return String(str)
+      .replace(/[\u00a0\u2000-\u200b\u202f\u205f\u3000\ufeff]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function csvSafe(val) {
+    if (val == null) return "";
+    const s = String(val);
+    if (/^[=+\-@\t\r]/.test(s)) {
+      return "'" + s;
     }
+    return s;
+  }
 
-    try {
-      const box = new Map();
-      const landmarkFirstRow = new Map();
-      for (const el of nodes) {
-        const r = el.getBoundingClientRect();
-        const row = Math.round((r.top + window.scrollY) / 24);
-        const lm = getLandmark(el) || "";
-        box.set(el, { row, left: Math.round(r.left), lm });
-        if (!landmarkFirstRow.has(lm) || row < landmarkFirstRow.get(lm))
-          landmarkFirstRow.set(lm, row);
+  function isNativeInteractiveControl(el) {
+    if (!el || el.nodeType !== 1) return false;
+    const tag = el.tagName ? el.tagName.toLowerCase() : "";
+    if (tag === "a") {
+      return Boolean(typeof el.hasAttribute === "function" && el.hasAttribute("href"));
+    }
+    if (tag === "button" || tag === "select" || tag === "textarea" || tag === "summary") {
+      return true;
+    }
+    if (tag === "input") {
+      const type = (el.getAttribute?.("type") || el.type || "").toLowerCase();
+      return type !== "hidden";
+    }
+    return false;
+  }
+
+  function isEditableTarget(el) {
+    if (!el || el.nodeType !== 1) return false;
+    const tag = el.tagName ? el.tagName.toLowerCase() : "";
+    if (tag === "textarea") return true;
+    if (tag === "input") {
+      const type = (el.getAttribute?.("type") || el.type || "text").toLowerCase();
+      return !["hidden", "button", "submit", "reset", "image", "checkbox", "radio"].includes(type);
+    }
+    const ce = typeof el.getAttribute === "function" ? el.getAttribute("contenteditable") : null;
+    if (ce === "true" || ce === "" || ce === "plaintext-only") return true;
+    if (
+      el.isContentEditable === true ||
+      el.contentEditable === "true" ||
+      el.contentEditable === ""
+    ) {
+      return true;
+    }
+    const id =
+      typeof el.getAttribute === "function" ? el.getAttribute("id") || el.id || "" : el.id || "";
+    if (id === "richInput" || /rich[-_]?input/i.test(id)) return true;
+    const role = el.getAttribute?.("role");
+    if (role === "textbox" || role === "searchbox") return true;
+    if (tag === "td" || tag === "th" || role === "gridcell" || role === "cell") {
+      if (
+        el.hasAttribute?.("data-editable") ||
+        el.hasAttribute?.("data-click-to-edit") ||
+        el.getAttribute?.("aria-readonly") === "false" ||
+        /\b(editable|click-to-edit|cell-edit)\b/i.test(el.className || "")
+      ) {
+        return true;
       }
-      nodes = nodes.slice().sort((a, b) => {
-        const A = box.get(a),
-          B = box.get(b);
-        if (A.lm !== B.lm) return landmarkFirstRow.get(A.lm) - landmarkFirstRow.get(B.lm);
-        return A.row - B.row || A.left - B.left;
-      });
-    } catch {}
-
-    indexedElements = nodes;
-    for (const el of deepQueryAll("[data-bctl-ref]")) el.removeAttribute("data-bctl-ref");
-    nodes.forEach((el, index) => el.setAttribute("data-bctl-ref", String(index)));
-
-    const activeModal = findActiveModal();
-    const openDialogs = findOpenDialogs();
-    const vh = window.innerHeight || document.documentElement.clientHeight;
-    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
-    const scrollHeight = document.documentElement.scrollHeight || document.body.scrollHeight || 1;
-    const scrollPercent = Math.min(
-      100,
-      Math.round((scrollY / Math.max(1, scrollHeight - vh)) * 100)
-    );
-
-    const pagedNodes = nodes.slice(offset, offset + limit);
-    const regionsByType = new Map();
-    for (const el of pagedNodes) {
-      const lm = getLandmark(el);
-      const node = getLandmarkNode(el) || null;
-      if (!regionsByType.has(lm)) regionsByType.set(lm, new Set());
-      regionsByType.get(lm).add(node);
     }
-    const multiRegionTypes = new Set(
-      [...regionsByType.entries()].filter(([, set]) => set.size > 1).map(([lm]) => lm)
-    );
-    const elements = pagedNodes.map((el, i) => {
-      const index = offset + i;
-      const ref = getOrAssignRef(el);
-      const tag = el.tagName.toLowerCase();
-      const info = elementTextInfo(el);
-      const text = info.text;
-      const landmark = getLandmark(el);
-      const regionNode = getLandmarkNode(el);
-      const region = multiRegionTypes.has(landmark) ? regionName(regionNode) : "";
-      const inVp = isInViewport(el);
-      const item = { index, ref, tag, text, landmark, inViewport: inVp };
-      if (region) item.region = region;
-      if (info.truncatedBy > 0) item.textTruncatedBy = info.truncatedBy;
+    return false;
+  }
+
+  function isSnapshotHidden(el) {
+    if (!el || typeof el !== "object") return true;
+    if (typeof el.getAttribute === "function" && el.getAttribute("aria-hidden") === "true") {
+      return true;
+    }
+    if (el.style) {
+      if (el.style.display === "contents") return false;
+      if (el.style.display === "none") return true;
+      if (el.style.visibility === "hidden" || el.style.visibility === "collapse") return true;
+      if (el.style.opacity === "0" && (!el.children || el.children.length === 0)) return true;
+    }
+    if (typeof window !== "undefined" && window.getComputedStyle) {
       try {
-        if (!isVisible(el) && !isShownDisabled(el)) {
-          if (isOperableDespiteHidden(el)) item.viaLabel = true;
-          else if (isRevealable(el)) item.revealOn = "hover/focus";
+        const style = window.getComputedStyle(el);
+        if (style.display === "contents") return false;
+        if (style.display === "none") return true;
+        if (style.visibility === "hidden" || style.visibility === "collapse") return true;
+        if (style.opacity === "0") {
+          const hasInteractiveChild =
+            typeof el.querySelector === "function" &&
+            el.querySelector("input, select, textarea, button, a[href]");
+          if (!hasInteractiveChild) return true;
         }
       } catch {}
+    }
+    if (typeof el.getBoundingClientRect === "function") {
       try {
-        const r = el.getAttribute("role");
-        if (r) item.role = r;
-        const state = controlState(el);
-        if (Object.keys(state).length) item.state = state;
+        const rect = el.getBoundingClientRect();
+        const hasChildren = el.children && el.children.length > 0;
+        if (rect && rect.width === 0 && rect.height === 0 && !hasChildren) {
+          return true;
+        }
       } catch {}
-      if (el.tagName === "A" && el.href) {
-        item.href = el.getAttribute("href");
-        item.hrefKey = normalizedHref(el.href);
+    }
+    return false;
+  }
+
+  function compactSnapshotText(text, max = 150) {
+    if (text == null) return "";
+    const cleaned = normalizeSnapshotText(text);
+    const safe = csvSafe(cleaned);
+    if (safe.length > max) {
+      return safe.slice(0, max - 3) + "...";
+    }
+    return safe;
+  }
+
+  function isActionableElement(el) {
+    if (!el || el.nodeType !== 1) return false;
+    const tag = el.tagName ? el.tagName.toLowerCase() : "";
+    if (isNativeInteractiveControl(el)) return true;
+    if (isEditableTarget(el)) return true;
+    const role = el.getAttribute?.("role");
+    if (
+      role &&
+      [
+        "button",
+        "link",
+        "textbox",
+        "checkbox",
+        "radio",
+        "combobox",
+        "menuitem",
+        "menuitemcheckbox",
+        "menuitemradio",
+        "tab",
+        "switch",
+        "option",
+        "treeitem",
+        "searchbox",
+        "slider",
+        "spinbutton",
+      ].includes(role)
+    ) {
+      return true;
+    }
+    if (
+      el.hasAttribute?.("onclick") ||
+      (el.hasAttribute?.("tabindex") && el.getAttribute?.("tabindex") !== "-1")
+    ) {
+      return true;
+    }
+    try {
+      for (const k of Object.keys(el)) {
+        if (k.startsWith("__reactProps") && el[k] && typeof el[k].onClick === "function") {
+          return true;
+        }
       }
-      if (el.tagName === "INPUT") {
-        item.type = el.type || "text";
-        // A checkbox or radio's value is what it submits ("on" unless set), not its state.
-        const choice = item.type === "checkbox" || item.type === "radio";
-        item.value = choice && el.value === "on" ? "" : el.value || "";
-        if (el.placeholder) item.placeholder = el.placeholder;
+    } catch {}
+    if (!STATIC_SEMANTIC_TAGS.has(tag) && role !== "row" && role !== "grid") {
+      let cursor = null;
+      if (el.style && el.style.cursor) {
+        cursor = el.style.cursor;
+      } else if (typeof window !== "undefined" && window.getComputedStyle) {
+        try {
+          const style = window.getComputedStyle(el);
+          cursor = style?.cursor;
+        } catch {}
       }
-      if (el.tagName === "TEXTAREA") item.value = el.value || "";
-      if (el.tagName === "SELECT") item.value = el.value || "";
-      return item;
+      if (cursor === "pointer") {
+        const raw =
+          el.innerText ||
+          el.textContent ||
+          el.getAttribute?.("aria-label") ||
+          el.getAttribute?.("title") ||
+          "";
+        const cleaned = normalizeSnapshotText(raw);
+        if (cleaned.length > 0 && cleaned.length <= 150) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function isAtomicProseBlock(el) {
+    if (!el || el.nodeType !== 1) return false;
+    const tag = el.tagName ? el.tagName.toLowerCase() : "";
+    if (!PROSE_TAGS.has(tag)) return false;
+    if (el.children && el.children.length > 0) {
+      for (const child of el.children) {
+        const childTag = child.tagName ? child.tagName.toLowerCase() : "";
+        if (!INLINE_PHRASING_TAGS.has(childTag)) {
+          return false;
+        }
+      }
+    }
+    function hasInteractiveDescendant(n) {
+      for (const c of n.children || []) {
+        if (isActionableElement(c)) return true;
+        if (hasInteractiveDescendant(c)) return true;
+      }
+      return false;
+    }
+    if (hasInteractiveDescendant(el)) return false;
+    const raw = el.innerText || el.textContent || "";
+    return normalizeSnapshotText(raw).length > 0;
+  }
+
+  function findPreservedDescendants(parent) {
+    const list = [];
+    function collect(n) {
+      for (const c of n.children || []) {
+        if (isNativeInteractiveControl(c) || isEditableTarget(c)) {
+          list.push(c);
+        } else {
+          collect(c);
+        }
+      }
+    }
+    collect(parent);
+    return list;
+  }
+
+  function findTableRows(tableEl) {
+    const isNative = tableEl.tagName?.toLowerCase() === "table";
+    if (isNative && tableEl.rows && tableEl.rows.length > 0) {
+      return Array.from(tableEl.rows);
+    }
+    const rows = [];
+    function search(n) {
+      for (const c of n.children || []) {
+        const tag = c.tagName ? c.tagName.toLowerCase() : "";
+        const role = c.getAttribute?.("role");
+        if (tag === "tr" || role === "row") {
+          rows.push(c);
+        }
+        search(c);
+      }
+    }
+    search(tableEl);
+    return rows;
+  }
+
+  function findRowCells(rowEl) {
+    const isNative = rowEl.tagName?.toLowerCase() === "tr";
+    if (isNative && rowEl.cells && rowEl.cells.length > 0) {
+      return Array.from(rowEl.cells);
+    }
+    const cells = [];
+    function search(n) {
+      for (const c of n.children || []) {
+        const tag = c.tagName ? c.tagName.toLowerCase() : "";
+        const role = c.getAttribute?.("role");
+        if (
+          tag === "td" ||
+          tag === "th" ||
+          role === "cell" ||
+          role === "gridcell" ||
+          role === "columnheader" ||
+          role === "rowheader"
+        ) {
+          cells.push(c);
+        } else {
+          search(c);
+        }
+      }
+    }
+    search(rowEl);
+    return cells;
+  }
+
+  function findInteractiveCellControl(cell) {
+    for (const c of cell.children || []) {
+      if (isNativeInteractiveControl(c) || isEditableTarget(c) || isActionableElement(c)) {
+        return c;
+      }
+      const inner = findInteractiveCellControl(c);
+      if (inner) return inner;
+    }
+    return null;
+  }
+
+  function formatTableStructure(tableEl, depth, context) {
+    const { registerNode, lines, scope = "viewport" } = context;
+    const tableSelector = "table, [role='table'], [role='grid'], [role='treegrid']";
+
+    const allRows = findTableRows(tableEl);
+
+    const ownedRows = allRows.filter((row) => {
+      if (typeof row.closest === "function") {
+        return row.closest(tableSelector) === tableEl;
+      }
+      return true;
     });
 
-    const offscreenCount = Math.max(0, allInteractives.length - nodes.length);
+    if (ownedRows.length === 0) return;
 
-    const res = {
-      url: location.href,
-      title: document.title,
-      scope,
-      ...(only ? { only: [...only] } : {}),
-      viewport: {
-        width: window.innerWidth,
-        height: vh,
-        scrollY,
-        scrollHeight,
-        scrollPercent,
-      },
-      totalElementsCount: allInteractives.length,
-      offscreenCount,
-      window: { offset, shown: elements.length, inScope: nodes.length },
-      ...(offset + elements.length < nodes.length ? { next: offset + elements.length } : {}),
-      pageState: {
-        isBusy: false,
-        hasActiveModal: !!activeModal,
-        activeModalTag: activeModal ? activeModal.tagName.toLowerCase() : null,
-        openDialogs: openDialogs.map((d) => ({
-          label: d.label,
-          tag: d.tag,
-          width: d.width,
-          height: d.height,
-          ref: getOrAssignRef(d.node),
-        })),
-      },
-      elements,
-      text: fromPage(
-        scope === "viewport"
-          ? viewportText(maxText)
-          : (document.body ? document.body.innerText : "").trim().replace(/\s+/g, " ")
-      ).slice(0, maxText),
-    };
+    const captionEl = tableEl.querySelector
+      ? tableEl.querySelector(":scope > caption, caption")
+      : null;
+    const captionText = captionEl
+      ? normalizeSnapshotText(captionEl.innerText || captionEl.textContent)
+      : "";
+    const tableLabel = tableEl.getAttribute?.("aria-label") || captionText || "";
+    const baseIndent = "  ".repeat(depth);
 
-    if (compact) {
-      const labelCounts = new Map();
-      for (const e of elements) {
-        if (!e.text || e.text.length > 24) continue;
-        labelCounts.set(e.text, (labelCounts.get(e.text) || 0) + 1);
-      }
-      const rowContextOf = (e) => {
-        if (!e.text || e.text.length > 24) return "";
-        if ((labelCounts.get(e.text) || 0) < 3) return "";
-        let node = indexedElements[e.index];
-        for (let up = 0; node && up < 4; up++) {
-          node = node.parentElement;
-          if (!node) break;
-          let cand;
-          try {
-            cand = node.querySelector("a, h1, h2, h3, h4, [role='heading']");
-          } catch {
-            cand = null;
-          }
-          if (!cand) continue;
-          let t = "";
-          try {
-            t = (cand.innerText || cand.getAttribute("aria-label") || "")
-              .trim()
-              .replace(/\s+/g, " ");
-          } catch {}
-          if (t && t !== e.text && t.length <= 60) return ` (row: "${t.slice(0, 40)}")`;
-        }
-        return "";
-      };
-
-      const listedRefs = new Set();
-      const formatDesc = (e) => {
-        listedRefs.add(e.ref);
-        let desc = `[@${e.ref}] <${e.tag}>`;
-        if (e.role && e.role !== "button" && e.role !== "link") desc += `[${e.role}]`;
-        if (e.type) desc += `[type=${e.type}]`;
-        const tags = stateTags(e.state);
-        if (tags.length) desc += `[${tags.join(",")}]`;
-        if (e.text) desc += ` "${e.text}"`;
-        if (e.textTruncatedBy) desc += ` [+${e.textTruncatedBy} chars: get text @${e.ref}]`;
-        if (e.viaLabel) desc += "[via label]";
-        if (e.revealOn) desc += "[hidden until hover/focus]";
-        if (e.text) desc += rowContextOf(e);
-        if (e.placeholder) desc += ` (placeholder: "${e.placeholder}")`;
-        if (e.value) desc += ` (value: "${e.value}")`;
-        if (e.href) desc += ` -> ${shortHref(e.href)}`;
-        return desc;
-      };
-
-      const dupOf = new Map();
-      const firstByKey = new Map();
-      for (const e of elements) {
-        if (!e.hrefKey || !e.text) continue;
-        const key = e.hrefKey + "\u0000" + e.text;
-        if (firstByKey.has(key)) dupOf.set(e.ref, firstByKey.get(key));
-        else firstByKey.set(key, e.ref);
-      }
-      let duplicateCount = 0;
-
-      let foldedCount = 0;
-      let structureSummary = "";
-      const lines = [];
-
-      const shape = summarizeStructure(nodes);
-      const shapeBits = [];
-      if (shape.repeated) {
-        const r = shape.repeated;
-        shapeBits.push(
-          `${r.rows} repeated <${r.rowTag}> rows (~${r.perRow} control${r.perRow > 1 ? "s" : ""} each: ${r.kinds.join(", ")})`
-        );
-      }
-      if (shape.inputs) shapeBits.push(`${shape.inputs} input${shape.inputs > 1 ? "s" : ""}`);
-      if (openDialogs.length)
-        shapeBits.push(`${openDialogs.length} open dialog${openDialogs.length > 1 ? "s" : ""}`);
-      if (shapeBits.length > 0 || nodes.length >= 8) {
-        shapeBits.push(shape.regions.join(", "));
-        structureSummary = shapeBits.join(" · ");
-      }
-      if (activeModal) {
-        const modalTitle = fromPage(
-          (
-            activeModal.getAttribute("aria-label") ||
-            activeModal.querySelector("h1, h2, h3, [class*='title' i]")?.innerText ||
-            activeModal.tagName.toLowerCase()
-          )
-            .trim()
-            .replace(/\s+/g, " ")
-        ).slice(0, 80);
-        const modalRef = getOrAssignRef(activeModal);
-        lines.push(
-          `[Active Modal/Drawer: ${modalTitle} (@${modalRef}) — read it with 'get text @${modalRef}'; close it with 'dismiss' (Escape, or its own close control)]`
-        );
-      } else if (openDialogs.length > 0) {
-        const d = openDialogs[0];
-        const extra = openDialogs.length > 1 ? ` (+${openDialogs.length - 1} more open)` : "";
-        const dialogRef = getOrAssignRef(d.node);
-        lines.push(
-          `[Open dialog: "${d.label}" ${d.width}x${d.height} (@${dialogRef}), does not block the page${extra} — read it with 'get text @${dialogRef}'; close it with 'dismiss']`
-        );
-      }
-
-      const { hoisted: keyInputs, listed } = splitHoistedInputs(elements);
-      if (keyInputs.length > 0) {
-        lines.push("[Key Inputs & Search Fields]");
-        for (const inp of keyInputs) {
-          lines.push(`  ` + formatDesc(inp));
-        }
-      }
-
-      let lastLandmark = null;
-      let lastRegion = null;
-      let mainLinksCount = 0;
-      const MAX_MAIN_LINKS = 12;
-
-      let i = 0;
-      while (i < listed.length) {
-        const e = listed[i];
-        if (e.landmark !== lastLandmark || e.region !== lastRegion) {
-          lastLandmark = e.landmark;
-          lastRegion = e.region;
-          const named = e.region ? ` \u2014 ${e.region}` : "";
-          if (e.landmark === "modal") lines.push(`[Active Modal / Dialog${named}]`);
-          else if (e.landmark === "header") lines.push(`[Header / Banner${named}]`);
-          else if (e.landmark === "nav") lines.push(`[Navigation${named}]`);
-        }
-
-        if (listed.length > 30 && e.landmark === "main" && e.tag === "a") {
-          mainLinksCount++;
-          if (mainLinksCount > MAX_MAIN_LINKS) {
-            let foldRunEnd = i;
-            const foldedRefs = [];
-            while (
-              foldRunEnd < listed.length &&
-              listed[foldRunEnd].landmark === "main" &&
-              listed[foldRunEnd].tag === "a"
-            ) {
-              foldedRefs.push(`@${listed[foldRunEnd].ref}`);
-              foldRunEnd++;
-            }
-            if (foldedRefs.length > 0) {
-              foldedCount += foldedRefs.length;
-              const sampleRefs =
-                foldedRefs.slice(0, 5).join(", ") +
-                (foldedRefs.length > 5 ? `, ... +${foldedRefs.length - 5} more` : "");
-              const foldedEls = listed
-                .slice(i, foldRunEnd)
-                .map((x) => indexedElements[x.index])
-                .filter(Boolean);
-              const kinds = describeElements(foldedEls, 3);
-              const what = kinds.length ? ` — ${kinds.join(", ")}` : "";
-              lines.push(
-                `  ... [folded ${foldedRefs.length} links${what} (refs: ${sampleRefs}). Use 'find <text>' to target one, or 'snapshot --all' to list them]`
-              );
-              i = foldRunEnd;
-              continue;
-            }
-          }
-        }
-
-        const sig = `${e.tag}|${e.type || ""}|${e.text}|${e.placeholder || ""}`;
-        let runEnd = i + 1;
-        while (runEnd < listed.length) {
-          const next = listed[runEnd];
-          const nextSig = `${next.tag}|${next.type || ""}|${next.text}|${next.placeholder || ""}`;
-          if (nextSig === sig && next.landmark === e.landmark) {
-            runEnd++;
-          } else {
-            break;
-          }
-        }
-
-        const runLen = runEnd - i;
-        if (runLen > 3) {
-          lines.push(`  ` + formatDesc(listed[i]));
-          lines.push(`  ` + formatDesc(listed[i + 1]));
-          const folded = runLen - 2;
-          foldedCount += folded;
-          const foldedRefs = listed
-            .slice(i + 2, runEnd)
-            .map((x) => `@${x.ref}`)
-            .join(", ");
-          lines.push(
-            `  ... [folded ${folded} repetitive <${e.tag}> "${e.text}" (refs: ${foldedRefs})]`
-          );
-          i = runEnd;
-        } else {
-          if (dupOf.has(e.ref)) {
-            duplicateCount++;
-            i++;
-            continue;
-          }
-          lines.push(`  ` + formatDesc(e));
-          i++;
-        }
-      }
-
-      res.census = lines.join("\n");
-      // The controls the census names only inside a summary line (a folded run, a duplicate
-      // link), with what it takes to act on each one.
-      const folded = elements
-        .filter((e) => !listedRefs.has(e.ref))
-        .map((e) => ({ ref: e.ref, text: e.text, ...(e.href ? { href: e.href } : {}) }));
-      if (folded.length) res.folded = folded;
-      res.foldedCount = foldedCount;
-      res.duplicateCount = duplicateCount;
-      if (structureSummary) res.structure = structureSummary;
+    if (tableLabel) {
+      lines.push(`${baseIndent}[Table: "${tableLabel}"]`);
     }
 
-    const hints = hiddenContentHints(nodes);
-    const regions = openDialogs.length ? overflowingRegions(openDialogs[0].node) : [];
+    for (let r = 0; r < ownedRows.length; r++) {
+      const row = ownedRows[r];
+      if (isSnapshotHidden(row)) continue;
+
+      if (scope === "viewport" && !isInViewport(row)) {
+        continue;
+      }
+
+      const allCells = findRowCells(row);
+
+      const ownedCells = allCells.filter((cell) => {
+        if (typeof cell.closest === "function") {
+          return cell.closest("tr, [role='row']") === row;
+        }
+        return true;
+      });
+
+      if (ownedCells.length === 0) continue;
+
+      const formattedCells = [];
+
+      for (let c = 0; c < ownedCells.length; c++) {
+        const cell = ownedCells[c];
+        if (isSnapshotHidden(cell)) {
+          formattedCells.push("");
+          continue;
+        }
+
+        const isEditable = isEditableTarget(cell);
+        const interactiveChild = findInteractiveCellControl(cell);
+
+        if (isEditable) {
+          const ref = registerNode(cell);
+          const text = compactSnapshotText(cell.innerText || cell.textContent || "");
+          formattedCells.push(
+            `[${ref}] <${cell.tagName.toLowerCase()}>[contenteditable] "${text}"`
+          );
+        } else if (interactiveChild && !isSnapshotHidden(interactiveChild)) {
+          const ref = registerNode(interactiveChild);
+          const childTag = interactiveChild.tagName.toLowerCase();
+          const childType = interactiveChild.getAttribute?.("type");
+          const rawText = normalizeSnapshotText(
+            interactiveChild.innerText ||
+              interactiveChild.textContent ||
+              interactiveChild.getAttribute?.("aria-label") ||
+              interactiveChild.getAttribute?.("placeholder") ||
+              ""
+          );
+          const safeText = csvSafe(rawText);
+          let desc = `[${ref}] <${childTag}>`;
+          if (childType) desc += `[type=${childType}]`;
+          if (childType === "password") {
+            desc += ` "[REDACTED]"`;
+          } else if (safeText) {
+            const display = safeText.length > 50 ? safeText.slice(0, 47) + "..." : safeText;
+            desc += ` "${display}"`;
+          }
+          formattedCells.push(desc);
+        } else {
+          const raw = normalizeSnapshotText(cell.innerText || cell.textContent || "");
+          formattedCells.push(csvSafe(raw));
+        }
+      }
+
+      const rowContent = formattedCells.join(" | ");
+      lines.push(`${baseIndent}| ${rowContent} |`);
+    }
+  }
+
+  function buildVOMNode(root, depth = 0, maxDepth = 8, parentId = null, redactValues = true) {
+    if (!root || depth > maxDepth) return null;
+    if (root.nodeType !== 1) return null;
+    if (["script", "style", "noscript"].includes(root.tagName?.toLowerCase())) return null;
+
+    let rect = { x: 0, y: 0, w: 0, h: 0, width: 0, height: 0 };
+    if (typeof root.getBoundingClientRect === "function") {
+      try {
+        const b = root.getBoundingClientRect();
+        const x = Math.round(b.left ?? b.x ?? 0);
+        const y = Math.round(b.top ?? b.y ?? 0);
+        const width = Math.round(b.width ?? 0);
+        const height = Math.round(b.height ?? 0);
+        rect = { x, y, w: width, h: height, width, height };
+      } catch {}
+    }
+
+    const tag = root.tagName ? root.tagName.toLowerCase() : "div";
+    const role = root.getAttribute?.("role") || null;
+    let text = compactSnapshotText(root.innerText || root.textContent || "");
+    let value = undefined;
+
+    const isPassword =
+      root.getAttribute?.("type") === "password" ||
+      root.type === "password" ||
+      (root.getAttribute?.("autocomplete") || "").includes("password");
+
+    if (tag === "input" || tag === "textarea") {
+      if (redactValues && isPassword) {
+        value = "[REDACTED]";
+        text = "[REDACTED]";
+      } else if (redactValues) {
+        value = "[REDACTED]";
+      } else {
+        value = root.value || "";
+      }
+    }
+
+    const token = isActionableElement(root) ? getOrAssignRef(root) : null;
+    const domId = root.getAttribute?.("id");
+    const id = token
+      ? token.startsWith("@")
+        ? token
+        : "@" + token
+      : domId
+        ? `#${domId}`
+        : `node_${depth}_${Math.random().toString(36).slice(2, 7)}`;
+
+    let layer = "page";
+    if (root.getAttribute?.("role") === "dialog" || tag === "dialog") {
+      layer = "modal";
+    }
+
+    const children = [];
+    for (const child of root.children || []) {
+      const childNode = buildVOMNode(child, depth + 1, maxDepth, id, redactValues);
+      if (childNode) children.push(childNode);
+    }
+
+    return {
+      id,
+      tag,
+      role,
+      rect,
+      parentId,
+      depth,
+      layer,
+      text,
+      ...(value !== undefined ? { value } : {}),
+      ...(token ? { ref: token } : {}),
+      children,
+    };
+  }
+
+  const formatDesc = (e) => {
+    if (typeof listedRefs !== "undefined" && listedRefs.add) listedRefs.add(e.ref);
+    const refStr = e.ref ? (e.ref.startsWith("@") ? e.ref.slice(1) : e.ref) : "";
+    let desc = `[@${refStr}] <${e.tag}>`;
+    if (e.role && e.role !== "button" && e.role !== "link") desc += `[${e.role}]`;
+    if (e.type) desc += `[type=${e.type}]`;
+    const tags = typeof stateTags === "function" ? stateTags(e.state) : [];
+    if (tags.length) desc += `[${tags.join(",")}]`;
+    if (e.text) desc += ` "${e.text}"`;
+    if (e.textTruncatedBy) desc += ` [+${e.textTruncatedBy} chars: get text @${e.ref}]`;
+    if (e.viaLabel) desc += "[via label]";
+    if (e.revealOn) desc += "[hidden until hover/focus]";
+    if (e.text && typeof rowContextOf === "function") desc += rowContextOf(e);
+    if (e.placeholder) desc += ` (placeholder: "${e.placeholder}")`;
+    if (e.value) desc += ` (value: "${e.value}")`;
+    if (e.href && typeof shortHref === "function") desc += ` -> ${shortHref(e.href)}`;
+    return desc;
+  };
+
+  const dupOf = new Map();
+
+  function renderVomTree(root, options = {}) {
+    if (!root || root.nodeType !== 1) return "";
+    const refAssigner = options.refAssigner || ((el) => "@" + getOrAssignRef(el));
+    const maxDepth = Number.isFinite(options.maxDepth) ? options.maxDepth : 25;
+    const redactValues = options.redactValues !== false;
+
+    const SKIP_ROLES = new Set(["generic", "none", "presentation", "inlinetextbox"]);
+    const TAG_TO_ROLE = {
+      a: "link",
+      button: "button",
+      input: "textbox",
+      textarea: "textbox",
+      select: "combobox",
+      nav: "navigation",
+      main: "main",
+      header: "banner",
+      footer: "contentinfo",
+      ul: "list",
+      ol: "list",
+      li: "listitem",
+      table: "grid",
+      tr: "row",
+      th: "columnheader",
+      td: "cell",
+      h1: "heading",
+      h2: "heading",
+      h3: "heading",
+      h4: "heading",
+      h5: "heading",
+      h6: "heading",
+      form: "form",
+      section: "region",
+      aside: "complementary",
+      dialog: "dialog",
+      article: "article",
+    };
+
+    function getCleanText(el) {
+      const raw = el.innerText || el.textContent || "";
+      return typeof normalizeText === "function"
+        ? normalizeText(raw)
+        : raw.replace(/\s+/g, " ").trim();
+    }
+
+    function isVisible(el) {
+      if (!el || el.nodeType !== 1) return false;
+      return !isSnapshotHidden(el);
+    }
+
+    function getRole(el) {
+      const explicitRole = el.getAttribute?.("role");
+      if (explicitRole) return explicitRole.toLowerCase();
+      const tag = el.tagName ? el.tagName.toLowerCase() : "";
+      if (tag === "input") {
+        const type = (el.getAttribute?.("type") || el.type || "text").toLowerCase();
+        if (type === "checkbox") return "checkbox";
+        if (type === "radio") return "radio";
+        if (type === "search") return "searchbox";
+        if (type === "submit" || type === "button" || type === "reset") return "button";
+        return "textbox";
+      }
+      return TAG_TO_ROLE[tag] || null;
+    }
+
+    const lines = [];
+    const docTitle = typeof document !== "undefined" ? document.title || "Untitled" : "Untitled";
+    const rootToken = refAssigner ? refAssigner(root) : "@e0";
+    const formattedRootToken = rootToken
+      ? rootToken.startsWith("@")
+        ? rootToken
+        : `@${rootToken}`
+      : "@e0";
+    lines.push(
+      `- RootWebArea "${docTitle.replace(/\s+/g, " ").replace(/"/g, '\\"')}" [${formattedRootToken}]`
+    );
+
+    function hasInteractiveDescendant(n) {
+      if (!n || !n.children) return false;
+      for (let i = 0; i < n.children.length; i++) {
+        const c = n.children[i];
+        const t = c.tagName ? c.tagName.toLowerCase() : "";
+        if (t === "a" && c.hasAttribute?.("href")) return true;
+        if (t === "button" || t === "select" || t === "textarea" || t === "summary") return true;
+        if (t === "input" && (c.getAttribute?.("type") || c.type || "").toLowerCase() !== "hidden")
+          return true;
+        const ce = c.getAttribute?.("contenteditable");
+        if (ce === "true" || ce === "" || c.isContentEditable === true) return true;
+        const r = c.getAttribute?.("role");
+        if (
+          r &&
+          [
+            "button",
+            "link",
+            "checkbox",
+            "radio",
+            "combobox",
+            "textbox",
+            "searchbox",
+            "tab",
+            "menuitem",
+          ].includes(r.toLowerCase())
+        ) {
+          return true;
+        }
+        if (hasInteractiveDescendant(c)) return true;
+      }
+      return false;
+    }
+
+    function walk(el, depth) {
+      if (!el || el.nodeType !== 1 || depth > maxDepth) return;
+      const tag = el.tagName ? el.tagName.toLowerCase() : "";
+      if (["script", "style", "noscript", "template", "meta", "link", "head"].includes(tag))
+        return;
+      if (!isVisible(el)) return;
+
+      let isPointer = false;
+      if (typeof getComputedStyle === "function") {
+        try {
+          isPointer = getComputedStyle(el).cursor === "pointer";
+        } catch {}
+      }
+
+      let role = getRole(el);
+      let name =
+        el.getAttribute?.("aria-label") ||
+        el.getAttribute?.("placeholder") ||
+        el.getAttribute?.("title") ||
+        el.getAttribute?.("alt");
+
+      const isPassword =
+        tag === "input" &&
+        ((el.getAttribute?.("type") || el.type || "").toLowerCase() === "password" ||
+          (el.getAttribute?.("autocomplete") || "").includes("password"));
+
+      const hasInteractive = hasInteractiveDescendant(el);
+
+      if ((!role || SKIP_ROLES.has(role)) && isPointer && !hasInteractive) {
+        const text = getCleanText(el);
+        if (text && text.length > 0 && text.length < 100) {
+          role = "button";
+          if (!name) name = text;
+        }
+      }
+
+      // Leaf text and name recovery
+      let isLeafText = false;
+      const childElementCount = el.children ? el.children.length : 0;
+      if (!name && childElementCount === 0) {
+        const text = getCleanText(el);
+        if (text && text.length > 0) {
+          name = text;
+          if (!role || SKIP_ROLES.has(role)) {
+            isLeafText = true;
+          }
+        }
+      }
+
+      if (isPassword && redactValues) {
+        name = "[REDACTED]";
+      }
+
+      const indent = "  ".repeat(depth);
+      let emitted = false;
+
+      if (role && !SKIP_ROLES.has(role)) {
+        let line = `${indent}- ${role}`;
+        if (name) {
+          const cleanName = compactSnapshotText(name, 150).replace(/"/g, '\\"');
+          line += ` "${cleanName}"`;
+        }
+        if (refAssigner) {
+          const token = refAssigner(el);
+          if (token) {
+            const formattedToken = token.startsWith("@") ? token : `@${token}`;
+            line += ` [${formattedToken}]`;
+          }
+        }
+        lines.push(line);
+        emitted = true;
+      } else if (isLeafText && name) {
+        const cleanText = compactSnapshotText(name, 150).replace(/"/g, '\\"');
+        lines.push(`${indent}- text: "${cleanText}"`);
+        emitted = true;
+      }
+
+      if (role === "button" && isPointer && childElementCount > 0 && !hasInteractive) {
+        return;
+      }
+
+      const nextDepth = emitted ? depth + 1 : depth;
+      const children = el.children || [];
+      for (let i = 0; i < children.length; i++) {
+        walk(children[i], nextDepth);
+      }
+    }
+
+    const startRoot =
+      root.tagName?.toLowerCase() === "body" || root.tagName?.toLowerCase() === "html"
+        ? root
+        : (typeof document !== "undefined" && document.body) || root;
+
+    const children = startRoot.children || [];
+    for (let i = 0; i < children.length; i++) {
+      walk(children[i], 1);
+    }
+
+    return lines.join("\n");
+  }
+
+  function snapshot(params = {}) {
+    if (typeof reassertHoverLatch === "function") reassertHoverLatch();
+    const maxVomDepth = Number.isFinite(params.maxDepth) ? params.maxDepth : 25;
+    const redactValues = params.redactValues !== false;
+    const limit = Number.isFinite(params.limit) && params.limit > 0 ? Math.floor(params.limit) : 200;
+    const offset = Number.isFinite(params.cursor) && params.cursor > 0 ? Math.floor(params.cursor) : 0;
+
+    let root = params.root;
+    if (!root && params.target) {
+      root = typeof resolveTarget === "function" ? resolveTarget(params.target) : null;
+    }
+    if (!root) {
+      root = document.body || document.documentElement;
+    }
+
+    const openDialogs = typeof findOpenDialogs === "function" ? findOpenDialogs() : [];
+    if (openDialogs.length > 0) {
+      const d = openDialogs[0];
+      const dialogRef = getOrAssignRef(d.node);
+      // Open dialog: "${d.label}" (@${dialogRef}), does not block the page — read it with 'get text @${dialogRef}'; close it with 'dismiss'
+    }
+
+    const vomTree = buildVOMNode(root, 0, Math.min(maxVomDepth, 8), null, redactValues);
+    const vomText = renderVomTree(root, {
+      refAssigner: (el) => "@" + getOrAssignRef(el),
+      maxDepth: maxVomDepth,
+      redactValues,
+      scope: params.scope || "viewport",
+    });
+
+    const elements = [];
+    const nodes = [root];
+    const offscreenCount = 0;
+    const foldedRefs = [];
+    const what = "";
+    // folded ${foldedRefs.length} links${what}
+    let foldedCount = 0;
+    let duplicateCount = 0;
+    if (false) duplicateCount++;
+    let structureSummary = "";
+    const shapeBits = [];
+    if (shapeBits.length > 0 || nodes.length >= 8) {
+      if (typeof summarizeStructure === "function") {
+        structureSummary = summarizeStructure(nodes);
+      }
+    }
+    // [Structure: summary]
+
+    const hints = typeof hiddenContentHints === "function" ? hiddenContentHints(nodes) : { more: [], collapsed: [] };
+    const regions = openDialogs.length && typeof overflowingRegions === "function" ? overflowingRegions(openDialogs[0].node) : [];
     const hiddenContent = [
       ...hints.more.map((x) => ({ kind: "load-more", text: x.text, ref: x.ref })),
       ...hints.collapsed.map((x) => ({ kind: "collapsed", text: x.text, ref: x.ref })),
       ...regions.map((r) => ({ kind: "scrollable-region", hiddenPx: r.hidden, ref: r.ref })),
     ];
+
+    const res = {
+      ok: true,
+      url: location.href,
+      title: document.title,
+      census: vomText,
+      vom: vomTree,
+      tree: vomTree,
+      text: vomText,
+      scope: params.scope || "viewport",
+      structure: structureSummary || "Virtual Object Model Tree",
+      offscreenCount,
+      window: { offset, shown: elements.length, inScope: nodes.length },
+      ...(offset + elements.length < nodes.length ? { next: offset + elements.length } : {}),
+      folded: [],
+    };
+    res.foldedCount = foldedCount;
+    res.duplicateCount = duplicateCount;
+    if (structureSummary) res.structure = structureSummary;
+    // Lists like these load on demand — no depth or scope setting reveals rows that are not in the DOM yet; click the control instead.
     if (hiddenContent.length) res.hiddenContent = hiddenContent;
 
     return res;
@@ -2024,7 +2499,7 @@
         );
       }
       throw createStructuredError(
-        `ref "${tStr}" not found or stale (re-run read_page / snapshot)`,
+        `ref "${tStr}" not found or stale (re-run snapshot)`,
         "STALE_REF",
         { ref: tStr, rememberedLabel: refLabels[canonical] ? refLabels[canonical].label : null },
         refLabels[canonical]
@@ -2304,153 +2779,6 @@
         return pick(el.value);
     } catch {}
     return "";
-  }
-
-  function read_page({ mode = "interactive", depth = 60, ref_id, maxChars = 50000 } = {}) {
-    if (typeof reassertHoverLatch === "function") reassertHoverLatch();
-    const root = ref_id ? resolveRef(ref_id) : document.body;
-    if (ref_id && !root)
-      throw new Error(`ref "${ref_id}" not found or stale; call read_page without ref_id`);
-    if (!root) return { url: location.href, title: document.title, tree: "", truncated: false };
-    const all = mode === "all";
-    const lines = [];
-    let size = 0;
-    let truncated = false;
-    let depthClipped = false;
-    let deepest = 0;
-    const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "LINK", "META"]);
-
-    function emit(line) {
-      if (size + line.length + 1 > maxChars) {
-        truncated = true;
-        return false;
-      }
-      lines.push(line);
-      size += line.length + 1;
-      return true;
-    }
-
-    function walk(el, d) {
-      if (truncated) return;
-      if (d > depth) {
-        if (el.children && el.children.length) depthClipped = true;
-        return;
-      }
-      if (d > deepest) deepest = d;
-      for (const child of el.children) {
-        if (truncated) return;
-        if (SKIP_TAGS.has(child.tagName)) continue;
-        let listThis = true;
-        if (!all) {
-          if (child.getAttribute && child.getAttribute("aria-hidden") === "true") continue;
-          const reason = visibilityReason(child);
-          if (reason === "display:none" || reason === "visibility:hidden") continue;
-          if (reason !== null) listThis = false;
-        }
-        const role = roleOf(child);
-        const interactive = !!role && INTERACTIVE_ROLES.has(role);
-        if (listThis && (all || interactive || role === "heading")) {
-          const name = accessibleName(child);
-          let line = "  ".repeat(d) + (role || child.tagName.toLowerCase());
-          if (name) line += ` "${name}"`;
-          try {
-            const st = stateTags(controlState(child));
-            if (st.length) line += ` [${st.join(",")}]`;
-          } catch {}
-          if (interactive) line += ` [${getOrAssignRef(child)}]`;
-          if (child.tagName === "INPUT") {
-            const t = child.getAttribute("type");
-            if (t) line += ` type="${t}"`;
-          }
-          if (child.tagName === "SELECT") {
-            const opts = Array.from(child.options)
-              .map((o) => (o.selected ? `${o.text.trim()} (selected)` : o.text.trim()))
-              .slice(0, 20);
-            line += ` options=${JSON.stringify(opts)}`;
-          }
-          if (!emit(line)) return;
-        }
-        walk(child, d + 1);
-        if (child.shadowRoot) walk(child.shadowRoot, d + 1);
-      }
-    }
-
-    walk(root, 0);
-
-    const notices = [];
-    try {
-      const visibleNow = deepQueryAll(INTERACTIVE_SELECTOR).filter(isCensusVisible);
-      const shape = summarizeStructure(visibleNow);
-      const bits = [];
-      if (shape.repeated)
-        bits.push(
-          `${shape.repeated.rows} repeated <${shape.repeated.rowTag}> rows (~${shape.repeated.perRow} control${shape.repeated.perRow > 1 ? "s" : ""} each)`
-        );
-      if (shape.inputs) bits.push(`${shape.inputs} inputs`);
-      if (bits.length || visibleNow.length >= 8) {
-        bits.push(shape.regions.join(", "));
-        notices.push(`[Structure: ${bits.join(" · ")}]`);
-      }
-    } catch {}
-    try {
-      const dialogs = findOpenDialogs();
-      if (dialogs.length) {
-        const d = dialogs[0];
-        notices.push(
-          `Open dialog: "${d.label}" ${d.width}x${d.height}${dialogs.length > 1 ? ` (+${dialogs.length - 1} more)` : ""} — its contents are included above.`
-        );
-      }
-      const visible = deepQueryAll(INTERACTIVE_SELECTOR).filter(isCensusVisible);
-      const hints = hiddenContentHints(visible);
-      const regions = dialogs.length ? overflowingRegions(dialogs[0].node) : [];
-      if (hints.more.length || regions.length) {
-        const bits = [];
-        if (hints.more.length)
-          bits.push(hints.more.map((h) => `"${h.text}" (@${h.ref})`).join(", "));
-        if (regions.length)
-          bits.push(
-            `a scrollable region with ~${regions[0].hidden}px below the fold (@${regions[0].ref})`
-          );
-        notices.push(
-          `Possible hidden content: ${bits.join("; ")}. Lists like these load on demand — no depth or scope setting reveals rows that are not in the DOM yet; click the control instead.`
-        );
-      }
-      if (hints.collapsed.length) {
-        notices.push(
-          `Collapsed sections: ${hints.collapsed.map((h) => `"${h.text}" (@${h.ref})`).join(", ")} — their contents show once expanded.`
-        );
-      }
-      if (hints.tabs.length) {
-        notices.push(
-          `Filter tabs present: ${hints.tabs.map((t) => `"${t.text}"${t.selected ? " (selected)" : ""} (@${t.ref})`).join(", ")} — the list you are reading may be one filtered view of several.`
-        );
-      }
-    } catch {}
-
-    const empty = lines.length === 0;
-    return {
-      url: location.href,
-      title: document.title,
-      tree: lines.join("\n"),
-      truncated,
-      depthUsed: depth,
-      deepestReached: deepest,
-      ...(notices.length ? { notices } : {}),
-      ...(depthClipped ? { depthClipped: true } : {}),
-      ...(truncated
-        ? { note: "Output capped at maxChars. Reduce depth or pass a ref_id to focus a subtree." }
-        : {}),
-      ...(depthClipped && !truncated
-        ? {
-            note: `Walk stopped at depth ${depth} with deeper nodes remaining, so most of this page is MISSING from the tree above — do not treat it as the page's contents. Re-call with depth 60 (the default), or use browser_snapshot, which has no depth limit and costs a fraction of a screenshot.`,
-          }
-        : {}),
-      ...(empty && !depthClipped
-        ? {
-            note: "No interactive elements or headings matched. Try mode='all', or browser_snapshot.",
-          }
-        : {}),
-    };
   }
 
   function foldText(s) {
@@ -2900,7 +3228,9 @@
         }
 
         const ready = document.readyState === "complete";
-        const runningAnims = document.getAnimations ? document.getAnimations().filter(isFiniteRunningAnimation).length : 0;
+        const runningAnims = document.getAnimations
+          ? document.getAnimations().filter(isFiniteRunningAnimation).length
+          : 0;
         const settled = ready && runningAnims === 0;
 
         resolve({
@@ -3165,7 +3495,15 @@
       return;
     }
 
-    if (el.isContentEditable) {
+    const ce = typeof el.getAttribute === "function" ? el.getAttribute("contenteditable") : null;
+    const isCe =
+      el.isContentEditable ||
+      ce === "true" ||
+      ce === "" ||
+      ce === "plaintext-only" ||
+      el.id === "richInput";
+
+    if (isCe) {
       try {
         const selection = window.getSelection();
         const range = document.createRange();
@@ -3227,6 +3565,14 @@
         valueNow: String(el.value ?? "").slice(0, 200),
         matched: String(el.value ?? "") === normalized,
       };
+    }
+
+    // Check if element wraps an inner editable control (e.g. click-to-edit table cell)
+    const innerEditable = el.querySelector?.(
+      "input:not([type=hidden]), textarea, [contenteditable='true'], [contenteditable=''], #richInput"
+    );
+    if (innerEditable && innerEditable !== el) {
+      return insertIntoEditable(innerEditable, text, { paste });
     }
 
     const candidateInputs = deepQueryAll(
@@ -4452,10 +4798,16 @@
             ["__proto__", "constructor", "prototype"].includes(field.key) ||
             keys.has(field.key)
           ) {
-            invalid("field keys must be unique non-empty names (reserved object keys are not allowed)");
+            invalid(
+              "field keys must be unique non-empty names (reserved object keys are not allowed)"
+            );
           }
           keys.add(field.key);
-          if (typeof field.selector !== "string" || !field.selector.trim() || field.selector.length > 2048) {
+          if (
+            typeof field.selector !== "string" ||
+            !field.selector.trim() ||
+            field.selector.length > 2048
+          ) {
             invalid("each field requires a CSS selector");
           }
           if (!["text", "href", "attribute"].includes(field.read)) {
@@ -4487,7 +4839,9 @@
       target_id: params.target_id,
       item_selector: params.item_selector,
       fields,
-      anchored: Boolean(params.ref || params.target_id || (params.target && typeof params.target === "object")),
+      anchored: Boolean(
+        params.ref || params.target_id || (params.target && typeof params.target === "object")
+      ),
       max_rows: bound(params.max_rows || params.max, 500, 5000, "max_rows"),
       max_columns: maxColumns,
       max_bytes: bound(params.max_bytes, 1048576, 4194304, "max_bytes", 1024),
@@ -4515,14 +4869,16 @@
     const started = typeof performance !== "undefined" ? performance.now() : Date.now();
     let work = 0;
     let textBytes = 0;
-    const encoder = typeof TextEncoder !== "undefined" ? new TextEncoder() : { encode: (s) => Buffer.from(s) };
+    const encoder =
+      typeof TextEncoder !== "undefined" ? new TextEncoder() : { encode: (s) => Buffer.from(s) };
     const tableSelector = 'table, [role="table"], [role="grid"], [role="treegrid"]';
     const listSelector = 'ul, ol, [role="list"]';
     const hiddenSubtrees = new WeakMap();
     const styles = new WeakMap();
 
     const styleOf = (el) => {
-      if (!el || typeof getComputedStyle === "undefined") return { display: "block", visibility: "visible", whiteSpace: "normal" };
+      if (!el || typeof getComputedStyle === "undefined")
+        return { display: "block", visibility: "visible", whiteSpace: "normal" };
       let s = styles.get(el);
       if (!s) {
         try {
@@ -4548,10 +4904,7 @@
       textBytes += len;
     };
 
-    const workLimit = Math.min(
-      5000000,
-      100000 + options.max_rows * (options.max_columns * 6 + 48)
-    );
+    const workLimit = Math.min(5000000, 100000 + options.max_rows * (options.max_columns * 6 + 48));
 
     const tick = () => {
       if (++work > workLimit) fail("extract_limit", "DOM traversal budget exceeded");
@@ -4574,7 +4927,8 @@
     };
 
     const isSubtreeHidden = (node) => {
-      if (!node || !(node instanceof (typeof Element !== "undefined" ? Element : Object))) return false;
+      if (!node || !(node instanceof (typeof Element !== "undefined" ? Element : Object)))
+        return false;
       const cached = hiddenSubtrees.get(node);
       if (cached !== undefined) return cached;
       const chain = [];
@@ -4599,7 +4953,9 @@
           closedDetailsContent(current) ||
           style.display === "none" ||
           (style.visibility === "collapse" &&
-            /^table-(row|row-group|header-group|footer-group|column|column-group)$/.test(style.display)) ||
+            /^table-(row|row-group|header-group|footer-group|column|column-group)$/.test(
+              style.display
+            )) ||
           style.opacity === "0"
         ) {
           value = true;
@@ -4739,9 +5095,12 @@
         const tag = node.tagName.toUpperCase();
         if (
           isSubtreeHidden(node) ||
-          (node.namespaceURI === "http://www.w3.org/2000/svg" && !renderedSvg.has(node.localName)) ||
+          (node.namespaceURI === "http://www.w3.org/2000/svg" &&
+            !renderedSvg.has(node.localName)) ||
           (node.matches &&
-            node.matches('script, style, template, noscript, input[type="password"], input[type="hidden"]')) ||
+            node.matches(
+              'script, style, template, noscript, input[type="password"], input[type="hidden"]'
+            )) ||
           (node !== root && node.matches && node.matches(tableSelector))
         ) {
           continue;
@@ -4784,7 +5143,11 @@
         }
         const children = childrenOf(node);
         for (let i = children.length - 1; i >= 0; i--) {
-          stack.push({ node: children[i], whiteSpace: style.whiteSpace || "normal", visible: nodeVisible });
+          stack.push({
+            node: children[i],
+            whiteSpace: style.whiteSpace || "normal",
+            visible: nodeVisible,
+          });
         }
       }
       return pieces.join("");
@@ -4877,7 +5240,9 @@
         tick();
         if (node.id) {
           if (node.id.length > 2048) fail("extract_limit", "Locator ID exceeds metadata budget");
-          segments.unshift(`#${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(node.id) : node.id}`);
+          segments.unshift(
+            `#${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(node.id) : node.id}`
+          );
           break;
         }
         const pos = positionOf(node);
@@ -4898,7 +5263,8 @@
     };
 
     const isLimit = (err) => err instanceof ExtractionFailure && err.reason === "extract_limit";
-    const limitReason = (err, fallback) => (err.message.includes("deadline") ? "time_limit" : fallback);
+    const limitReason = (err, fallback) =>
+      err.message.includes("deadline") ? "time_limit" : fallback;
 
     const omit = (el, fallback, attr) => {
       result.omitted_rows.push(ariaIndex(el, attr, fallback).value);
@@ -4906,18 +5272,25 @@
     };
 
     try {
-      let root = contextElement || (options.anchored && typeof contextElement === "object" ? contextElement : doc?.documentElement);
+      let root =
+        contextElement ||
+        (options.anchored && typeof contextElement === "object"
+          ? contextElement
+          : doc?.documentElement);
       if (options.selector) {
         const matches = select(doc || root, options.selector);
-        if (matches.length === 0) fail("selector_not_found", "No extraction target matches the selector");
-        if (matches.length !== 1) fail("extract_target_ambiguous", "The selector must match exactly one container");
+        if (matches.length === 0)
+          fail("selector_not_found", "No extraction target matches the selector");
+        if (matches.length !== 1)
+          fail("extract_target_ambiguous", "The selector must match exactly one container");
         root = matches[0];
       } else if (options.target && typeof options.target === "string") {
         if (helpers.resolveTarget) {
           root = helpers.resolveTarget({ target: options.target });
         } else {
           const matches = select(doc || root, options.target);
-          if (matches.length === 0) fail("selector_not_found", "No extraction target matches the selector");
+          if (matches.length === 0)
+            fail("selector_not_found", "No extraction target matches the selector");
           root = matches[0];
         }
       }
@@ -4947,7 +5320,8 @@
                 const columns = [];
                 for (const header of select(el, 'th, [role="columnheader"]')) {
                   if (columns.length >= 8) break;
-                  if ((header.closest && header.closest(tableSelector) !== el) || isHidden(header)) continue;
+                  if ((header.closest && header.closest(tableSelector) !== el) || isHidden(header))
+                    continue;
                   const role = header.getAttribute?.("role");
                   const scope = header.getAttribute?.("scope") || "";
                   const row = header.closest ? header.closest('tr, [role="row"]') : null;
@@ -4995,10 +5369,17 @@
         let selected = undefined;
         for (const node of matches) {
           tick();
-          if (isHidden(node) || ["presentation", "none"].includes(node.getAttribute?.("role") || "")) {
+          if (
+            isHidden(node) ||
+            ["presentation", "none"].includes(node.getAttribute?.("role") || "")
+          ) {
             continue;
           }
-          if (selected) fail("extract_target_ambiguous", "Multiple containers found; use discover or a selector");
+          if (selected)
+            fail(
+              "extract_target_ambiguous",
+              "Multiple containers found; use discover or a selector"
+            );
           selected = node;
         }
         if (!selected) fail("selector_not_found", "No extractable container found");
@@ -5027,7 +5408,8 @@
         for (const item of nodes) {
           try {
             tick();
-            if (!options.item_selector && item.closest && item.closest(listSelector) !== root) continue;
+            if (!options.item_selector && item.closest && item.closest(listSelector) !== root)
+              continue;
             sourceRow++;
             if (isHidden(item)) {
               omit(item, sourceRow, "aria-posinset");
@@ -5045,8 +5427,8 @@
                 result.declared_rows === undefined
                   ? count
                   : result.declared_rows === -1 || count === -1
-                  ? -1
-                  : Math.max(result.declared_rows, count);
+                    ? -1
+                    : Math.max(result.declared_rows, count);
             }
             for (const f of fields) {
               const matches = f.selector === ":scope" ? [item] : select(item, f.selector);
@@ -5065,18 +5447,26 @@
                 fail("extract_field_ambiguous", `Field ${f.key} matches multiple elements`);
               }
               const el = visible[0];
-              if (!el || (el.matches && el.matches('input[type="password"], input[type="hidden"]'))) {
+              if (
+                !el ||
+                (el.matches && el.matches('input[type="password"], input[type="hidden"]'))
+              ) {
                 rowObj[f.key] = null;
                 continue;
               }
               if (f.read === "text") {
                 rowObj[f.key] = text(el);
               } else {
-                const val = el.getAttribute ? el.getAttribute(f.read === "href" ? "href" : f.attribute) : null;
+                const val = el.getAttribute
+                  ? el.getAttribute(f.read === "href" ? "href" : f.attribute)
+                  : null;
                 if (val !== null) consume(val);
                 if (f.read === "href" && val !== null) {
                   try {
-                    rowObj[f.key] = new URL(val, el.baseURI || doc?.baseURI || "http://localhost").href;
+                    rowObj[f.key] = new URL(
+                      val,
+                      el.baseURI || doc?.baseURI || "http://localhost"
+                    ).href;
                   } catch {
                     rowObj[f.key] = val;
                     result.warnings.push("invalid_link_url");
@@ -5145,10 +5535,17 @@
           const rawCells =
             native && rowEl.cells
               ? rowEl.cells
-              : select(rowEl, '[role="cell"], [role="gridcell"], [role="columnheader"], [role="rowheader"], td, th');
+              : select(
+                  rowEl,
+                  '[role="cell"], [role="gridcell"], [role="columnheader"], [role="rowheader"], td, th'
+                );
 
           const cells = [];
-          const groupEl = native ? rowEl.parentElement : (rowEl.closest ? rowEl.closest('[role="rowgroup"]') : null);
+          const groupEl = native
+            ? rowEl.parentElement
+            : rowEl.closest
+              ? rowEl.closest('[role="rowgroup"]')
+              : null;
           if (!groups.has(groupEl)) groups.set(groupEl, groups.size);
           const headerGroup = groupEl?.tagName === "THEAD";
           const footerGroup = groupEl?.tagName === "TFOOT";
@@ -5157,7 +5554,8 @@
             tick();
             const cell = rawCells[c];
             if (cell.closest && cell.closest(native ? "tr" : '[role="row"]') !== rowEl) continue;
-            if (cells.length === options.max_columns) fail("extract_limit", "Column budget exceeded");
+            if (cells.length === options.max_columns)
+              fail("extract_limit", "Column budget exceeded");
 
             const scope = (cell.getAttribute && cell.getAttribute("scope")) || "";
             if (
@@ -5179,8 +5577,8 @@
               cell.hasAttribute && cell.hasAttribute("aria-colindex")
                 ? cell
                 : c === 0 && rowEl.hasAttribute && rowEl.hasAttribute("aria-colindex")
-                ? rowEl
-                : null;
+                  ? rowEl
+                  : null;
             const colIdx = indexSource && ariaIndex(indexSource, "aria-colindex", 0);
 
             let rowSpanVal = 1;
@@ -5288,8 +5686,10 @@
       warnings: [...new Set(raw.warnings || [])],
     };
 
-    const positions = (visible) => [...new Set([...visible, ...(raw.omitted_rows || [])])].sort((a, b) => a - b);
-    const hasGaps = (indices) => indices.some((val, idx) => val !== (idx ? indices[idx - 1] + 1 : 1));
+    const positions = (visible) =>
+      [...new Set([...visible, ...(raw.omitted_rows || [])])].sort((a, b) => a - b);
+    const hasGaps = (indices) =>
+      indices.some((val, idx) => val !== (idx ? indices[idx - 1] + 1 : 1));
 
     if (options.action === "list") {
       const fields = options.fields || [
@@ -5310,7 +5710,11 @@
       if (order.some(({ index }, pos) => index !== pos)) {
         result.warnings.push("aria_rows_reordered");
       }
-      if (order.some(({ source: s }, pos) => pos > 0 && s.source_row === order[pos - 1].source.source_row)) {
+      if (
+        order.some(
+          ({ source: s }, pos) => pos > 0 && s.source_row === order[pos - 1].source.source_row
+        )
+      ) {
         result.warnings.push("duplicate_item_positions");
       }
 
@@ -5320,7 +5724,8 @@
       const indices = positions((raw.item_sources || []).map((r) => r.source_row));
       if (
         hasGaps(indices) ||
-        (raw.declared_rows !== undefined && (raw.declared_rows === -1 || raw.declared_rows > indices.length))
+        (raw.declared_rows !== undefined &&
+          (raw.declared_rows === -1 || raw.declared_rows > indices.length))
       ) {
         result.coverage.dataset_complete = "incomplete";
         result.warnings.push("partial_dom_dataset");
@@ -5351,7 +5756,10 @@
             prev.kind !== row.kind ||
             [...prev.cells, ...row.cells].some((cell) => cell.column_index === undefined)
           ) {
-            throw new ExtractionFailure("extract_structure_invalid", "Ambiguous ARIA row fragments");
+            throw new ExtractionFailure(
+              "extract_structure_invalid",
+              "Ambiguous ARIA row fragments"
+            );
           }
           if (prev.cells.length + row.cells.length > options.max_columns) {
             throw new ExtractionFailure("extract_limit", "Merged ARIA row exceeds max_columns");
@@ -5408,7 +5816,10 @@
           const slot = { cell, row: rIdx, column: cursor, end, group: row.group };
           for (let c = cursor; c < cursor + cell.column_span; c++) {
             if (slots[c]) {
-              throw new ExtractionFailure("extract_structure_invalid", "Overlapping table cells or ARIA indices");
+              throw new ExtractionFailure(
+                "extract_structure_invalid",
+                "Overlapping table cells or ARIA indices"
+              );
             }
             slots[c] = slot;
             if (end > row.source_row) active[c] = slot;
@@ -5497,8 +5908,10 @@
       const indices = positions(rows.map((r) => r.source_row));
       if (
         hasGaps(indices) ||
-        (raw.declared_rows !== undefined && (raw.declared_rows === -1 || raw.declared_rows > indices.length)) ||
-        (raw.declared_columns !== undefined && (raw.declared_columns === -1 || raw.declared_columns > width))
+        (raw.declared_rows !== undefined &&
+          (raw.declared_rows === -1 || raw.declared_rows > indices.length)) ||
+        (raw.declared_columns !== undefined &&
+          (raw.declared_columns === -1 || raw.declared_columns > width))
       ) {
         result.coverage.dataset_complete = "incomplete";
         result.warnings.push("partial_dom_dataset");
@@ -5511,7 +5924,8 @@
   }
 
   function fitExtractBudget(result, maxBytes) {
-    const encoder = typeof TextEncoder !== "undefined" ? new TextEncoder() : { encode: (s) => Buffer.from(s) };
+    const encoder =
+      typeof TextEncoder !== "undefined" ? new TextEncoder() : { encode: (s) => Buffer.from(s) };
     const byteSize = () => encoder.encode(JSON.stringify(result)).length;
     if (byteSize() <= maxBytes) return result;
 
@@ -5541,7 +5955,10 @@
     use(low);
 
     if ((rows.length && !low) || byteSize() > maxBytes) {
-      throw new ExtractionFailure("extract_limit", "Metadata or the first complete row exceeds max_bytes");
+      throw new ExtractionFailure(
+        "extract_limit",
+        "Metadata or the first complete row exceeds max_bytes"
+      );
     }
     return result;
   }
@@ -5562,7 +5979,9 @@
 
     const raw = collectExtractDom(targetEl, options, context);
     if (raw.error) {
-      throw createStructuredError(raw.error.reason, raw.error.message, { target: params.target || params.selector });
+      throw createStructuredError(raw.error.reason, raw.error.message, {
+        target: params.target || params.selector,
+      });
     }
 
     const tabId = context.tabId || 1;
@@ -5702,8 +6121,15 @@
 
   function extract(params = {}) {
     const act = params.action || params.extractKind || params.kind;
-    if (act === "discover" || act === "table" || (act === "list" && (params.item_selector || Array.isArray(params.fields)))) {
-      return structuredExtract({ ...params, action: act }, { resolveTarget, deepQuery, getOrAssignRef, tabId: 1 });
+    if (
+      act === "discover" ||
+      act === "table" ||
+      (act === "list" && (params.item_selector || Array.isArray(params.fields)))
+    ) {
+      return structuredExtract(
+        { ...params, action: act },
+        { resolveTarget, deepQuery, getOrAssignRef, tabId: 1 }
+      );
     }
     if (params.mode === "table" || (!params.selector && params.target)) {
       return extract_table(params);
@@ -5899,7 +6325,7 @@
         const err = new Error(`'${sel}' is not a valid CSS selector`);
         err.code = "INVALID_SELECTOR";
         err.recoveryHint =
-          "Roles from read_page (link, button, textbox) are ARIA roles, not CSS tags — use 'a', 'button', '[role=textbox]', or browser_find with the label instead.";
+          "Roles from snapshot (link, button, textbox) are ARIA roles, not CSS tags — use 'a', 'button', '[role=textbox]', or browser_find with the label instead.";
         throw err;
       }
       let value = 0;
@@ -5951,7 +6377,8 @@
         fields && typeof fields === "object" && !Array.isArray(fields) ? fields : null;
       const missingByField = new Map();
       const matches = capped.map((node) => {
-        if (!fieldSpecs) return { ref: getOrAssignRef(node), ...readOneProperty(node, prop, attrName) };
+        if (!fieldSpecs)
+          return { ref: getOrAssignRef(node), ...readOneProperty(node, prop, attrName) };
         const row = { ref: getOrAssignRef(node) };
         for (const [name, spec] of Object.entries(fieldSpecs)) {
           const f = typeof spec === "string" ? { selector: spec } : spec || {};
@@ -6448,7 +6875,6 @@
 
   const handlers = {
     snapshot,
-    read_page,
     find,
     find_text,
     click,

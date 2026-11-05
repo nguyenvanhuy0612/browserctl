@@ -47,11 +47,72 @@ export function setNativeValue(element, value, prop = "value") {
  * @returns {{ valueNow: string, matched: boolean }}
  */
 export function insertIntoEditable(element, text) {
+  if (!element) return { matched: false };
   const normalized = String(text ?? "").replace(/\r\n/g, "\n");
   if (typeof element.focus === "function") {
     try {
       element.focus();
     } catch {}
+  }
+
+  // Handle contenteditable and rich input elements
+  const isCe =
+    element.isContentEditable === true ||
+    element.getAttribute?.("contenteditable") === "true" ||
+    element.getAttribute?.("contenteditable") === "" ||
+    element.getAttribute?.("contenteditable") === "plaintext-only" ||
+    element.id === "richInput";
+
+  if (isCe) {
+    if (typeof window !== "undefined" && window.getSelection && typeof document !== "undefined") {
+      try {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      } catch {}
+    }
+
+    let inserted = false;
+    if (typeof document !== "undefined" && typeof document.execCommand === "function") {
+      try {
+        inserted = document.execCommand("insertText", false, normalized) === true;
+      } catch {}
+    }
+    if (!inserted) {
+      element.textContent = normalized;
+    }
+
+    if (typeof element.dispatchEvent === "function") {
+      try {
+        const Ev =
+          typeof Event !== "undefined"
+            ? Event
+            : function (t) {
+                this.type = t;
+              };
+        element.dispatchEvent(new Ev("input", { bubbles: true, composed: true }));
+        element.dispatchEvent(new Ev("change", { bubbles: true }));
+      } catch {}
+    }
+
+    const textNow = element.textContent !== undefined ? element.textContent : normalized;
+    return {
+      valueNow: textNow,
+      textNow,
+      matched: textNow === normalized,
+    };
+  }
+
+  // If container wraps an inner editable, delegate to it
+  if (typeof element.querySelector === "function") {
+    const inner = element.querySelector(
+      "input:not([type=hidden]), textarea, [contenteditable='true'], [contenteditable=''], #richInput"
+    );
+    if (inner && inner !== element) {
+      return insertIntoEditable(inner, text);
+    }
   }
 
   setNativeValue(element, normalized, "value");
@@ -72,6 +133,7 @@ export function insertIntoEditable(element, text) {
   const valueNow = element.value !== undefined ? element.value : normalized;
   return {
     valueNow,
+    textNow: valueNow,
     matched: valueNow === normalized,
   };
 }
@@ -97,6 +159,18 @@ export function insertIntoEditable(element, text) {
 export function setElementValue(element, value) {
   if (!element) return;
   const normalizedValue = typeof value === "string" ? value.replace(/\r\n/g, "\n") : value;
+
+  const isCe =
+    element.isContentEditable === true ||
+    element.getAttribute?.("contenteditable") === "true" ||
+    element.getAttribute?.("contenteditable") === "" ||
+    element.getAttribute?.("contenteditable") === "plaintext-only" ||
+    element.id === "richInput";
+
+  if (isCe) {
+    insertIntoEditable(element, normalizedValue);
+    return;
+  }
 
   // 1. Focus element
   if (typeof element.focus === "function") {

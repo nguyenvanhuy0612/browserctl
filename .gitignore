@@ -3,6 +3,7 @@ npm-debug.log*
 *.tgz
 
 # Local runtime artefacts
+.agents/
 temp/
 .env
 *.log

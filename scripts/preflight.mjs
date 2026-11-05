@@ -749,8 +749,7 @@ gate("the loop is stated, and group notes are generated", () => {
 gate("the intent index is not stale", () => {
   const src = read("mcp/index.js");
   // Not every core tool: the instructions carry the tools an agent needs to START, and the
-  // rest live in their own descriptions — the same division playwright-mcp makes, and the
-  // reason its server instructions are empty. What must never go missing is the entry point
+  // rest live in their own descriptions. What must never go missing is the entry point
   // for each kind of work.
   const iStart2 = src.indexOf("const INSTRUCTIONS = `");
   const index = src.slice(iStart2, src.indexOf("`;", iStart2));

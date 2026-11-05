@@ -364,8 +364,11 @@ const CASES = {
     );
     const { code, stdout } = await runScript();
     assert.equal(code, 1, stdout);
-    assert.match(stdout, /\[FAIL\] edge-1: #count reads 2 — read back "0", expected "2"/);
-    assert.doesNotMatch(stdout, /\[FAIL\] chrome-1/);
+    assert.match(
+      stdout,
+      new RegExp(`\\[FAIL\\] ${fakes[1].alias}: #count reads 2 — read back "0", expected "2"`)
+    );
+    assert.doesNotMatch(stdout, new RegExp(`\\[FAIL\\] ${fakes[0].alias}`));
     assert.match(stdout, /\[PASS\] every opened tab is closed/);
     onlyOwnerTabsLeft(fakes);
   },

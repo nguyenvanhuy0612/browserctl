@@ -35,28 +35,39 @@ flowchart TD
 
 ---
 
-## 2. Census DOM Snapshot Engine (`extension/content/snapshot.js`)
+## 2. Unified VOM Snapshot Engine (`extension/content/snapshot.js`)
 
 ### 2.1 The `@e` Element Indexing Invariant
-- Interactive nodes (links, buttons, inputs, selects, textareas, elements with `role` or click listeners) are indexed sequentially as `@e1`, `@e2`, `@e3`, etc.
+- Interactive nodes (links, buttons, inputs, selects, textareas, elements with interactive ARIA roles or pointer affordances) are indexed sequentially as `@e1`, `@e2`, `@e3`, etc.
 - References using the deprecated `@ref` format are strictly forbidden and will fail schema validation.
 
-### 2.2 Pruning & Token Trimming Rules
-To keep agent prompt context small and token-efficient:
-1. **Visibility Pruning**: Skip elements with:
-   - `display: none`
-   - `visibility: hidden`
-   - `opacity: 0` (unless interactive child within)
-   - Zero bounding client rect (`width === 0 && height === 0`)
-   - `aria-hidden="true"`
-2. **Text Compaction**: Collapse redundant whitespace, strip script/style tags, and truncate text nodes longer than 150 characters with `...`.
-3. **Role & Attribute Normalization**: Emit accessible roles (`button`, `link`, `textbox`, `checkbox`, `combobox`) and essential states (`checked`, `disabled`, `expanded`, `selected`).
+### 2.2 Pruning, Visibility & Zero Content Loss Rules
+1. **Visibility Pruning**: Skip non-rendered and occluded elements:
+   - Elements with `display: none`, `visibility: hidden`, or `opacity: 0` (unless containing visible interactive children).
+   - Elements with zero bounding client rect (`width === 0 && height === 0`) and no children.
+   - Non-rendered elements: `<script>`, `<style>`, `<noscript>`, `<template>`, `<meta>`, `<link>`, `<head>`.
+2. **Container Collapsing**:
+   - Containers with `cursor: pointer` and compact text (< 100 chars) are recognized as buttons.
+   - Child decorative icons, spans, and svgs within a collapsed clickable button are suppressed to avoid token fragmentation.
+3. **Zero Content Loss**:
+   - All body prose, paragraphs, headings (`h1`–`h6`), and table cells are fully preserved in reading order.
+   - Text is NOT truncated with artificial `[+N chars]` markers.
+   - Passwords and sensitive input fields are redacted as `[REDACTED]`.
 
-### 2.3 Output Representation Formats
-The snapshot engine supports three output modes:
-1. **Compact Census Text (Default)**: Single line per interactive element with `@e` token and reading label. Optimized for minimum token consumption.
-2. **Structured Elements (`elements: true`)**: Flat JSON list of interactive element objects.
-3. **Virtual Object Model Tree (`format: "vom"`, Opt-in)**: Hierarchical node tree with viewport-relative bounding boxes (`rect: {x, y, w, h}`), parentage (`parentId`, `depth`), and layer classification (`layer: "page" | "modal" | "mask"`). Used when layout or occlusion diagnosis is requested. Retains unified `@e` identifiers; bounded by `maxDepth` (default: 8) and `redactValues: true`.
+### 2.3 Single Unified Output Format (Virtual Object Model Tree)
+The snapshot engine outputs a single unified indented text tree reflecting W3C Accessibility Tree semantics:
+- Root node: `- RootWebArea "<title>" [@e0]`
+- Semantic & interactive nodes: `- <role> "<accessible_name>" [@eN]` (indented with 2 spaces per depth level).
+- Leaf content prose: `- text: "<content>"`
+- Table cells: `- cell "<content>" [@eN]`
+
+### 2.4 Parameter Contract
+`browser_snapshot` exposes a minimal, clean parameter set:
+- `scope`: `"viewport"` (default, bounds to active viewport to prevent context overflow) | `"all"` (traverses entire document).
+- `target`: optional token (e.g. `"@e129"`) or CSS selector to scope the snapshot to a subtree.
+- `maxDepth`: optional number (default: 25) limiting recursion depth.
+- `limit`: optional number of controls per page.
+- `cursor`: optional offset index for pagination.
 
 ---
 

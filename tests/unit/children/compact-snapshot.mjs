@@ -69,25 +69,21 @@ const want = [
   "@e10 -> vote?id=1",
   '@e11 "say \\"hi\\""',
 ].join("\n");
-if (compact.folded !== want) fail("folded must be one line per control, every field kept:\n" + compact.folded);
-
-const full = JSON.parse((await call({ elements: true })).content[0].text);
-if (!Array.isArray(full.elements) || full.elements.length !== 4) fail("elements:true must keep every element");
-
-if (sent.at(-1).compact !== false) fail("elements:true must ask the extension for the full list");
+if (compact.folded !== want)
+  fail("folded must be one line per control, every field kept:\n" + compact.folded);
 
 for (const format of ["json", "pretty"]) {
   const out = JSON.parse((await call({ format })).content[0].text);
-  if ("elements" in out) fail(`format '${format}' must not change compactness: 'elements' came back`);
-  if (sent.at(-1).compact !== true) fail(`format '${format}' must ask the extension for a compact census`);
+  if ("elements" in out)
+    fail(`format '${format}' must not change compactness: 'elements' came back`);
+  if (sent.at(-1).compact !== true)
+    fail(`format '${format}' must ask the extension for a compact census`);
 }
-const fullJson = JSON.parse((await call({ format: "json", elements: true })).content[0].text);
-if (!Array.isArray(fullJson.elements)) fail("format 'json' with elements:true must keep every element");
 
 const sentBefore = sent.length;
 const refused = await call({ compact: false });
-if (!refused.isError || !/elements/.test(refused.content[0].text))
-  fail("'compact' must be refused with a pointer to 'elements': " + JSON.stringify(refused));
+if (!refused.isError || !/compact/.test(refused.content[0].text))
+  fail("'compact' must be refused: " + JSON.stringify(refused));
 if (sent.length !== sentBefore) fail("a refused 'compact' must not reach the bridge");
 
 const smart = (await call({ format: "smart" })).content[0].text;
@@ -105,20 +101,13 @@ for (const [what, needle] of [
   if (!smart.includes(needle)) fail(`the smart rendering lost ${what}:\n${smart}`);
 }
 
-// 'only' reaches the extension as the kinds asked for, and a kind outside the three is refused.
-await call({ only: ["fields", "buttons"] });
-if (JSON.stringify(sent.at(-1).only) !== '["fields","buttons"]')
-  fail("'only' must reach the extension unchanged: " + JSON.stringify(sent.at(-1)));
+// 'only' filter has been completely removed per spec; schema must not declare it, and handler must refuse it.
 const schema = server._registeredTools["browser_snapshot"].inputSchema;
-const parse = (v) => (typeof schema.safeParse === "function" ? schema : z.object(schema)).safeParse(v);
-if (parse({ only: ["images"] }).success) fail("an unknown kind in 'only' must be refused by the schema");
-if (parse({ only: [] }).success) fail("an empty 'only' must be refused by the schema");
-if (!parse({ only: ["links"] }).success) fail("a known kind in 'only' must be accepted");
-// 'raw' is the bare value of a result; a snapshot has none, and the old rendering answered with
-// the page text alone, without a single ref. The schema refuses it.
-if (parse({ format: "raw" }).success) fail("format 'raw' must be refused on a snapshot");
-for (const format of ["json", "pretty", "smart"])
-  if (!parse({ format }).success) fail(`format '${format}' must stay accepted`);
+if (schema.shape && "only" in schema.shape)
+  fail("the removed 'only' parameter must not exist in the schema");
+const badOnly = await call({ only: ["fields", "buttons"] });
+if (!badOnly.isError)
+  fail("the removed 'only' parameter must be refused by the handler: " + JSON.stringify(badOnly));
 
 console.log("COMPACT_SNAPSHOT_OK");
 process.exit(0);

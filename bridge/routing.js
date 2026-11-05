@@ -19,7 +19,6 @@ export const ID_ACTIONS = new Set(["switch_tab", "close_tab", "group_tab", "ungr
 // not on the list: the attach outlives the call and changes how the holder's tab behaves.
 export const READ_ACTIONS = new Set([
   "snapshot",
-  "read_page",
   "find",
   "find_text",
   "get_page_content",

@@ -525,7 +525,7 @@ test("TC-PROTO-03: Consolidated core profile tool descriptions and schemas <= 20
 
   const data = JSON.parse(res.stdout.trim());
   assert.equal(data.coreCount, 19, "Must have exactly 19 core tools registered");
-  assert.equal(data.total, 13515, "Baseline reading budget invariant must match 13,515 chars");
+  assert.equal(data.total, 13264, "Baseline reading budget invariant must match 13,264 chars");
   assert.ok(
     data.total <= AGENT_TEXT_BUDGET,
     `Core profile reading size ${data.total} exceeds ${AGENT_TEXT_BUDGET} character budget`

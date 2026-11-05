@@ -1,5 +1,5 @@
 // Comprehensive Structured Extraction Test Suite for browserctl.
-// Validates the full table, grid, list, and discovery engine ported and adapted from BrowserSkill:
+// Validates the full table, grid, list, and discovery engine:
 // - Native HTML <table> and ARIA [role="table|grid|treegrid"]
 // - Nested container boundary isolation (no leakage of child table cells)
 // - Multi-tier hierarchical headers (header_path) and explicit headers attribute

@@ -579,7 +579,7 @@ function snapshotNotes(obj) {
     out.push(
       `Open dialogs: ${dialogs.map((d) => label({ text: d.label, ref: d.ref })).join(", ")}`
     );
-  if (obj.text) out.push(`Page text: ${obj.text}`);
+  if (obj.text && obj.text !== obj.census) out.push(`Page text: ${obj.text}`);
   return out.length ? "\n\n" + out.join("\n") : "";
 }
 
@@ -784,7 +784,6 @@ const TOOL_CATEGORIES = {
   ],
   advanced: [
     "browser_find",
-    "browser_read_page",
     "browser_get_content",
     "browser_get_property",
     "browser_select_option",
@@ -883,7 +882,6 @@ ADVANCED ACTIONS (via browser_action({action, params}) or browser_load_tools):
     browser_get_property  single element text, value, html, box, attr, or count
     browser_find          locate controls by label or CSS returning @e tokens
     browser_get_content   full page readable prose/articles
-    browser_read_page     accessibility tree hierarchy
   ACTING:
     browser_fill_form     multi-field batch form filling (inputs, checks, radios, selects)
     browser_scroll        scroll window or overflow container (direction, amount, target)
@@ -895,7 +893,7 @@ ADVANCED ACTIONS (via browser_action({action, params}) or browser_load_tools):
 
 ${loadableCount} further capabilities — network capture, HAR, cookies, storage, console, CDP, recording, PDF —
 are loadable via browser_load_tools({profile}), or callable instantly via browser_action({action, params}).
-Run browser_action() bare to list the 80-action catalogue before concluding something is impossible.
+Run browser_action() bare to list the 79-action catalogue before concluding something is impossible.
 
 FALLBACK:
 browser_evaluate works for arbitrary JS when standard tools cannot express the logic. Prefer dedicated tools first:
@@ -999,11 +997,6 @@ const TARGET_REDIRECT = {
 };
 
 const PARAM_REDIRECTS = {
-  browser_snapshot: {
-    mode: "browser_snapshot has no 'mode'. Use scope='viewport'|'all' for how much of the page, elements:true for the structured list.",
-    compact:
-      "the census is always compact. elements:true returns every element as structured JSON instead.",
-  },
   browser_click: TARGET_REDIRECT,
   browser_type: TARGET_REDIRECT,
   browser_select_option: TARGET_REDIRECT,
@@ -1019,7 +1012,6 @@ const PARAM_REDIRECTS = {
   browser_take_screenshot: TARGET_REDIRECT,
   browser_element_screenshot: TARGET_REDIRECT,
   browser_describe_element: TARGET_REDIRECT,
-  browser_read_page: { ...TARGET_REDIRECT, ref_id: "the subtree is chosen with target: '@e1'." },
   browser_find: {
     text: "browser_find searches with 'query'. 'text' is what browser_type writes, so the two never share a name.",
   },
@@ -1401,7 +1393,7 @@ server.registerTool(
     title: "Universal Browser Action Dispatcher",
     description:
       "Dispatch any protocol action by name without loading its profile: browser_action({action, params}).\n" +
-      "Called with no arguments it prints the catalogue of all 80 actions.",
+      "Called with no arguments it prints the catalogue of all 79 actions.",
     inputSchema: {
       action: z
         .string()
@@ -1594,9 +1586,9 @@ server.registerTool(
   {
     title: "Snapshot page controls and layout",
     description:
-      "Capture text census of interactive controls with stable tokens (@e1, @e2) in reading order.\n" +
+      "Capture structured W3C Accessibility Tree with interactive @e tokens in reading order.\n" +
       "Use scope: 'all' for every element currently in the DOM when a count or complete list is needed; note it is not everything the page can show if lazy lists load on demand.\n" +
-      "Hoists key inputs to top; dense runs are folded. Returns open dialogs, offscreenCount, and cursor 'next'. For tables, prefer browser_extract.",
+      "Preserves full page prose, headings, and data tables with zero content loss. Hoists key inputs to top; dense runs are folded. For tables, prefer browser_extract.",
     inputSchema: {
       scope: z
         .enum(["viewport", "all"])
@@ -1604,74 +1596,31 @@ server.registerTool(
         .describe(
           "'viewport' (default: visible elements only) or 'all' (entire DOM, including offscreen content)."
         ),
-      only: z
-        .array(z.enum(["fields", "buttons", "links"]))
-        .min(1)
+      target: z
+        .string()
         .optional()
-        .describe(
-          "Filter controls: 'fields' (inputs, textareas, selects), 'buttons' (buttons, tabs), 'links' (navigation)."
-        ),
-      elements: z
-        .boolean()
-        .optional()
-        .describe(
-          "Return full structured JSON array in 'elements' instead of compact text census."
-        ),
-      format: z.enum(["json", "pretty", "smart"]).optional().describe("Output format."),
-      maxText: z
-        .number()
-        .int()
-        .optional()
-        .describe("Max characters of page text to include (default: 4000)."),
-      limit: z
-        .number()
-        .int()
-        .optional()
-        .describe("Max elements to list in census (default: 200). Use 'cursor' to continue."),
+        .describe("Scope snapshot to a specific element (@e token or CSS selector)."),
+      maxDepth: z.number().int().optional().describe("Max DOM tree depth (default: 25)."),
+      limit: z.number().int().positive().optional().describe("Page size limit for controls."),
       cursor: z
         .number()
         .int()
+        .nonnegative()
         .optional()
-        .describe("Continue a paged census using 'next' cursor from previous snapshot."),
+        .describe("Starting offset for controls pagination."),
     },
   },
-  tool("snapshot", async ({ scope, only, elements, format, maxText, limit, cursor }) => {
-    const isCompact = elements !== true;
+  tool("snapshot", async ({ scope, target, maxDepth, limit, cursor }) => {
     const res = await callBridge("snapshot", {
       scope: scope || "viewport",
-      compact: isCompact,
-      ...(only ? { only } : {}),
-      maxText,
+      target,
+      maxDepth,
       limit,
       cursor,
+      compact: true,
     });
-    return text(isCompact ? compactSnapshot(res) : res, format);
+    return text(compactSnapshot(res));
   })
-);
-
-server.registerTool(
-  "browser_read_page",
-  {
-    title: "Read page (accessibility tree)",
-    description:
-      "The accessibility tree as indented text \u2014 which control sits inside which group, form or region \u2014 with a ref on each interactive element. Structure, not prose.\n" +
-      "Reach for browser_snapshot first unless nesting is the question, and for browser_get_property when what you want is a region's text. Narrow with target (one subtree) and mode: 'all' (include non-interactive nodes); depth defaults to 60 because a React SPA nests 25-45 levels deep, and a clipped walk reports 'depthClipped' rather than looking like an empty page.",
-    inputSchema: {
-      mode: z.enum(["interactive", "all"]).optional().describe("Default 'interactive'"),
-      depth: z
-        .number()
-        .int()
-        .optional()
-        .describe(
-          "Max nesting depth (default 60). Deep SPAs need this; raise it further if the response reports depthClipped."
-        ),
-      target: z.string().optional().describe("Focus the subtree under this ref"),
-      maxChars: z.number().int().optional().describe("Output cap (default 50000)"),
-    },
-  },
-  tool("read_page", async ({ mode, depth, target, maxChars }) =>
-    text(await callBridge("read_page", { mode, depth, ref_id: target, maxChars }))
-  )
 );
 
 server.registerTool(

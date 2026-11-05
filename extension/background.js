@@ -125,7 +125,6 @@ const DIALOG_TRIGGERS = new Set([
 const CONTENT_ACTIONS = [
   "upload_mark",
   "snapshot",
-  "read_page",
   "find",
   "find_text",
   "click",
@@ -354,9 +353,10 @@ async function connect() {
       abortRequest(msg.id, msg.reason);
       return;
     }
-    const timeoutMs = typeof computeTransportTimeout === "function"
-      ? computeTransportTimeout(msg.params)
-      : (msg.params && (msg.params.timeoutMs || msg.params.timeout)) || 60000;
+    const timeoutMs =
+      typeof computeTransportTimeout === "function"
+        ? computeTransportTimeout(msg.params)
+        : (msg.params && (msg.params.timeoutMs || msg.params.timeout)) || 60000;
     const runDispatch = () =>
       typeof executeWithAbort === "function" && msg.id
         ? executeWithAbort(msg.id, timeoutMs, (signal) => dispatch({ ...msg, signal }))
@@ -830,7 +830,7 @@ async function handleContentAction(action, params) {
       }
     } catch {}
   }
-  if (action === "snapshot" || action === "find" || (action === "read_page" && !params.ref_id)) {
+  if (action === "snapshot" || action === "find") {
     return await crossFrame(action, params);
   }
   const { frameId, params: p } = frameRoute(params);
@@ -2336,30 +2336,7 @@ function mergeFrameResults(action, parts, params = {}, errors = []) {
       },
     };
   }
-  let tree = top.result.tree || "";
-  for (const { fr, result } of parts) {
-    if (fr.frameId === 0 || !result.tree) continue;
-    const qualified = result.tree.replace(
-      /\[(e\d+)\]/g,
-      (_, r) => `[${qualifyRef(fr.frameId, r)}]`
-    );
-    tree += `\n  iframe [f${fr.frameId}] ${fr.url}\n` + qualified.replace(/^/gm, "  ");
-  }
-  return {
-    ok: true,
-    result: {
-      url: top.result.url,
-      title: top.result.title,
-      tree,
-      truncated: !!top.result.truncated,
-      ...(top.result.depthClipped
-        ? { depthClipped: true, deepestReached: top.result.deepestReached }
-        : {}),
-      ...(top.result.depthUsed ? { depthUsed: top.result.depthUsed } : {}),
-      ...(top.result.notices ? { notices: top.result.notices } : {}),
-      ...(top.result.note ? { note: top.result.note } : {}),
-    },
-  };
+  return { ok: true, result: top.result || {} };
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {

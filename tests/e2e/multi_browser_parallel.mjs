@@ -228,7 +228,6 @@ export function scenario({ alias, base, uploadFile, uploadName }) {
       check: (r) => (r.json?.found === true ? null : "not found"),
     },
     { name: "snapshot", tool: "browser_snapshot", args: {}, check: includes("Add one") },
-    { name: "read_page", tool: "browser_read_page", args: {}, check: includes("Full name") },
     {
       name: "find",
       tool: "browser_find",

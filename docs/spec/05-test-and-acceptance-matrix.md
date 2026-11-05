@@ -47,12 +47,12 @@ flowchart TD
 ### 2.3 DOM Engine & Content Scripts (`04-content-and-dom.md`)
 | Test Case ID | Test Description | Expected Result | Edge Cases Covered |
 | :--- | :--- | :--- | :--- |
-| `TC-DOM-01` | Census Snapshot `@e` indexing | Interactive elements indexed sequentially as `@e1`, `@e2`. `@ref` rejected. | Dynamic DOM additions, SVG elements, non-standard custom elements. |
+| `TC-DOM-01` | Unified VOM Snapshot Tree | Outputs W3C ARIA indented tree (`- <role> "<name>" [@eN]`, `- text: "<content>"`, `- cell "<content>" [@eN]`). `@e` indexing on all interactive nodes. Zero content loss. | Dynamic DOM additions, virtualized webmail, SVG buttons, nested text formatting. |
 | `TC-DOM-02` | Token pruning & trimming | Invisible elements (`display:none`, `visibility:hidden`, 0x0 rect) excluded. | Zero rect elements with visible children, opacity transitions. |
 | `TC-DOM-03` | 10-Step Setter Guard | Form inputs populated reliably across React, Vue, Angular without stale state. | Controlled React input components, masked input fields, contenteditable. |
 | `TC-DOM-04` | Table Matrix Reconciler | 2D matrix accurately maps rows/columns with complex `colspan` and `rowspan`. | Empty table cells, nested tables, mismatched column counts across rows. |
 | `TC-DOM-05` | CSV Formula Injection Guard | Prepend apostrophe (`'`) to cell strings starting with `=`, `+`, `-`, `@`, `\t`, `\r`. | Pre-escaped cells, numeric formulas, strings with leading whitespace. |
-| `TC-DOM-06` | Snapshot Format: Tree/VOM | Returns structured node hierarchy with `rect: {x, y, w, h}`, `parentId`, `depth`, `layer`. | Tree depth exceeding `maxDepth`, modal backdrops, `redactValues: true`. |
+| `TC-DOM-06` | Clean Snapshot Parameters | Supports `scope: "viewport" \| "all"`, `target`, `maxDepth`, `limit`, `cursor`. | Scope boundaries, target scoping to sub-elements, deep hierarchy limit. |
 
 ---
 

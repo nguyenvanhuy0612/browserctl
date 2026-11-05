@@ -32,17 +32,6 @@ export async function handleFind(params, ctx) {
 }
 
 /**
- * Handles reading page structure and accessibility tree.
- */
-export async function handleReadPage(params, ctx) {
-  const tabId = ctx?.resolveTabId(params);
-  if (ctx?.contentBridge) {
-    return await ctx.contentBridge.send("read_page", params, tabId);
-  }
-  return { ok: true, result: { tree: "", tabId } };
-}
-
-/**
  * Handles getting page HTML or text content.
  */
 export async function handleGetContent(params, ctx) {
@@ -133,12 +122,6 @@ export const inspectTools = [
     profile: "advanced",
     aliases: ["find"],
     handler: handleFind,
-  },
-  {
-    name: "browser_read_page",
-    profile: "advanced",
-    aliases: ["read_page"],
-    handler: handleReadPage,
   },
   {
     name: "browser_get_content",

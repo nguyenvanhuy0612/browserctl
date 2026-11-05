@@ -92,9 +92,6 @@ Navigation & Tabs:
 
 Inspection & Query (get):
   browserctl snapshot [--all]           Capture interactive DOM elements (--all = everything in the DOM)
-    [--only fields,buttons,links]        List only these kinds of control; page text is left out
-  browserctl read_page [mode] [--depth N] [--max-chars N] [--ref @e1]
-                                        Read accessibility tree & text (mode: interactive | all)
   browserctl get text <target>          Get visible text of element (@e1, selector)
   browserctl get value <target>         Get value of input/textarea/select
   browserctl get attr <target> <name>   Get attribute value (e.g. href, src, placeholder)
@@ -144,8 +141,6 @@ Formatting & Global Flags:
   -r, --raw                             Output raw unformatted value (for piping)
   --json                                Force compact valid JSON output
   --pretty                              Force 2-space indented pretty JSON output
-  --elements                            snapshot: every element as structured JSON instead of
-                                         the census
   -f, --full, --fullpage                Capture fullpage screenshot
   -t, --tab <id>                        Direct this one command to a tab ID, in whichever browser
                                          has it (a tab another session holds can only be read,
@@ -497,7 +492,6 @@ async function main() {
   let jsonOutput = false;
   let prettyOutput = false;
   let rawOutput = false;
-  let elementsMode = false;
   let onlyKinds = null;
   let fullpageMode = false;
   let autoDaemon = true;
@@ -518,8 +512,6 @@ async function main() {
       prettyOutput = true;
     } else if (a === "-r" || a === "--raw") {
       rawOutput = true;
-    } else if (a === "--elements") {
-      elementsMode = true;
     } else if (a === "--only" || a.startsWith("--only=")) {
       const kinds = String(a === "--only" ? (rawArgs[++i] ?? "") : a.slice(7))
         .split(",")
@@ -534,9 +526,7 @@ async function main() {
       }
       onlyKinds = kinds;
     } else if (a === "-c" || a === "--compact") {
-      console.error(
-        `${a}: the snapshot census is always compact; --elements returns every element as structured JSON instead`
-      );
+      console.error(`${a}: the snapshot census is always compact; use browserctl snapshot`);
       process.exit(2);
     } else if (a === "-f" || a === "--full" || a === "--fullpage") {
       fullpageMode = true;
@@ -780,35 +770,13 @@ async function main() {
         break;
 
       case "snapshot":
-        params.compact = !elementsMode;
+        params.compact = true;
         if (rawArgs.includes("--all")) params.scope = "all";
-        if (onlyKinds) params.only = onlyKinds;
-        if (args[0] && /^\d+$/.test(args[0])) params.maxText = parseInt(args[0], 10);
-        for (let i = 0; i < rawArgs.length; i++) {
-          const m = /^--cursor(?:=(.*))?$/.exec(rawArgs[i]);
-          if (!m) continue;
-          const n = Number(m[1] ?? rawArgs[i + 1]);
-          if (!Number.isInteger(n) || n < 0) {
-            console.error("snapshot: --cursor needs a whole number, e.g. --cursor 60");
-            process.exit(2);
-          }
-          params.cursor = n;
-        }
-        break;
-
-      case "read_page":
-        if (args[0] && !args[0].startsWith("-")) params.mode = args[0];
-        for (let i = 0; i < args.length; i++) {
-          const a = args[i];
-          const val = (inline) => (inline !== undefined ? inline : args[++i]);
-          let m;
-          if ((m = /^--depth(?:=(\d+))?$/.exec(a))) params.depth = Number(val(m[1]));
-          else if ((m = /^--max-?chars(?:=(\d+))?$/.exec(a))) params.maxChars = Number(val(m[1]));
-          else if ((m = /^--ref(?:=(.+))?$/.exec(a))) params.ref_id = val(m[1]);
-        }
-        if (params.depth !== undefined && !Number.isFinite(params.depth)) {
-          console.error("read_page: --depth needs a number, e.g. --depth 60");
-          process.exit(2);
+        if (
+          args[0] &&
+          (args[0].startsWith("@") || args[0].startsWith("#") || args[0].startsWith("."))
+        ) {
+          params.target = args[0];
         }
         break;
 

@@ -3,6 +3,16 @@
 One entry per published version. The reasoning and measurements behind each change are in the
 commit history and on the GitHub release.
 
+## 0.9.7
+
+Hierarchical Virtual Object Model (VOM) tree engine for snapshots, container collapsing for single-page applications, and clean canonical parameter contracts.
+
+- **Virtual Object Model (VOM) Tree (`browser_snapshot`)**: Hierarchical, depth-indented snapshot format reflecting semantic roles, controls (`- <role> "<name>" [@eN]`), leaf prose (`- text: "<content>"`), and structured table cells with unified reference tokens.
+- **Single-Page Application Container Collapsing**: Automatically recovers clickable containers with pointer affordances as actionable controls while suppressing intermediate layout wrappers and preserving nested native interactive descendants.
+- **Clean Parameter Contract**: Streamlined `browser_snapshot` to canonical parameters (`scope`, `target`, `maxDepth`, `limit`, `cursor`).
+- **Hidden Element Pruning**: Strictly prunes elements that are hidden from view (`display: none`, `visibility: hidden`, `0x0` dimensions, `aria-hidden="true"`).
+- **Text Compaction & Injection Defense**: Collapses redundant whitespace, applies formula injection defense (`csv_safe`), and truncates long labels exceeding 150 characters with ellipsis.
+
 ## 0.9.6
 
 Structured table and container extraction engine, in-page HTTP client and CDP network monitor suite, and streamlined core tools profile with agent-first instructions and token audit.
@@ -15,7 +25,7 @@ Structured table and container extraction engine, in-page HTTP client and CDP ne
 
 ## 0.9.5
 
-Architecture modularization and core stabilization enhancements integrated from BSK, featuring
+Architecture modularization and core stabilization enhancements, featuring
 hierarchical timing envelopes, settle FSM, target actionability, and colocated unit specifications.
 
 - Modularized extension architecture across dedicated domain subsystems: `transport/` (JSON-RPC dispatch and error taxonomy), `driver/` (CDP input, session, frame, network, emulate), `content/` (DOM observer, registry, setter, snapshot, table matrix), and `tools/` (domain registries).

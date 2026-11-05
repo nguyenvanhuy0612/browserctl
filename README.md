@@ -32,11 +32,15 @@ instead of a screenshot or a full accessibility tree.
 What `browser_snapshot` hands the agent for a page (iana.org, trimmed):
 
 ```text
-[Header / Banner]
-  [@e1] <a> "Domains" -> /domains
-  [@e2] <a> "Protocols" -> /protocols
-  ...
-structure: footer 22 (@e32), header 5 (@e33), main 4 (@e34)
+- RootWebArea "Internet Assigned Numbers Authority" [@e0]
+  - banner [@e1]
+    - link "Domains" [@e2]
+    - link "Protocols" [@e3]
+    - link "Numbers" [@e4]
+    - link "About" [@e5]
+  - main [@e6]
+    - heading "Dedicated to the preservation of the Web" [@e7]
+    - text: "The global coordination of the DNS Root, IP addressing, and other Internet Protocol numbers."
 ```
 
 ---
@@ -239,9 +243,9 @@ Real calls, each result cut to one line:
 ```text
 User:   What does example.com link to?
 Agent:  browser_navigate({ url: "https://example.com" })
-Agent:  browser_snapshot({})               -> [@e1] <a> "Learn more" -> https://iana.org/help/example-domains
-Agent:  browser_click({ target: "@e1" }) -> resolved: by ref, <a> "Learn more", 1 match
-Agent:  browser_snapshot({})               -> https://www.iana.org/help/example-domains, "Example Domains"
+Agent:  browser_snapshot({})               -> - RootWebArea "Example Domain" [@e0] ... - link "Learn more" [@e1]
+Agent:  browser_click({ target: "@e1" }) -> resolved: by ref, link "Learn more", 1 match
+Agent:  browser_snapshot({})               -> - RootWebArea "IANA — Example domains" [@e0] ...
 Agent:  It links to IANA's "Example Domains" page, which explains these domains are reserved for documentation.
 ```
 

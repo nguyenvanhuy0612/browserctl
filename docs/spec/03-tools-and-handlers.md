@@ -1,6 +1,6 @@
 # Specification 03: Tool Domain Registry & Handler Contracts
 
-## 1. Tool Domain Organization (80 Tools Total)
+## 1. Tool Domain Organization (79 Tools Total)
 
 To prevent a single monolithic tool switch-case statement, tools are partitioned into domain-specific modules under `extension/tools/`. Each module exports an array or map of tool descriptors.
 
@@ -28,7 +28,7 @@ classDiagram
 | :--- | :--- | :--- |
 | `action.js` | `browser_click`, `browser_fill_form`, `browser_type`, `browser_scroll` (`core`); `browser_hover`, `browser_press_key`, `browser_select_option`, `browser_wheel`, `browser_drag` (`advanced`) | `core` & `advanced` |
 | `navigate.js` | `browser_navigate`, `browser_wait_for` (`core`); `browser_go_back`, `browser_go_forward` (`advanced`) | `core` & `advanced` |
-| `inspect.js` | `browser_snapshot`, `browser_extract`, `browser_evaluate`, `browser_take_screenshot` (`core`); `browser_find`, `browser_read_page`, `browser_get_content`, `browser_get_property` (`advanced`) | `core` & `advanced` |
+| `inspect.js` | `browser_snapshot`, `browser_extract`, `browser_evaluate`, `browser_take_screenshot` (`core`); `browser_find`, `browser_get_content`, `browser_get_property` (`advanced`) | `core` & `advanced` |
 | `tabs.js` | `browser_tabs` (`core`); `browser_group_tab`, `browser_ungroup_tab`, `browser_current_tab`, `browser_list_windows`, `browser_focus_window` (`tabs` & `advanced`) | `core`, `tabs`, `advanced` |
 | `network_tools.js` | `browser_make_request`, `browser_monitor_requests` (`core` & `network`); `browser_mock_route`, `browser_net_start`, `browser_net_stop`, `browser_net_get`, `browser_net_clear`, `browser_get_response_body`, `browser_wait_network_idle`, `browser_get_network_request`, `browser_network_replay` (`network`) | `core` & `network` |
 | `daemon / lifecycle` | `browser_status`, `browser_start`, `browser_stop` (`core`) | `core` |

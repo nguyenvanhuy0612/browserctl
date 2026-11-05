@@ -21,20 +21,20 @@ describe("bridge/routing.js (Colocated Unit Spec)", () => {
 
     it("READ_ACTIONS: contains pure read operations without debugger attachment", () => {
       assert.ok(READ_ACTIONS.has("snapshot"));
-      assert.ok(READ_ACTIONS.has("read_page"));
       assert.ok(READ_ACTIONS.has("get_text"));
       assert.ok(READ_ACTIONS.has("find"));
-      // Mutating actions must NOT be classified as read
+
+      // Mutating or obsolete actions must NOT be classified as read
       assert.ok(!READ_ACTIONS.has("click"));
       assert.ok(!READ_ACTIONS.has("type"));
       assert.ok(!READ_ACTIONS.has("press_key"));
+      assert.ok(!READ_ACTIONS.has("read_page"));
     });
   });
 
   describe("isRead()", () => {
     it("returns true for listed read actions without clear flag", () => {
       assert.equal(isRead("snapshot"), true);
-      assert.equal(isRead("read_page", {}), true);
       assert.equal(isRead("get_text", { target: "@e1" }), true);
     });
 

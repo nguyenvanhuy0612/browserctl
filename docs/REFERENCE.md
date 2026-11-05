@@ -1,6 +1,6 @@
-# browserctl Core Tool Reference — v0.9.6
+# browserctl Core Tool Reference — v0.9.7
 
-browserctl provides 19 core tools (80 tools across all profiles) for web automation and agent inspection.
+browserctl provides 19 core tools (79 tools across all profiles) for web automation and agent inspection.
 
 ## Targeting an element
 
@@ -147,24 +147,14 @@ because a reload loses any unsaved input on that page.
 ### browser_snapshot
 
 - scope: 'viewport' (default) or 'all' elements in DOM.
-- only: List only these kinds of control: 'fields' (inputs, selects, checkboxes, radios), 'buttons', 'links'. Page text is left out unless maxText is passed.
-- elements: true returns every element as structured JSON in 'elements' instead of the census.
-- maxText: Maximum characters of page text in 'text' (default 4000). With scope 'viewport' it is the text on screen; with 'all', the whole page.
+- target: Scope snapshot to a specific element (@e token or CSS selector).
+- maxDepth: Max DOM tree depth (default: 25).
 - limit: Maximum number of elements to include in census.
 - cursor: Offset cursor for paged snapshot traversal.
-- format: Output format: 'json' (default), 'pretty' or 'smart'.
 
 The result's `folded` lists folded controls one per line as `@e "text" -> href`.
 `hiddenContent` entries have `kind` `load-more`, `collapsed` or `scrollable-region`. On a page with
 iframes, `census` already includes every frame.
-
-### browser_read_page
-
-- mode: Inspection mode.
-- depth: Maximum tree depth.
-- target: Ref of the subtree to inspect from.
-- maxChars: Maximum character limit.
-- format: Output format.
 
 ### browser_find
 
