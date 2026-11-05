@@ -1,4 +1,4 @@
-# Tool surface as it actually is — generated 2026-11-05, browserctl 0.9.7
+# Tool surface as it actually is — generated 2026-11-05, browserctl 0.9.8
 
 Generated from the running server (`server._registeredTools`), not written by hand — the last
 hand-written version of this list claimed `all` on a tool that did not have it.
@@ -6,15 +6,16 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 `*` = required. `tabId`/`tab_id` accepted on every tab-scoped tool, omitted from the tables.
 
 
-### core (19)
+### core (20)
 
 | Tool | Parameters | Description |
 |---|---|---|
 | `status` | format | [SESSION] Check bridge daemon status, connection state, and Chrome extension connectivity. |
 | `start` | (none) | [SESSION] Start the local bridge daemon if stopped. The bridge auto-starts on demand, so manual start is rarely required. |
 | `stop` | (none) | [SESSION] Stop the local bridge daemon. DO NOT call this to tidy up when a task is finished — |
-| `snapshot` | scope, target, maxDepth, limit, cursor, format | [READ] Capture structured W3C Accessibility Tree with interactive @e tokens in reading order. |
+| `snapshot` | scope, target, maxDepth, maxText, limit, cursor, format | [READ] Capture structured W3C Accessibility Tree with interactive @e tokens in reading order. |
 | `extract` | *selector, fields, max, format | [READ] Extract structured rows from repeating containers without writing JavaScript. |
+| `get_property` | target, property, attr, format | [READ] Read an element's text, value, HTML, box, an attribute, or how many match. |
 | `click` | *target, doubleClick, button, waitFor, autoSettle, settleMs, format | [ACT] Click an element by target (@e token like '@e1', CSS selector, visible text, or index). |
 | `type` | *target, *text, method, submit, waitFor, autoSettle, settleMs, format | [ACT] Enter text into an input, textarea, contenteditable, or rich text editor. |
 | `fill_form` | *fields, submitTarget, format | [ACT] Fill multiple form inputs, checkboxes, radios, and selects in a single batch. |
@@ -108,13 +109,12 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 | `spoof_visibility` | restore, format | Make the target tab's page JS believe it's visible/focused (document.hidden=false, document.visibilityState='visible', fires a visibilitychange event), WITHOUT actually foregrounding the tab or stealing the user's focus. Use this when scrolling a backgrounded tab isn't loading new content — many sites (e.g. infinite-scroll feeds) deliberately pause lazy-loading via the Page Visibility API while a tab is hidden, as a resource-saving pattern. This is explicit and opt-in on purpose: call it once before scrolling a background tab that needs to lazy-load, not automatically on every scroll — visibility state is also used for other things a site might not want spoofed unconditionally (video autoplay, polling/websocket resume, analytics time-on-page). Attaches the CDP debugger if not already attached (shows the 'is being debugged' bar). KNOWN LIMITATION: this patches JS-visible state only — it does not lift Chrome's renderer-level throttling of a backgrounded tab (requestAnimationFrame doesn't fire, IntersectionObserver rides the same throttled pipeline). If a site's lazy-load is driven by rAF/IO rather than a visibilitychange or scroll listener, this may not help; there is no further automatic fallback (foregrounding the tab, even briefly, is a deliberate manual decision this tool will never make for you). The spoof lasts until the page navigates or reloads; call it again on the new page, or pass restore: true to undo it. |
 | `current_tab` | format | Report which tab commands currently act on (id, url, title). Your session's target is resolved on your first command and held across user tab switches. Call this to confirm you're on the right page before snapshotting or reading sensitive content. |
 
-### advanced (22)
+### advanced (21)
 
 | Tool | Parameters | Description |
 |---|---|---|
 | `find` | query, selector, in, regex, contextChars, max, format | Find things on the page and get a ref back for each. in: 'controls' (default) matches interactive elements by accessible name, text, placeholder, aria-label or title, and 'matchedBy' says which of those hit; in: 'text' searches the page's prose instead and each match carries 'nearestInteractive'. |
 | `get_content` | maxChars, format | The page's main readable prose — title, url, cleaned article text. For documentation, articles and postings. |
-| `get_property` | target, property, attr, format | Read an element's text, value, HTML, box, an attribute, or how many match. |
 | `select_option` | *target, values, value, option, label, format | Select one or more options in a <select> element. Values are matched by value first, then by visible label. |
 | `press_key` | *key, target, modifiers, allowSynthetic, format | Send a key, or a chord with modifiers, to an element or to whatever has focus. |
 | `hover` | *target, format | Send the pointer and mouse events of hovering an element, to open a flyout menu or raise a tooltip. A menu shown by CSS :hover alone does not open this way; its items are usually already in browser_snapshot, tagged [hidden until hover/focus]. |

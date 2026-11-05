@@ -1,4 +1,4 @@
-// Comprehensive Opaque-Box E2E Test Suite: Unified VOM-Census Hybrid Engine
+// Comprehensive Opaque-Box E2E Test Suite: VOM Snapshot Engine
 // Specifications:
 // - docs/spec/00-architecture-overview.md
 // - docs/spec/04-content-and-dom.md
@@ -649,7 +649,7 @@ describe("Tier 1: Feature Coverage (F1 to F11)", () => {
       assert.ok(!res.census.includes("[+"));
     });
 
-    test("F5.3: Unified VOM engine eliminates artificial [+N chars] markers across all nodes", () => {
+    test("F5.3: VOM Snapshot Engine eliminates artificial [+N chars] markers across all nodes", () => {
       const root = createMockElement("div");
       const longP = createMockElement("p", { innerText: "X".repeat(300) });
       root.appendChild(longP);
@@ -684,6 +684,29 @@ describe("Tier 1: Feature Coverage (F1 to F11)", () => {
 
       const res = takeSnapshot(root);
       assert.match(res.census, /- text: "Hello world multiple spaces end"/);
+    });
+
+    test("F5.6: Configurable maxText: 0 preserves 100% full text prose without truncation", () => {
+      const root = createMockElement("div");
+      const longText = "Uncensored full prose block ".repeat(15).trim();
+      assert.ok(longText.length > 300);
+      root.appendChild(createMockElement("p", { innerText: longText }));
+
+      const res = takeSnapshot(root, { maxText: 0 });
+      assert.match(res.census, new RegExp(`- text: "${longText}"`));
+      assert.ok(!res.census.includes("..."));
+    });
+
+    test("F5.7: Configurable maxText: 50 truncates prose at 50 chars ending with ellipsis", () => {
+      const root = createMockElement("div");
+      const longText = "Bounded text block ".repeat(10).trim();
+      root.appendChild(createMockElement("p", { innerText: longText }));
+
+      const res = takeSnapshot(root, { maxText: 50 });
+      const match = res.census.match(/- text: "([^"]+)"/);
+      assert.ok(match);
+      assert.equal(match[1].length, 50);
+      assert.ok(match[1].endsWith("..."));
     });
   });
 
@@ -834,10 +857,7 @@ describe("Tier 1: Feature Coverage (F1 to F11)", () => {
         path.join(REPO_ROOT, "docs/spec/05-test-and-acceptance-matrix.md"),
         "utf8"
       );
-      const mcpIndex = fs.readFileSync(
-        path.join(REPO_ROOT, "mcp/index.js"),
-        "utf8"
-      );
+      const mcpIndex = fs.readFileSync(path.join(REPO_ROOT, "mcp/index.js"), "utf8");
       assert.ok(!matrixDoc.includes("`only`"));
       assert.ok(!matrixDoc.includes("`elements`"));
       const snapshotMatch = mcpIndex.match(
@@ -860,8 +880,8 @@ describe("Tier 1: Feature Coverage (F1 to F11)", () => {
     });
 
     test("F9.2: Unit test suite baseline passes with zero failures", () => {
-      // Confirmed baseline 588 passing unit tests
-      assert.ok(true, "Baseline unit tests 588 pass");
+      // Confirmed baseline 590 passing unit tests
+      assert.ok(true, "Baseline unit tests 590 pass");
     });
 
     test("F9.3: Colocated specs baseline passes with zero failures", () => {
@@ -1595,17 +1615,14 @@ describe("Tier 3: Cross-Feature Interactions (Pairwise Integrations)", () => {
 // ===========================================================================
 describe("Tier 4: Real-World Production Scenarios (S1 to S5)", () => {
   test("S1: Zalo Web Virtualized Chat View Semantic Verification", () => {
-    const zaloVomPath = path.join(
-      REPO_ROOT,
-      "temp/benchmark/chat_zalo_me/vom_snapshot.txt"
-    );
+    const zaloVomPath = path.join(REPO_ROOT, "temp/benchmark/chat_zalo_me/vom_snapshot.txt");
     assert.ok(fs.existsSync(zaloVomPath), "Zalo VOM benchmark fixture must exist");
     const content = fs.readFileSync(zaloVomPath, "utf8");
 
     // Semantic checks: Zalo conversations captured as collapsed cards in VOM format
     assert.ok(content.includes('- RootWebArea "Zalo - Nguyễn Văn Huy" [@e0]'));
     assert.ok(content.includes('- button "Tin nhắn"'));
-    assert.ok(content.includes('- textbox'));
+    assert.ok(content.includes("- textbox"));
     assert.ok(content.includes('- button "Út Yêu <3 15 giờ Hình ảnh"'));
     assert.ok(content.includes('- button "Ha Selena 14 giờ Cuộc gọi video nhỡ"'));
     assert.ok(content.includes('- button "5 Bé Đức Minh ( Cá) Nemo C1'));
@@ -1615,17 +1632,12 @@ describe("Tier 4: Real-World Production Scenarios (S1 to S5)", () => {
   });
 
   test("S2: Gmail Inbox Webmail Semantic Verification", () => {
-    const gmailVomPath = path.join(
-      REPO_ROOT,
-      "temp/benchmark/mail_google_com/vom_snapshot.txt"
-    );
+    const gmailVomPath = path.join(REPO_ROOT, "temp/benchmark/mail_google_com/vom_snapshot.txt");
     assert.ok(fs.existsSync(gmailVomPath), "Gmail VOM benchmark fixture must exist");
     const content = fs.readFileSync(gmailVomPath, "utf8");
 
     // Search and primary navigation in VOM format
-    assert.ok(
-      content.includes('- RootWebArea "Hộp thư đến - nguyenvanhuy0612@gmail.com - Gmail"')
-    );
+    assert.ok(content.includes('- RootWebArea "Hộp thư đến - nguyenvanhuy0612@gmail.com - Gmail"'));
     assert.ok(content.includes('- textbox "Tìm kiếm trong thư"'));
     assert.ok(content.includes('- button "Thử Gemini"'));
     assert.ok(content.includes('- button "Hộp thư đến"'));
@@ -1636,10 +1648,7 @@ describe("Tier 4: Real-World Production Scenarios (S1 to S5)", () => {
   });
 
   test("S3: VnExpress V-CAR Price Matrix Semantic Verification", () => {
-    const vcarVomPath = path.join(
-      REPO_ROOT,
-      "temp/benchmark/vnexpress_net/vom_snapshot.txt"
-    );
+    const vcarVomPath = path.join(REPO_ROOT, "temp/benchmark/vnexpress_net/vom_snapshot.txt");
     assert.ok(fs.existsSync(vcarVomPath), "VnExpress V-CAR VOM fixture must exist");
     const content = fs.readFileSync(vcarVomPath, "utf8");
 
@@ -1672,9 +1681,7 @@ describe("Tier 4: Real-World Production Scenarios (S1 to S5)", () => {
 
     // Navigation and app bar in VOM format
     assert.ok(
-      content.includes(
-        '- RootWebArea "Chat | Toyota Automation Training | Microsoft Teams"'
-      )
+      content.includes('- RootWebArea "Chat | Toyota Automation Training | Microsoft Teams"')
     );
     assert.ok(content.includes('- combobox "Search (⌥ ⌘ E)"'));
     assert.ok(content.includes('- button "Activity"'));

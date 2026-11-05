@@ -1764,7 +1764,13 @@
         if (type === "submit" || type === "button" || type === "reset") return "button";
         return "textbox";
       }
-      return TAG_TO_ROLE[tag] || null;
+      const tagRole = TAG_TO_ROLE[tag] || null;
+      if (tagRole) return tagRole;
+      const ce = el.getAttribute?.("contenteditable");
+      if (ce === "true" || ce === "" || ce === "plaintext-only" || el.isContentEditable === true) {
+        return "textbox";
+      }
+      return null;
     }
 
     const lines = [];
@@ -1815,8 +1821,7 @@
     function walk(el, depth) {
       if (!el || el.nodeType !== 1 || depth > maxDepth) return;
       const tag = el.tagName ? el.tagName.toLowerCase() : "";
-      if (["script", "style", "noscript", "template", "meta", "link", "head"].includes(tag))
-        return;
+      if (["script", "style", "noscript", "template", "meta", "link", "head"].includes(tag)) return;
       if (!isVisible(el)) return;
 
       let isPointer = false;
@@ -1868,10 +1873,22 @@
       const indent = "  ".repeat(depth);
       let emitted = false;
 
+      const maxText = Number.isFinite(options.maxText) ? options.maxText : 150;
+      const isUnlimitedText = maxText <= 0;
+
+      function formatText(raw) {
+        if (!raw) return "";
+        const norm = normalizeSnapshotText(raw);
+        if (isUnlimitedText || norm.length <= maxText) {
+          return csvSafe(norm).replace(/"/g, '\\"');
+        }
+        return csvSafe(norm.slice(0, Math.max(0, maxText - 3)) + "...").replace(/"/g, '\\"');
+      }
+
       if (role && !SKIP_ROLES.has(role)) {
         let line = `${indent}- ${role}`;
         if (name) {
-          const cleanName = compactSnapshotText(name, 150).replace(/"/g, '\\"');
+          const cleanName = formatText(name);
           line += ` "${cleanName}"`;
         }
         if (refAssigner) {
@@ -1881,10 +1898,37 @@
             line += ` [${formattedToken}]`;
           }
         }
+        if (el.disabled || el.getAttribute?.("aria-disabled") === "true") {
+          line += " [disabled]";
+        }
+        if (role === "checkbox" || role === "radio" || tag === "input") {
+          if (el.checked) line += " [checked]";
+        }
+        if (tag === "input" || tag === "textarea") {
+          if (isPassword && redactValues) {
+            line += ' = "•••"';
+          } else if (el.value) {
+            const safeVal = compactSnapshotText(el.value, 200).replace(/"/g, '\\"');
+            line += ` = "${safeVal}"`;
+          }
+        }
+        if ((role === "link" || tag === "a") && el.getAttribute?.("href")) {
+          const href = el.getAttribute("href");
+          if (href && !href.startsWith("javascript:")) {
+            line += ` [→ ${href}]`;
+          }
+        }
+        if (
+          el.isContentEditable ||
+          el.getAttribute?.("contenteditable") === "true" ||
+          el.getAttribute?.("contenteditable") === ""
+        ) {
+          line += " [contenteditable]";
+        }
         lines.push(line);
         emitted = true;
       } else if (isLeafText && name) {
-        const cleanText = compactSnapshotText(name, 150).replace(/"/g, '\\"');
+        const cleanText = formatText(name);
         lines.push(`${indent}- text: "${cleanText}"`);
         emitted = true;
       }
@@ -1917,8 +1961,10 @@
     if (typeof reassertHoverLatch === "function") reassertHoverLatch();
     const maxVomDepth = Number.isFinite(params.maxDepth) ? params.maxDepth : 25;
     const redactValues = params.redactValues !== false;
-    const limit = Number.isFinite(params.limit) && params.limit > 0 ? Math.floor(params.limit) : 200;
-    const offset = Number.isFinite(params.cursor) && params.cursor > 0 ? Math.floor(params.cursor) : 0;
+    const limit =
+      Number.isFinite(params.limit) && params.limit > 0 ? Math.floor(params.limit) : 200;
+    const offset =
+      Number.isFinite(params.cursor) && params.cursor > 0 ? Math.floor(params.cursor) : 0;
 
     let root = params.root;
     if (!root && params.target) {
@@ -1939,8 +1985,10 @@
     const vomText = renderVomTree(root, {
       refAssigner: (el) => "@" + getOrAssignRef(el),
       maxDepth: maxVomDepth,
+      maxText: params.maxText,
       redactValues,
       scope: params.scope || "viewport",
+      format: params.format,
     });
 
     const elements = [];
@@ -1961,8 +2009,14 @@
     }
     // [Structure: summary]
 
-    const hints = typeof hiddenContentHints === "function" ? hiddenContentHints(nodes) : { more: [], collapsed: [] };
-    const regions = openDialogs.length && typeof overflowingRegions === "function" ? overflowingRegions(openDialogs[0].node) : [];
+    const hints =
+      typeof hiddenContentHints === "function"
+        ? hiddenContentHints(nodes)
+        : { more: [], collapsed: [] };
+    const regions =
+      openDialogs.length && typeof overflowingRegions === "function"
+        ? overflowingRegions(openDialogs[0].node)
+        : [];
     const hiddenContent = [
       ...hints.more.map((x) => ({ kind: "load-more", text: x.text, ref: x.ref })),
       ...hints.collapsed.map((x) => ({ kind: "collapsed", text: x.text, ref: x.ref })),

@@ -585,3 +585,87 @@ test("TC-DOM-06: VOM Tree format returns hierarchical node tree with geometry, l
     assertVOMNode(tree);
   }
 });
+
+// =====================================================================================
+// 7. TC-DOM-07: Default VOM Output & Compact Payload
+// =====================================================================================
+
+test("TC-DOM-07: Default snapshot produces VOM tree string with rich annotations and pruned payload", () => {
+  const root = createMockElement("div", { id: "main-content" });
+  const btn = createMockElement("button", { innerText: "Submit", disabled: "true" });
+  btn.disabled = true;
+  const chk = createMockElement("input", { type: "checkbox" });
+  chk.checked = true;
+  const link = createMockElement("a", {
+    href: "https://example.com/login",
+    innerText: "Login Link",
+  });
+  const txt = createMockElement("input", { type: "text", value: "Prefilled search text" });
+  const editable = createMockElement("div", {
+    contenteditable: "true",
+    innerText: "Editable draft",
+  });
+  editable.isContentEditable = true;
+
+  root.appendChild(btn);
+  root.appendChild(chk);
+  root.appendChild(link);
+  root.appendChild(txt);
+  root.appendChild(editable);
+
+  const res = snapshot({ root });
+  assert.ok(res != null, "Snapshot must return result");
+  assert.ok(typeof res.census === "string", "census must be string");
+
+  // Verify rich annotations
+  assert.match(res.census, /- button "Submit" \[@e\d+\] \[disabled\]/);
+  assert.match(res.census, /- checkbox \[@e\d+\] \[checked\]/);
+  assert.match(res.census, /- link "Login Link" \[@e\d+\] \[→ https:\/\/example\.com\/login\]/);
+  assert.match(res.census, /- textbox \[@e\d+\] = "Prefilled search text"/);
+  assert.match(res.census, /\[contenteditable\]/);
+});
+
+// =====================================================================================
+// 8. TC-DOM-08: Configurable Text Limit & Zero Loss (maxText)
+// =====================================================================================
+
+test("TC-DOM-08: Configurable maxText enforces boundary truncation and unlimited (maxText <= 0) full prose", () => {
+  const longProse = "The quick brown fox jumps over the lazy dog. ".repeat(6).trim(); // ~270 chars
+  assert.ok(longProse.length > 200);
+
+  // 1. Default maxText (150 chars): truncated ending with "..."
+  const rootDefault = createMockElement("div");
+  rootDefault.appendChild(createMockElement("p", { innerText: longProse }));
+  const resDefault = snapshot({ root: rootDefault });
+  assert.ok(resDefault.census.includes("..."));
+  const defaultMatch = resDefault.census.match(/- text: "([^"]+)"/);
+  assert.ok(defaultMatch, "Must match text leaf");
+  assert.equal(defaultMatch[1].length, 150);
+  assert.ok(defaultMatch[1].endsWith("..."));
+
+  // 2. Custom maxText (50 chars): truncated ending with "..."
+  const root50 = createMockElement("div");
+  root50.appendChild(createMockElement("p", { innerText: longProse }));
+  const res50 = snapshot({ root: root50, maxText: 50 });
+  const match50 = res50.census.match(/- text: "([^"]+)"/);
+  assert.ok(match50, "Must match text leaf");
+  assert.equal(match50[1].length, 50);
+  assert.ok(match50[1].endsWith("..."));
+
+  // 3. Unlimited maxText: 0: 100% full text, no ellipsis
+  const rootUnlimited = createMockElement("div");
+  rootUnlimited.appendChild(createMockElement("p", { innerText: longProse }));
+  const resUnlimited = snapshot({ root: rootUnlimited, maxText: 0 });
+  const matchUnlimited = resUnlimited.census.match(/- text: "([^"]+)"/);
+  assert.ok(matchUnlimited, "Must match text leaf");
+  assert.equal(matchUnlimited[1], longProse);
+  assert.ok(!matchUnlimited[1].endsWith("..."));
+
+  // 4. Unlimited maxText: -1: also 100% full text
+  const rootNegative = createMockElement("div");
+  rootNegative.appendChild(createMockElement("p", { innerText: longProse }));
+  const resNegative = snapshot({ root: rootNegative, maxText: -1 });
+  const matchNegative = resNegative.census.match(/- text: "([^"]+)"/);
+  assert.ok(matchNegative, "Must match text leaf");
+  assert.equal(matchNegative[1], longProse);
+});

@@ -664,7 +664,13 @@ export function renderVomTree(root, options = {}) {
       if (type === "submit" || type === "button" || type === "reset") return "button";
       return "textbox";
     }
-    return TAG_TO_ROLE[tag] || null;
+    const tagRole = TAG_TO_ROLE[tag] || null;
+    if (tagRole) return tagRole;
+    const ce = el.getAttribute?.("contenteditable");
+    if (ce === "true" || ce === "" || ce === "plaintext-only" || el.isContentEditable === true) {
+      return "textbox";
+    }
+    return null;
   }
 
   const lines = [];
@@ -763,10 +769,22 @@ export function renderVomTree(root, options = {}) {
     const indent = "  ".repeat(depth);
     let emitted = false;
 
+    const maxText = Number.isFinite(options.maxText) ? options.maxText : 150;
+    const isUnlimitedText = maxText <= 0;
+
+    function formatText(raw) {
+      if (!raw) return "";
+      const norm = normalizeText(raw);
+      if (isUnlimitedText || norm.length <= maxText) {
+        return csvSafe(norm).replace(/"/g, '\\"');
+      }
+      return csvSafe(norm.slice(0, Math.max(0, maxText - 3)) + "...").replace(/"/g, '\\"');
+    }
+
     if (role && !SKIP_ROLES.has(role)) {
       let line = `${indent}- ${role}`;
       if (name) {
-        const cleanName = compactText(name, 150).replace(/"/g, '\\"');
+        const cleanName = formatText(name);
         line += ` "${cleanName}"`;
       }
       if (refAssigner) {
@@ -776,10 +794,37 @@ export function renderVomTree(root, options = {}) {
           line += ` [${formattedToken}]`;
         }
       }
+      if (el.disabled || el.getAttribute?.("aria-disabled") === "true") {
+        line += " [disabled]";
+      }
+      if (role === "checkbox" || role === "radio" || tag === "input") {
+        if (el.checked) line += " [checked]";
+      }
+      if (tag === "input" || tag === "textarea") {
+        if (isPassword && redactValues) {
+          line += ' = "•••"';
+        } else if (el.value) {
+          const safeVal = compactText(el.value, 200).replace(/"/g, '\\"');
+          line += ` = "${safeVal}"`;
+        }
+      }
+      if ((role === "link" || tag === "a") && el.getAttribute?.("href")) {
+        const href = el.getAttribute("href");
+        if (href && !href.startsWith("javascript:")) {
+          line += ` [→ ${href}]`;
+        }
+      }
+      if (
+        el.isContentEditable ||
+        el.getAttribute?.("contenteditable") === "true" ||
+        el.getAttribute?.("contenteditable") === ""
+      ) {
+        line += " [contenteditable]";
+      }
       lines.push(line);
       emitted = true;
     } else if (isLeafText && name) {
-      const cleanText = compactText(name, 150).replace(/"/g, '\\"');
+      const cleanText = formatText(name);
       lines.push(`${indent}- text: "${cleanText}"`);
       emitted = true;
     }
@@ -944,8 +989,10 @@ export function takeSnapshot(rootOrOptions, options = {}) {
   const vomText = renderVomTree(root, {
     refAssigner: registerElement,
     maxDepth,
+    maxText: opts.maxText,
     redactValues,
     scope: opts.scope || "viewport",
+    format: opts.format,
   });
 
   return {

@@ -1,6 +1,6 @@
-# browserctl Core Tool Reference — v0.9.7
+# browserctl Core Tool Reference — v0.9.8
 
-browserctl provides 19 core tools (79 tools across all profiles) for web automation and agent inspection.
+browserctl provides 20 core tools (79 tools across all profiles) for web automation and agent inspection.
 
 ## Targeting an element
 
@@ -149,6 +149,7 @@ because a reload loses any unsaved input on that page.
 - scope: 'viewport' (default) or 'all' elements in DOM.
 - target: Scope snapshot to a specific element (@e token or CSS selector).
 - maxDepth: Max DOM tree depth (default: 25).
+- maxText: Maximum characters for text prose (default: 150; pass 0 or -1 for unlimited full text).
 - limit: Maximum number of elements to include in census.
 - cursor: Offset cursor for paged snapshot traversal.
 

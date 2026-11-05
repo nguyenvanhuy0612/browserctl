@@ -35,37 +35,56 @@ flowchart TD
 
 ---
 
-## 2. Unified VOM Snapshot Engine (`extension/content/snapshot.js`)
+## 2. VOM Snapshot Engine (`extension/content/snapshot.js`)
 
 ### 2.1 The `@e` Element Indexing Invariant
+
 - Interactive nodes (links, buttons, inputs, selects, textareas, elements with interactive ARIA roles or pointer affordances) are indexed sequentially as `@e1`, `@e2`, `@e3`, etc.
 - References using the deprecated `@ref` format are strictly forbidden and will fail schema validation.
 
 ### 2.2 Pruning, Visibility & Zero Content Loss Rules
+
 1. **Visibility Pruning**: Skip non-rendered and occluded elements:
    - Elements with `display: none`, `visibility: hidden`, or `opacity: 0` (unless containing visible interactive children).
    - Elements with zero bounding client rect (`width === 0 && height === 0`) and no children.
    - Non-rendered elements: `<script>`, `<style>`, `<noscript>`, `<template>`, `<meta>`, `<link>`, `<head>`.
-2. **Container Collapsing**:
-   - Containers with `cursor: pointer` and compact text (< 100 chars) are recognized as buttons.
+2. **Container Collapsing Heuristic**:
+   - Containers with `cursor: pointer` and compact text (<= 150 chars) are recognized as buttons.
+   - Clickable containers with long text (> 150 chars, such as articles or cards) abort collapsing and render their child structure and prose normally.
    - Child decorative icons, spans, and svgs within a collapsed clickable button are suppressed to avoid token fragmentation.
-3. **Zero Content Loss**:
-   - All body prose, paragraphs, headings (`h1`–`h6`), and table cells are fully preserved in reading order.
-   - Text is NOT truncated with artificial `[+N chars]` markers.
-   - Passwords and sensitive input fields are redacted as `[REDACTED]`.
+3. **Configurable Text Boundary & Zero Content Loss Rules**:
+   - By default, leaf prose text (`- text: "..."`) and node names are bounded to `maxText: 150` characters (ending with `...`) to keep the initial VOM survey compact and token-efficient for agent interaction planning.
+   - When complete readability is required (e.g. reading full articles, terms, or documentation), passing `maxText: 0` (or `-1`) activates **Zero Content Loss Mode**, outputting 100% of all body prose, headings, and descriptions without truncation.
+   - Values inside `<input>` and `<textarea>` controls (`= "..."`) are capped at a safe ceiling of 200 characters to prevent base64/blob memory blowup.
+   - Passwords and sensitive input fields are redacted as `[REDACTED]` or `= "•••"`.
 
-### 2.3 Single Unified Output Format (Virtual Object Model Tree)
-The snapshot engine outputs a single unified indented text tree reflecting W3C Accessibility Tree semantics:
+### 2.3 Output Format (Virtual Object Model Tree)
+
+The snapshot engine outputs an indented text tree reflecting W3C Accessibility Tree semantics:
+
 - Root node: `- RootWebArea "<title>" [@e0]`
 - Semantic & interactive nodes: `- <role> "<accessible_name>" [@eN]` (indented with 2 spaces per depth level).
 - Leaf content prose: `- text: "<content>"`
 - Table cells: `- cell "<content>" [@eN]`
+- Rich control state annotations:
+  - Form state: `[disabled]`, `[checked]`, `[unchecked]`
+  - Value state: `= "<val>"` (for input/textarea, max 200 chars)
+  - Navigation links: `[→ <href>]` (for valid external or same-origin URLs)
+  - Rich text surfaces: `[contenteditable]`
+
+#### MCP Default Output & Payload Invariant
+
+- **Default Output Contract**: By default, `browser_snapshot` for MCP agents returns the **formatted VOM tree string directly** (`res.census`), NOT a JSON dictionary. This provides immediate, natural readability for LLMs without JSON escaping or nesting overhead.
+- **Payload Compactness Invariant**: If JSON format is explicitly requested (`format: "json"`), the response payload MUST NOT include heavy recursive AST trees (`vom`, `tree`). Internal AST objects are pruned before serialization to ensure the response remains compact (< 5 KB) and never exceeds LLM token limits or gets truncated mid-stream.
 
 ### 2.4 Parameter Contract
+
 `browser_snapshot` exposes a minimal, clean parameter set:
+
 - `scope`: `"viewport"` (default, bounds to active viewport to prevent context overflow) | `"all"` (traverses entire document).
 - `target`: optional token (e.g. `"@e129"`) or CSS selector to scope the snapshot to a subtree.
 - `maxDepth`: optional number (default: 25) limiting recursion depth.
+- `maxText`: optional number (default: 150; max characters for prose text nodes; pass 0 or -1 for unlimited full text).
 - `limit`: optional number of controls per page.
 - `cursor`: optional offset index for pagination.
 
@@ -94,7 +113,9 @@ export function setElementValue(element, value) {
   }
 
   // 4. Dispatch beforeinput
-  element.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, inputType: "insertText", data: value }));
+  element.dispatchEvent(
+    new InputEvent("beforeinput", { bubbles: true, inputType: "insertText", data: value })
+  );
 
   // 5. Dispatch input event (Crucial for React 16+)
   element.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
@@ -194,6 +215,7 @@ The structured extraction engine provides passive, declarative data extraction a
 ### 4.3 Multi-Tier Column Header Hierarchy (`header_path`)
 
 Complex financial, scientific, or reporting tables feature multi-row grouped headers (e.g. `Year > 2024 > Q1`).
+
 1. For each column, all active header cells spanning that column index across header rows are accumulated into an ordered array: `header_path = ["Year", "2024", "Q1"]`.
 2. Column display names are formatted by joining the path: `header_path.join(" / ")` (e.g. `"Year / 2024 / Q1"`).
 3. If no header text exists, generated names are assigned (`name_source: "generated"`, e.g. `"Column 1"`), and `generated_column_names` is recorded in `warnings`.
@@ -202,10 +224,12 @@ Complex financial, scientific, or reporting tables feature multi-row grouped hea
 ### 4.4 Virtualized Grids & Split ARIA Row Joining
 
 Modern enterprise grids (AG-Grid, Datatables, SlickGrid) implement virtualization and sticky/pinned columns where:
+
 - Rows may be rendered out of DOM order.
 - A single logical row is split across multiple container fragments (e.g. pinned left columns in container A, scrollable columns in container B).
 
 **Algorithm**:
+
 1. Check `aria-rowindex` on each `[role="row"]`. If explicit indices are present:
    - Sort rows logically by `source_row = aria-rowindex`.
    - If adjacent fragments share the same `source_row` and agree on row kind (`data` vs `footer`):
@@ -243,6 +267,7 @@ Modern enterprise grids (AG-Grid, Datatables, SlickGrid) implement virtualizatio
 ### 4.7 CSV Formula Injection Guard (CWE-1236)
 
 When exporting extracted data to CSV, any cell string beginning with an executable trigger character (`=`, `+`, `-`, `@`, `\t`, `\r`) must be escaped by prepending an apostrophe (`'`) when `csv_safe: true` (the default):
+
 ```javascript
 export function csv_safe(val) {
   if (val == null) return "";
@@ -271,21 +296,21 @@ export interface ExtractResult {
     target_id?: string;
   };
   columns: Array<{
-    key: string;               // "c1", "c2", ...
-    name: string;              // "Header Name" or "Group / Subgroup"
-    header_path: string[];     // ["Group", "Subgroup"]
+    key: string; // "c1", "c2", ...
+    name: string; // "Header Name" or "Group / Subgroup"
+    header_path: string[]; // ["Group", "Subgroup"]
     name_source: "header" | "generated" | "field";
   }>;
   rows: Array<Record<string, string | null>>; // [{ c1: "val", c2: null }]
   row_sources: Array<{
-    row: number;               // 0-based returned row index
-    source_row: number;        // 1-based DOM/ARIA source row
+    row: number; // 0-based returned row index
+    source_row: number; // 1-based DOM/ARIA source row
     row_kind: "data" | "footer";
-    locator: string;           // Diagnostic CSS locator
+    locator: string; // Diagnostic CSS locator
   }>;
   spans: Array<{
     row: number;
-    column: string;            // "c1"
+    column: string; // "c1"
     row_span: number;
     column_span: number;
   }>;
@@ -325,6 +350,7 @@ export interface ExtractResult {
 ## 6. Stabilization Finite State Machine (`wait_settle`)
 
 ### 6.1 Architecture & State Transitions
+
 Page settling must never rely on passive mutation listeners or unbuffered `setTimeout` calls. The settling engine implements a strict Finite State Machine (FSM):
 
 ```mermaid
@@ -341,6 +367,7 @@ stateDiagram-v2
 ```
 
 ### 6.2 The Three Invariants of the Settle FSM
+
 1. **Immediate Initial Debounce Invariant**:
    - When `wait_settle` begins, an active 50ms debounce timer is started immediately.
    - If the page is already quiet (0 mutations occur), the FSM transitions to `Settled` after 50ms instead of waiting for the full `timeoutMs` budget.
@@ -376,6 +403,7 @@ stateDiagram-v2
 ## 7. Deterministic Element Resolution Pipeline (`resolveTarget`)
 
 ### 7.1 Pipeline Stages
+
 To prevent false-positive `ambiguous target` errors on responsive websites that duplicate DOM nodes for mobile/desktop layouts:
 
 ```
@@ -406,7 +434,9 @@ To prevent false-positive `ambiguous target` errors on responsive websites that 
 ```
 
 ### 7.2 Disambiguation Exception Format
+
 If and only if multiple elements pass Stages 1-3 with identical highest scores:
+
 ```json
 {
   "code": -32003,

@@ -24,21 +24,21 @@ classDiagram
 
 ### 1.1 Domain Distribution Matrix
 
-| Domain Module | Primary Tools Included | Profile |
-| :--- | :--- | :--- |
-| `action.js` | `browser_click`, `browser_fill_form`, `browser_type`, `browser_scroll` (`core`); `browser_hover`, `browser_press_key`, `browser_select_option`, `browser_wheel`, `browser_drag` (`advanced`) | `core` & `advanced` |
-| `navigate.js` | `browser_navigate`, `browser_wait_for` (`core`); `browser_go_back`, `browser_go_forward` (`advanced`) | `core` & `advanced` |
-| `inspect.js` | `browser_snapshot`, `browser_extract`, `browser_evaluate`, `browser_take_screenshot` (`core`); `browser_find`, `browser_get_content`, `browser_get_property` (`advanced`) | `core` & `advanced` |
-| `tabs.js` | `browser_tabs` (`core`); `browser_group_tab`, `browser_ungroup_tab`, `browser_current_tab`, `browser_list_windows`, `browser_focus_window` (`tabs` & `advanced`) | `core`, `tabs`, `advanced` |
-| `network_tools.js` | `browser_make_request`, `browser_monitor_requests` (`core` & `network`); `browser_mock_route`, `browser_net_start`, `browser_net_stop`, `browser_net_get`, `browser_net_clear`, `browser_get_response_body`, `browser_wait_network_idle`, `browser_get_network_request`, `browser_network_replay` (`network`) | `core` & `network` |
-| `daemon / lifecycle` | `browser_status`, `browser_start`, `browser_stop` (`core`) | `core` |
-| `meta / dispatch` | `browser_action`, `browser_load_tools` (`core`) | `core` |
-| `emulate_tools.js` | `browser_emulate` (device presets, viewport, userAgent, dark mode, geolocation, offline) | `advanced` |
-| `download_tools.js`| `browser_download` (trigger, track progress, save on disk) | `advanced` |
-| `storage_tools.js` | `browser_storage_get`, `browser_storage_set`, `browser_storage_remove`, `browser_storage_clear` | `storage` & `advanced` |
-| `cookie_tools` | `browser_get_cookies`, `browser_set_cookie`, `browser_delete_cookies` | `cookies` & `advanced` |
-| `cdp_tools` | `browser_cdp_send`, `browser_cdp_attach`, `browser_cdp_detach`, `browser_coordinate_click`, `browser_insert_text`, `browser_coordinate_drag`, `browser_audit` | `cdp` & `advanced` |
-| `record_tools` | `browser_record_start`, `browser_record_stop`, `browser_record_get`, `browser_replay` | `record` & `advanced` |
+| Domain Module        | Primary Tools Included                                                                                                                                                                                                                                                                                        | Profile                    |
+| :------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :------------------------- |
+| `action.js`          | `browser_click`, `browser_fill_form`, `browser_type`, `browser_scroll` (`core`); `browser_hover`, `browser_press_key`, `browser_select_option`, `browser_wheel`, `browser_drag` (`advanced`)                                                                                                                  | `core` & `advanced`        |
+| `navigate.js`        | `browser_navigate`, `browser_wait_for` (`core`); `browser_go_back`, `browser_go_forward` (`advanced`)                                                                                                                                                                                                         | `core` & `advanced`        |
+| `inspect.js`         | `browser_snapshot`, `browser_extract`, `browser_evaluate`, `browser_take_screenshot`, `browser_get_property` (`core`); `browser_find`, `browser_get_content` (`advanced`)                                                                                                                                     | `core` & `advanced`        |
+| `tabs.js`            | `browser_tabs` (`core`); `browser_group_tab`, `browser_ungroup_tab`, `browser_current_tab`, `browser_list_windows`, `browser_focus_window` (`tabs` & `advanced`)                                                                                                                                              | `core`, `tabs`, `advanced` |
+| `network_tools.js`   | `browser_make_request`, `browser_monitor_requests` (`core` & `network`); `browser_mock_route`, `browser_net_start`, `browser_net_stop`, `browser_net_get`, `browser_net_clear`, `browser_get_response_body`, `browser_wait_network_idle`, `browser_get_network_request`, `browser_network_replay` (`network`) | `core` & `network`         |
+| `daemon / lifecycle` | `browser_status`, `browser_start`, `browser_stop` (`core`)                                                                                                                                                                                                                                                    | `core`                     |
+| `meta / dispatch`    | `browser_action`, `browser_load_tools` (`core`)                                                                                                                                                                                                                                                               | `core`                     |
+| `emulate_tools.js`   | `browser_emulate` (device presets, viewport, userAgent, dark mode, geolocation, offline)                                                                                                                                                                                                                      | `advanced`                 |
+| `download_tools.js`  | `browser_download` (trigger, track progress, save on disk)                                                                                                                                                                                                                                                    | `advanced`                 |
+| `storage_tools.js`   | `browser_storage_get`, `browser_storage_set`, `browser_storage_remove`, `browser_storage_clear`                                                                                                                                                                                                               | `storage` & `advanced`     |
+| `cookie_tools`       | `browser_get_cookies`, `browser_set_cookie`, `browser_delete_cookies`                                                                                                                                                                                                                                         | `cookies` & `advanced`     |
+| `cdp_tools`          | `browser_cdp_send`, `browser_cdp_attach`, `browser_cdp_detach`, `browser_coordinate_click`, `browser_insert_text`, `browser_coordinate_drag`, `browser_audit`                                                                                                                                                 | `cdp` & `advanced`         |
+| `record_tools`       | `browser_record_start`, `browser_record_stop`, `browser_record_get`, `browser_replay`                                                                                                                                                                                                                         | `record` & `advanced`      |
 
 ---
 
@@ -65,14 +65,16 @@ export async function execute(params, ctx) {
 ```
 
 ### 2.1 Context Definition (`ExecutionContext`)
+
 The `ctx` object provides isolated, dependency-injected services:
+
 ```javascript
 export class ExecutionContext {
   constructor({ tabId, browserProfile, signal, driver, contentBridge }) {
     this.tabId = tabId;
     this.browserProfile = browserProfile;
-    this.signal = signal;               // AbortSignal
-    this.driver = driver;               // CDP Driver instance
+    this.signal = signal; // AbortSignal
+    this.driver = driver; // CDP Driver instance
     this.contentBridge = contentBridge; // Tab IPC bridge
   }
 }
@@ -109,5 +111,5 @@ flowchart LR
 ## 4. Agent Reading Budget Invariant
 
 - **Hard Limit**: Consolidated text for `core` profile descriptions and schemas must remain strictly `<= 20,200 characters`.
-- **Current Core Usage**: `13,311` characters (budget headroom: 6,889 chars across 19 core tools).
+- **Current Core Usage**: strictly within budget ceiling (budget headroom across 20 core tools).
 - **Rule**: No new tool may be assigned to the `core` profile without removing or condensing existing tool definitions to maintain the `< 20,200` budget. Specialized tools (emulate, drag, wheel, network replay, download) must default to `advanced` or their respective domain profiles. Optional parameters (such as `format: "vom"` for layout inspection in `browser_snapshot`) must remain concise to stay within the profile budget headroom.

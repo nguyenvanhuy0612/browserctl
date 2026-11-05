@@ -524,8 +524,8 @@ test("TC-PROTO-03: Consolidated core profile tool descriptions and schemas <= 20
   assert.equal(res.status, 0, `Script failed with error: ${res.stderr}`);
 
   const data = JSON.parse(res.stdout.trim());
-  assert.equal(data.coreCount, 19, "Must have exactly 19 core tools registered");
-  assert.equal(data.total, 13264, "Baseline reading budget invariant must match 13,264 chars");
+  assert.equal(data.coreCount, 20, "Must have exactly 20 core tools registered");
+  assert.equal(data.total, 14005, "Baseline reading budget invariant must match 14,005 chars");
   assert.ok(
     data.total <= AGENT_TEXT_BUDGET,
     `Core profile reading size ${data.total} exceeds ${AGENT_TEXT_BUDGET} character budget`

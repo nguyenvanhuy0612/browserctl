@@ -3,6 +3,15 @@
 One entry per published version. The reasoning and measurements behind each change are in the
 commit history and on the GitHub release.
 
+## 0.9.8
+
+Promotion of property inspection (`browser_get_property` / `get text`) to core profile, Zero Content Loss full-text mode (`maxText: 0`), and compact MCP snapshot payloads.
+
+- **Zero Content Loss & Configurable `maxText` (`browser_snapshot`)**: Adds canonical `maxText` parameter (default 150) supporting `maxText: 0` or `-1` to retain full leaf text prose without artificial 150-character truncation or `...` markers.
+- **Compact MCP Snapshot Payload**: `compactSnapshot` prunes recursive `vom` and `tree` AST bloat in MCP output, returning clean status metadata and formatted VOM string without unbounded payload overhead.
+- **Core Profile Promotion for Property Inspection (`browser_get_property`)**: Promoted `browser_get_property` (with aliases `get_property`, `get_text`, `browser_get_text`, CLI `get text <target>`) to default `core` profile and `READ` tool group, bringing core tools count to 20 while maintaining strict 20,200-char budget invariant (14,005 chars used).
+- **Enhanced VOM Annotations & Semantic Roles**: Adds rich control indicators (`[disabled]`, `[checked]`, `[contenteditable]`, `[→ href]`, `= "<val>"`), with automatic semantic mapping for `contenteditable` elements to `textbox` role while preserving table grid roles.
+
 ## 0.9.7
 
 Hierarchical Virtual Object Model (VOM) tree engine for snapshots, container collapsing for single-page applications, and clean canonical parameter contracts.

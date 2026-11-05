@@ -253,19 +253,19 @@ Agent:  It links to IANA's "Example Domains" page, which explains these domains 
 
 ## Tools and the interaction loop
 
-| Stage | Representative tools | Purpose |
-|---|---|---|
-| **1. Navigate** | `browser_navigate`, `browser_tabs` | Open a URL or reload; list, open, select or release tabs |
-| **2. Read** | `browser_snapshot`, `browser_extract` | List the page's controls with `@e` tokens, extract structured rows from tables and lists |
-| **3. Act** | `browser_click`, `browser_type`, `browser_fill_form` | Click, type with Enter submission, fill several fields at once |
-| **4. Network** | `browser_make_request`, `browser_monitor_requests` | Make in-page HTTP requests with session cookies, monitor network traffic and response bodies |
-| **5. Verify** | `browser_wait_for`, `browser_take_screenshot`, `browser_status` | Wait for an element or text, capture the page, check bridge and extension |
+| Stage           | Representative tools                                            | Purpose                                                                                      |
+| --------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| **1. Navigate** | `browser_navigate`, `browser_tabs`                              | Open a URL or reload; list, open, select or release tabs                                     |
+| **2. Read**     | `browser_snapshot`, `browser_extract`                           | List the page's controls with `@e` tokens, extract structured rows from tables and lists     |
+| **3. Act**      | `browser_click`, `browser_type`, `browser_fill_form`            | Click, type with Enter submission, fill several fields at once                               |
+| **4. Network**  | `browser_make_request`, `browser_monitor_requests`              | Make in-page HTTP requests with session cookies, monitor network traffic and response bodies |
+| **5. Verify**   | `browser_wait_for`, `browser_take_screenshot`, `browser_status` | Wait for an element or text, capture the page, check bridge and extension                    |
 
-The 19 core tools, visible at connect:
+The 20 core tools, visible at connect:
 
 - **Daemon and session:** `browser_status`, `browser_start`, `browser_stop`.
 - **Navigation and tabs:** `browser_navigate`, `browser_tabs`.
-- **Reading:** `browser_snapshot`, `browser_extract`.
+- **Reading:** `browser_snapshot`, `browser_extract`, `browser_get_property`.
 - **Acting:** `browser_click`, `browser_type`, `browser_fill_form`, `browser_scroll`, `browser_file_upload`.
 - **Waiting and visual verification:** `browser_wait_for`, `browser_take_screenshot`.
 - **Network and in-page API:** `browser_make_request`, `browser_monitor_requests`.
@@ -291,12 +291,12 @@ tab it works in.
 Set these in the MCP entry's `env` block (opencode: `environment`) and, for the CLI, in your
 shell. Every variable is optional.
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `BROWSERCTL_MCP_PROFILE` | `core` | `core` shows the core tools and loads the rest on demand; `all` shows every tool at connect. |
-| `BROWSERCTL_BRIDGE_URL` | `http://127.0.0.1:8765` | Where to reach the bridge. A bridge started automatically listens on this URL's port. |
-| `BROWSERCTL_AUTO_START` | `auto` | `manual` never starts the bridge; run `browserctl start` yourself. |
-| `HOST` | `0.0.0.0` | Interface the bridge listens on. `127.0.0.1` keeps it local-only. |
+| Variable                 | Default                 | Meaning                                                                                      |
+| ------------------------ | ----------------------- | -------------------------------------------------------------------------------------------- |
+| `BROWSERCTL_MCP_PROFILE` | `core`                  | `core` shows the core tools and loads the rest on demand; `all` shows every tool at connect. |
+| `BROWSERCTL_BRIDGE_URL`  | `http://127.0.0.1:8765` | Where to reach the bridge. A bridge started automatically listens on this URL's port.        |
+| `BROWSERCTL_AUTO_START`  | `auto`                  | `manual` never starts the bridge; run `browserctl start` yourself.                           |
+| `HOST`                   | `0.0.0.0`               | Interface the bridge listens on. `127.0.0.1` keeps it local-only.                            |
 
 The rest are in [docs/INSTALL.md](docs/INSTALL.md#environment-variables).
 

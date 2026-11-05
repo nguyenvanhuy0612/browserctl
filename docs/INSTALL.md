@@ -432,16 +432,16 @@ session's target — work in a tab of your own).
 Set these in the MCP entry's `env` (or `claude mcp add -e`) and, for the CLI, in your shell. The
 daemon is started by whichever of them runs first and keeps that environment until restarted.
 
-| Variable | Default | Used by | Meaning |
-|---|---|---|---|
-| `BROWSERCTL_BRIDGE_URL` | `http://127.0.0.1:8765` | MCP, CLI | Where to reach the bridge. An auto-started bridge listens on this URL's port. |
-| `BROWSERCTL_SESSION` | `cli` | CLI | CLI session name. The bridge keeps each CLI session's target tab between commands; two names keep two targets. |
-| `BROWSERCTL_MCP_PROFILE` | `core` | MCP | `core` exposes 19 tools and loads the rest on demand; `all` (or `full`) exposes all 80. |
-| `BROWSERCTL_AUTO_START` | `auto` | MCP, CLI | `manual` (or `false`) never starts the bridge; start it with `browserctl start`. |
-| `BROWSERCTL_CALL_LOG` | on | bridge | Logs every call to `~/.browserctl/calls.jsonl`: which session sent which action to which browser and tab, and whether a tab hold refused it. Parameter values and page content are never written. A path logs there instead; `0`/`false` turns it off. |
-| `BROWSERCTL_CALL_LOG_MAX_MB` | `8` | bridge | Size at which the call log rotates to `.1`. |
-| `HOST` | `0.0.0.0` | bridge | Interface the bridge listens on. |
-| `PORT` | `8765` | bridge | Port, when the bridge is started directly (`npm start` from source). An auto-started bridge takes its port from `BROWSERCTL_BRIDGE_URL`. |
+| Variable                     | Default                 | Used by  | Meaning                                                                                                                                                                                                                                                |
+| ---------------------------- | ----------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `BROWSERCTL_BRIDGE_URL`      | `http://127.0.0.1:8765` | MCP, CLI | Where to reach the bridge. An auto-started bridge listens on this URL's port.                                                                                                                                                                          |
+| `BROWSERCTL_SESSION`         | `cli`                   | CLI      | CLI session name. The bridge keeps each CLI session's target tab between commands; two names keep two targets.                                                                                                                                         |
+| `BROWSERCTL_MCP_PROFILE`     | `core`                  | MCP      | `core` exposes 20 tools and loads the rest on demand; `all` (or `full`) exposes all 79.                                                                                                                                                                |
+| `BROWSERCTL_AUTO_START`      | `auto`                  | MCP, CLI | `manual` (or `false`) never starts the bridge; start it with `browserctl start`.                                                                                                                                                                       |
+| `BROWSERCTL_CALL_LOG`        | on                      | bridge   | Logs every call to `~/.browserctl/calls.jsonl`: which session sent which action to which browser and tab, and whether a tab hold refused it. Parameter values and page content are never written. A path logs there instead; `0`/`false` turns it off. |
+| `BROWSERCTL_CALL_LOG_MAX_MB` | `8`                     | bridge   | Size at which the call log rotates to `.1`.                                                                                                                                                                                                            |
+| `HOST`                       | `0.0.0.0`               | bridge   | Interface the bridge listens on.                                                                                                                                                                                                                       |
+| `PORT`                       | `8765`                  | bridge   | Port, when the bridge is started directly (`npm start` from source). An auto-started bridge takes its port from `BROWSERCTL_BRIDGE_URL`.                                                                                                               |
 
 ## Troubleshooting
 
@@ -479,6 +479,6 @@ daemon is started by whichever of them runs first and keeps that environment unt
   `browserctl stop`, or `BROWSERCTL_AUTO_START=manual`. Run `browserctl start`.
 - **Behaviour looks like an old version after an update** — one of the three processes is still
   on old code. Do all of [Updating](#updating) steps 2–4.
-- **A tool you expect is missing** — the `core` profile shows 19 tools. Ask the agent to load a
+- **A tool you expect is missing** — the `core` profile shows 20 tools. Ask the agent to load a
   profile (`browser_load_tools`), call it through `browser_action`, or set
   `BROWSERCTL_MCP_PROFILE=all`.

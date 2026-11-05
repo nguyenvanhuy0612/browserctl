@@ -28,38 +28,46 @@ flowchart TD
 ## 2. Acceptance Criteria Matrix by Subsystem
 
 ### 2.1 Protocol, Error Handling & Budget (`01-protocol-and-errors.md`)
-| Test Case ID | Test Description | Expected Result | Edge Cases Covered |
-| :--- | :--- | :--- | :--- |
-| `TC-PROTO-01` | JSON-RPC 2.0 framing compliance | Request, response, and error objects strictly conform to JSON-RPC 2.0 spec. | Missing `id`, malformed JSON string, batch requests. |
-| `TC-PROTO-02` | Standard `RpcError` taxonomy | All errors map to codes `-32700` to `-32010` with `data.reason` enum. | Unhandled JS exception wrapped into `-32603`, target not found into `-32001`. |
-| `TC-PROTO-03` | Core Profile Token Budget | Consolidated tool descriptions and schemas for `core` profile `<= 20,200` characters. | Schema whitespace trimming, boundary threshold check (currently `13,311`). |
-| `TC-PROTO-04` | In-flight request cancellation | `AbortSignal` interrupts pending CDP or bridge calls and cleans up timers. | Disconnection during in-flight network call, rapid double cancellation. |
+
+| Test Case ID  | Test Description                | Expected Result                                                                       | Edge Cases Covered                                                            |
+| :------------ | :------------------------------ | :------------------------------------------------------------------------------------ | :---------------------------------------------------------------------------- |
+| `TC-PROTO-01` | JSON-RPC 2.0 framing compliance | Request, response, and error objects strictly conform to JSON-RPC 2.0 spec.           | Missing `id`, malformed JSON string, batch requests.                          |
+| `TC-PROTO-02` | Standard `RpcError` taxonomy    | All errors map to codes `-32700` to `-32010` with `data.reason` enum.                 | Unhandled JS exception wrapped into `-32603`, target not found into `-32001`. |
+| `TC-PROTO-03` | Core Profile Token Budget       | Consolidated tool descriptions and schemas for `core` profile `<= 20,200` characters. | Schema whitespace trimming, boundary threshold check (currently `13,311`).    |
+| `TC-PROTO-04` | In-flight request cancellation  | `AbortSignal` interrupts pending CDP or bridge calls and cleans up timers.            | Disconnection during in-flight network call, rapid double cancellation.       |
 
 ### 2.2 CDP Driver & Low-Level Automation (`02-driver-and-cdp.md`)
-| Test Case ID | Test Description | Expected Result | Edge Cases Covered |
-| :--- | :--- | :--- | :--- |
-| `TC-CDP-01` | Mouse wheel dispatch (`browser_wheel`) | Dispatches CDP `mouseWheel` event with `deltaX`, `deltaY`, coordinates, and modifier bitmasks. | Zero deltas, negative coordinates, combined Shift+Ctrl modifiers. |
-| `TC-CDP-02` | Native drag-and-drop (`browser_drag`) | Smooth interpolation from source `(fromX, fromY)` to destination `(toX, toY)`. | Dragging to negative offsets, drag outside viewport boundaries. |
-| `TC-CDP-03` | Device & environment emulation | Sets viewport, DPR, mobile UA, geolocation, dark mode; resets cleanly with `clear`/`off`. | Invalid geolocation coords, toggling dark mode without reloading page. |
-| `TC-CDP-04` | RFC 6901 JSON Pointer | Traverses nested JSON, slices arrays, unescapes `~1` (`/`) and `~0` (`~`). | Root pointer `/`, nonexistent path segments, null intermediate objects. |
-| `TC-CDP-05` | In-page network replay | Executes HTTP request inside page context reusing session cookies and headers. | CORS preflight handling, 401 unauthorized, binary response data. |
+
+| Test Case ID | Test Description                       | Expected Result                                                                                | Edge Cases Covered                                                      |
+| :----------- | :------------------------------------- | :--------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------- |
+| `TC-CDP-01`  | Mouse wheel dispatch (`browser_wheel`) | Dispatches CDP `mouseWheel` event with `deltaX`, `deltaY`, coordinates, and modifier bitmasks. | Zero deltas, negative coordinates, combined Shift+Ctrl modifiers.       |
+| `TC-CDP-02`  | Native drag-and-drop (`browser_drag`)  | Smooth interpolation from source `(fromX, fromY)` to destination `(toX, toY)`.                 | Dragging to negative offsets, drag outside viewport boundaries.         |
+| `TC-CDP-03`  | Device & environment emulation         | Sets viewport, DPR, mobile UA, geolocation, dark mode; resets cleanly with `clear`/`off`.      | Invalid geolocation coords, toggling dark mode without reloading page.  |
+| `TC-CDP-04`  | RFC 6901 JSON Pointer                  | Traverses nested JSON, slices arrays, unescapes `~1` (`/`) and `~0` (`~`).                     | Root pointer `/`, nonexistent path segments, null intermediate objects. |
+| `TC-CDP-05`  | In-page network replay                 | Executes HTTP request inside page context reusing session cookies and headers.                 | CORS preflight handling, 401 unauthorized, binary response data.        |
 
 ### 2.3 DOM Engine & Content Scripts (`04-content-and-dom.md`)
-| Test Case ID | Test Description | Expected Result | Edge Cases Covered |
-| :--- | :--- | :--- | :--- |
-| `TC-DOM-01` | Unified VOM Snapshot Tree | Outputs W3C ARIA indented tree (`- <role> "<name>" [@eN]`, `- text: "<content>"`, `- cell "<content>" [@eN]`). `@e` indexing on all interactive nodes. Zero content loss. | Dynamic DOM additions, virtualized webmail, SVG buttons, nested text formatting. |
-| `TC-DOM-02` | Token pruning & trimming | Invisible elements (`display:none`, `visibility:hidden`, 0x0 rect) excluded. | Zero rect elements with visible children, opacity transitions. |
-| `TC-DOM-03` | 10-Step Setter Guard | Form inputs populated reliably across React, Vue, Angular without stale state. | Controlled React input components, masked input fields, contenteditable. |
-| `TC-DOM-04` | Table Matrix Reconciler | 2D matrix accurately maps rows/columns with complex `colspan` and `rowspan`. | Empty table cells, nested tables, mismatched column counts across rows. |
-| `TC-DOM-05` | CSV Formula Injection Guard | Prepend apostrophe (`'`) to cell strings starting with `=`, `+`, `-`, `@`, `\t`, `\r`. | Pre-escaped cells, numeric formulas, strings with leading whitespace. |
-| `TC-DOM-06` | Clean Snapshot Parameters | Supports `scope: "viewport" \| "all"`, `target`, `maxDepth`, `limit`, `cursor`. | Scope boundaries, target scoping to sub-elements, deep hierarchy limit. |
+
+| Test Case ID | Test Description                                     | Expected Result                                                                                                                                                                                                                          | Edge Cases Covered                                                                   |
+| :----------- | :--------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------- |
+| `TC-DOM-01`  | VOM Snapshot Tree                                    | Outputs W3C ARIA indented tree (`- <role> "<name>" [@eN]`, `- text: "<content>"`, `- cell "<content>" [@eN]`). `@e` indexing on all interactive nodes. Zero content loss.                                                                | Dynamic DOM additions, virtualized webmail, SVG buttons, nested text formatting.     |
+| `TC-DOM-02`  | Token pruning & trimming                             | Invisible elements (`display:none`, `visibility:hidden`, 0x0 rect) excluded.                                                                                                                                                             | Zero rect elements with visible children, opacity transitions.                       |
+| `TC-DOM-03`  | 10-Step Setter Guard                                 | Form inputs populated reliably across React, Vue, Angular without stale state.                                                                                                                                                           | Controlled React input components, masked input fields, contenteditable.             |
+| `TC-DOM-04`  | Table Matrix Reconciler                              | 2D matrix accurately maps rows/columns with complex `colspan` and `rowspan`.                                                                                                                                                             | Empty table cells, nested tables, mismatched column counts across rows.              |
+| `TC-DOM-05`  | CSV Formula Injection Guard                          | Prepend apostrophe (`'`) to cell strings starting with `=`, `+`, `-`, `@`, `\t`, `\r`.                                                                                                                                                   | Pre-escaped cells, numeric formulas, strings with leading whitespace.                |
+| `TC-DOM-06`  | Clean Snapshot Parameters                            | Supports `scope: "viewport" \| "all"`, `target`, `maxDepth`, `maxText`, `limit`, `cursor`.                                                                                                                                               | Scope boundaries, target scoping to sub-elements, deep hierarchy limit.              |
+| `TC-DOM-07`  | Default VOM Output & Compact Payload                 | MCP snapshot defaults to returning VOM tree string directly. JSON format prunes recursive AST nodes (`vom`, `tree`) to guarantee payload size < 5 KB without truncation.                                                                 | Zero format argument, explicit `format: "json"`, very large web apps.                |
+| `TC-DOM-08`  | Configurable Text Limit & Zero Loss (`maxText`)      | Defaults to `maxText: 150` with `...` truncation. When `maxText: 0` or `-1`, returns 100% full text without truncation. Input values capped at 200 chars. Rich annotations (`[disabled]`, `[checked]`, `[contenteditable]`, `[→ href]`). | Multi-paragraph articles, unlimit text reading, base64 input values, external links. |
+| `TC-DOM-09`  | Core Property & Text Reader (`browser_get_property`) | Promoted to `core` profile (20 core tools). Defaults to text reading (`property: 'text'`). Aliased by `get_text` and `browser_get_text` in tool registry.                                                                                | Reading text without passing property, reading attributes, count inspection.         |
 
 ---
 
 ## 3. Verification Execution Pipeline
 
 ### 3.1 Pre-Commit Gate
+
 The developer subagent and QA engineer must run the following commands sequentially:
+
 ```bash
 # 1. Run all unit tests
 npm test
@@ -69,7 +77,9 @@ npm run preflight
 ```
 
 ### 3.2 Real Browser Acceptance Gate
+
 When live browser verification is requested:
+
 ```bash
 # Run core E2E suite against active Chrome bridge
 node tests/e2e/run.mjs
@@ -89,6 +99,7 @@ node tests/e2e/run_extended.mjs
 ## 4. Reporting Standards for QA Subagent
 
 Every QA execution report must follow this format:
+
 1. **Pass/Fail Counts**: Exact number of assertions passed, failed, and skipped.
 2. **Execution Command**: The exact command executed.
 3. **Edge Cases Covered**: Specific edge conditions tested.

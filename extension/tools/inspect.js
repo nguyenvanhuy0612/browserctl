@@ -131,8 +131,8 @@ export const inspectTools = [
   },
   {
     name: "browser_get_property",
-    profile: "advanced",
-    aliases: ["get_property"],
+    profile: "core",
+    aliases: ["get_property", "get_text", "browser_get_text"],
     schema: { required: ["target"] },
     handler: handleGetProperty,
   },

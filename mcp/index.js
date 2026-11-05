@@ -530,8 +530,8 @@ function text(obj, format) {
 // extension in 'folded' as {ref, text, href, frame}; they go to the agent as one census-style
 // line each, '@ref "text" -> href (frame url)', every field kept and none of the JSON keys.
 function compactSnapshot(res) {
-  if (!res || typeof res.census !== "string" || !Array.isArray(res.elements)) return res;
-  const { elements: _elements, ...rest } = res;
+  if (!res || typeof res.census !== "string") return res;
+  const { elements: _elements, vom: _v, tree: _t, ...rest } = res;
   if (Array.isArray(rest.folded)) rest.folded = rest.folded.map(foldedLine).join("\n");
   return rest;
 }
@@ -726,6 +726,7 @@ const TOOL_CATEGORIES = {
     "browser_stop",
     "browser_snapshot",
     "browser_extract",
+    "browser_get_property",
     "browser_click",
     "browser_type",
     "browser_fill_form",
@@ -785,7 +786,6 @@ const TOOL_CATEGORIES = {
   advanced: [
     "browser_find",
     "browser_get_content",
-    "browser_get_property",
     "browser_select_option",
     "browser_press_key",
     "browser_hover",
@@ -814,7 +814,7 @@ const loadableCount = Object.entries(TOOL_CATEGORIES)
 
 const TOOL_GROUPS = {
   NAV: ["browser_navigate", "browser_tabs"],
-  READ: ["browser_snapshot", "browser_extract"],
+  READ: ["browser_snapshot", "browser_extract", "browser_get_property"],
   ACT: [
     "browser_click",
     "browser_type",
@@ -832,7 +832,7 @@ const LOOP = "navigate -> read -> act -> verify";
 const members = (g) => TOOL_GROUPS[g].map((n) => n.replace("browser_", "")).join(", ");
 const GROUP_NOTE = {
   NAV: `NAV — step 1 of ${LOOP} (${members("NAV")}). browser_navigate drives your session's target tab to a URL or reloads it. browser_tabs manages tabs (list, new, select, close). action: "list" never changes your target, so it is the safe way to ask what is open.`,
-  READ: `READ — step 2 of ${LOOP} (${members("READ")}). DEFAULT: browser_snapshot — a text census of the page's controls with @e tokens, not an image, and the only reader that reports open dialogs, what it withheld, and content that loads on demand. browser_extract reads structured rows from repeating containers without JS.`,
+  READ: `READ — step 2 of ${LOOP} (${members("READ")}). DEFAULT: browser_snapshot — a text census of the page's controls with @e tokens, not an image, and the only reader that reports open dialogs, what it withheld, and content that loads on demand. browser_extract reads structured rows from repeating containers without JS. browser_get_property reads an element's text (default), value, HTML, or attribute.`,
   ACT: `ACT — step 3 of ${LOOP} (${members("ACT")}). Act on an element target (@e token, selector, text, or index). Every action returns an 'effect' block (DOM mutations, url change) and a 'resolved' block: verify both instead of assuming the page reacted. resolved.matchCount confirms unique resolution.`,
   WAIT: `Between ACT and VERIFY (${members("WAIT")}). Use it when the page changes on its own schedule. Prefer a READ where you can: snapshot reports what is actually there instead of asking you to guess a string.`,
   NET: `NET (${members("NET")}). In-page HTTP requests and network inspection. browser_make_request runs in-page inheriting session/cookies and generates curl. browser_monitor_requests inspects DevTools network traffic, retrieves response bodies, or waits for requests.`,
@@ -1601,6 +1601,11 @@ server.registerTool(
         .optional()
         .describe("Scope snapshot to a specific element (@e token or CSS selector)."),
       maxDepth: z.number().int().optional().describe("Max DOM tree depth (default: 25)."),
+      maxText: z
+        .number()
+        .int()
+        .optional()
+        .describe("Max chars for prose text (default: 150; 0 or -1 for unlimited)."),
       limit: z.number().int().positive().optional().describe("Page size limit for controls."),
       cursor: z
         .number()
@@ -1610,11 +1615,12 @@ server.registerTool(
         .describe("Starting offset for controls pagination."),
     },
   },
-  tool("snapshot", async ({ scope, target, maxDepth, limit, cursor }) => {
+  tool("snapshot", async ({ scope, target, maxDepth, maxText, limit, cursor }) => {
     const res = await callBridge("snapshot", {
       scope: scope || "viewport",
       target,
       maxDepth,
+      maxText,
       limit,
       cursor,
       compact: true,
