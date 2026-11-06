@@ -275,4 +275,120 @@ export async function executeWithAbort(requestId, timeoutMs, handler) {
     if (requestId != null) inFlightRequests.delete(requestId);
   }
 }
+
+---
+
+## 7. Extension Zero-Error & Boundary Containment Specification
+
+### 7.1 Objective & The Chromium MV3 Error Reporting Model
+In Chromium Manifest V3, any unhandled promise rejection or unchecked `chrome.runtime.lastError` increments the extension's internal error counter, displaying a prominent red **"Errors"** badge on `chrome://extensions`. In production environments and automated QA workflows, spurious error badges undermine user trust and indicate architectural leakage.
+
+To achieve a true **Zero-Error Standard**, all extension tiers (`background.js`, `content.js`, `popup.js`) must adhere to strict boundary containment rules.
+
+### 7.2 Restricted URL Guard Contract
+Chromium strictly disallows content script injection and script execution (`chrome.scripting.executeScript`) on privileged browser schemes. Any attempt to inject into or query a restricted page triggers native C++ exceptions (e.g. `Cannot access a chrome:// URL`).
+
+The extension MUST guard all target tab operations prior to attempting script injection or messaging:
+```javascript
+export const RESTRICTED_PROTOCOLS = new Set([
+  "chrome:",
+  "chrome-extension:",
+  "devtools:",
+  "edge:",
+  "brave:",
+  "vivaldi:",
+  "opera:",
+  "view-source:",
+]);
+
+export function isRestrictedUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (RESTRICTED_PROTOCOLS.has(parsed.protocol)) return true;
+  if (parsed.protocol === "about:" && parsed.pathname !== "blank") return true;
+  return false;
+}
+```
+
+When an action targets a tab whose active or pending URL matches `isRestrictedUrl()`, the operation MUST immediately reject with an application-level `POLICY_RESTRICTION` error (`-32008`):
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "req-xxx",
+  "error": {
+    "code": -32008,
+    "message": "Cannot execute 'click' on restricted browser page (chrome://extensions). Navigate to an http(s) page first.",
+    "data": {
+      "reason": "POLICY_RESTRICTION",
+      "url": "chrome://extensions",
+      "retriable": false
+    }
+  }
+}
+```
+
+### 7.3 Callback-Based Safe Message Dispatch (`safeSendTabMessage`)
+Chromium MV3 `chrome.tabs.sendMessage` returns a Promise if invoked without a callback. If no content script is actively listening (e.g. during page reload, on un-injected tabs, or when waking asleep tabs), Chromium's native runtime logs:
+`Unchecked runtime.lastError: Could not establish connection. Receiving end does not exist.`
+
+To eliminate this unchecked flag, messaging MUST use the callback signature and evaluate `chrome.runtime.lastError` inside the callback, converting it into a standard JavaScript Promise rejection:
+```javascript
+export function safeSendTabMessage(tabId, message, options = {}) {
+  return new Promise((resolve, reject) => {
+    try {
+      if (typeof chrome === "undefined" || !chrome.tabs?.sendMessage) {
+        return reject(new Error("chrome.tabs.sendMessage is unavailable"));
+      }
+      chrome.tabs.sendMessage(tabId, message, options, (response) => {
+        const lastErr = chrome.runtime?.lastError;
+        if (lastErr) {
+          const err = new Error(lastErr.message || String(lastErr));
+          err.name = "ExtensionMessageError";
+          reject(err);
+        } else {
+          resolve(response);
+        }
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+```
+
+### 7.4 Content Script Messaging & Rejection Containment
+1. **Step Emission (`emitStep`)**: In `content.js`, `chrome.runtime.sendMessage` must provide a completion callback that consumes `chrome.runtime.lastError`:
+   ```javascript
+   function emitStep(step) {
+     if (!recording) return;
+     try {
+       if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
+         chrome.runtime.sendMessage({ __bctl_record_step: step }, () => {
+           void chrome.runtime?.lastError;
+         });
+       }
+     } catch (_err) {}
+   }
+   ```
+2. **Response Delivery (`safeSendResponse`)**: Calls to `sendResponse` inside `chrome.runtime.onMessage` listeners must be wrapped in `try/catch` to gracefully absorb port closures if the caller timed out or aborted.
+
+### 7.5 Synchronous Popup State Dispatch
+When the popup queries background state via `__bctl_getState`, `background.js` MUST respond **synchronously** (`return false`) rather than asynchronously. Background caches `bridgeHost` and `bridgePort` in memory and syncs them on `chrome.storage.onChanged`. This eliminates the race condition where closing the popup before an asynchronous storage resolution logs:
+`Unchecked runtime.lastError: The message port closed before a response was received.`
+
+### 7.6 Global Error Boundaries
+Both `background.js` and `content.js` must install top-level `unhandledrejection` and `error` listeners that intercept known benign lifecycle teardown events (e.g. port disconnects, invalidated contexts) and call `event.preventDefault()` to stop them from reaching the Chromium Extension Error log.
+
+### 7.7 Daemon Reachability Pre-Flight (`isBridgeReachable`)
+Chromium Blink's C++ network implementation unconditionally logs any failed WebSocket handshake directly to the developer console (`net::ERR_CONNECTION_REFUSED`). When this occurs in an MV3 Service Worker, Chromium's internal error reporter registers it as an Extension Error.
+
+To achieve Zero-Error operation when the bridge daemon is stopped or restarting:
+1. `background.js` MUST probe `http://${host}:${port}/status` with an abortable `fetch()` before instantiating `new WebSocket(url)`.
+2. Because `fetch()` failure is caught in JavaScript and does not trigger Chromium's native WebSocket console error reporter, an offline daemon backs off cleanly without polluting `chrome://extensions`.
+3. `new WebSocket(url)` is ONLY called once HTTP reachability confirms the daemon is active and listening.
 ```

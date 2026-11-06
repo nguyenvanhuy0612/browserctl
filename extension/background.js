@@ -67,6 +67,108 @@ import {
   mapFrameToContext,
 } from "./driver/index.js";
 
+// Global error boundaries suppressing benign extension lifecycle teardowns and message port disconnects
+if (typeof self !== "undefined" && self.addEventListener) {
+  self.addEventListener("unhandledrejection", (event) => {
+    if (event && event.reason) {
+      const msg = String(event.reason.message || event.reason);
+      if (
+        msg.includes("Could not establish connection") ||
+        msg.includes("message port closed") ||
+        msg.includes("Receiving end does not exist") ||
+        msg.includes("Extension context invalidated") ||
+        msg.includes("Cannot access a chrome")
+      ) {
+        if (typeof event.preventDefault === "function") {
+          event.preventDefault();
+        }
+      }
+    }
+  });
+
+  self.addEventListener("error", (event) => {
+    if (event && event.message) {
+      const msg = String(event.message);
+      if (
+        msg.includes("Could not establish connection") ||
+        msg.includes("message port closed") ||
+        msg.includes("Receiving end does not exist") ||
+        msg.includes("Extension context invalidated") ||
+        msg.includes("Cannot access a chrome")
+      ) {
+        if (typeof event.preventDefault === "function") {
+          event.preventDefault();
+        }
+      }
+    }
+  });
+}
+
+const RESTRICTED_PROTOCOLS = new Set([
+  "chrome:",
+  "chrome-extension:",
+  "devtools:",
+  "edge:",
+  "brave:",
+  "vivaldi:",
+  "opera:",
+  "view-source:",
+]);
+
+function isRestrictedUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (RESTRICTED_PROTOCOLS.has(parsed.protocol)) return true;
+  if (parsed.protocol === "about:" && parsed.pathname !== "blank") return true;
+  return false;
+}
+
+function safeSendTabMessage(tabId, message, options) {
+  return new Promise((resolve, reject) => {
+    try {
+      if (typeof chrome === "undefined" || !chrome.tabs?.sendMessage) {
+        return reject(new Error("chrome.tabs.sendMessage is unavailable"));
+      }
+      let called = false;
+      const cb = (response) => {
+        called = true;
+        const lastErr = chrome.runtime?.lastError;
+        if (lastErr) {
+          const err = new Error(lastErr.message || String(lastErr));
+          err.name = "ExtensionMessageError";
+          reject(err);
+        } else {
+          resolve(response);
+        }
+      };
+      let res;
+      if (options != null) {
+        res = chrome.tabs.sendMessage(tabId, message, options, cb);
+      } else {
+        res = chrome.tabs.sendMessage(tabId, message, cb);
+      }
+      if (res && typeof res.then === "function" && !called) {
+        res.then(
+          (val) => {
+            if (!called) resolve(val);
+          },
+          (err) => {
+            void chrome.runtime?.lastError;
+            if (!called) reject(err);
+          }
+        );
+      }
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 export {
   RpcError,
   RPC_ERRORS,
@@ -109,6 +211,10 @@ export {
   flattenFrameTree,
   findFrame,
   mapFrameToContext,
+  RESTRICTED_PROTOCOLS,
+  isRestrictedUrl,
+  safeSendTabMessage,
+  isBridgeReachable,
 };
 
 const DIALOG_TRIGGERS = new Set([
@@ -171,6 +277,38 @@ function persistRecording(on) {
   chrome.storage.session.set({ [RECORDING_KEY]: on }).catch(() => {});
 }
 
+const DEFAULT_HOST = "127.0.0.1";
+const DEFAULT_PORT = 8765;
+let cachedBridgeHost = DEFAULT_HOST;
+let cachedBridgePort = DEFAULT_PORT;
+
+if (typeof chrome !== "undefined" && chrome.storage?.local) {
+  chrome.storage.local
+    .get(["bridgeHost", "bridgePort"])
+    .then((cfg) => {
+      if (cfg?.bridgeHost) cachedBridgeHost = cfg.bridgeHost;
+      if (cfg?.bridgePort) cachedBridgePort = cfg.bridgePort;
+    })
+    .catch(() => {});
+
+  chrome.storage.onChanged?.addListener((changes, area) => {
+    if (area === "local") {
+      if (changes.bridgeHost) cachedBridgeHost = changes.bridgeHost.newValue || DEFAULT_HOST;
+      if (changes.bridgePort) cachedBridgePort = changes.bridgePort.newValue || DEFAULT_PORT;
+    }
+  });
+}
+
+const RECONNECT_MS = 2000;
+const MAX_BACKOFF_MS = 30000;
+let socket = null;
+let attempts = 0;
+let reconnectTimer = null;
+let connecting = false;
+
+let wantConnect = false;
+let connState = "idle";
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.__bctl_record_step) {
     if (!isRecording || (_sender.tab && _sender.tab.id !== recordingTabId)) return;
@@ -179,14 +317,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return;
   }
   if (msg && msg.__bctl_getState) {
-    chrome.storage.local.get(["bridgeHost", "bridgePort"]).then((cfg) => {
-      sendResponse({
-        connState,
-        host: cfg.bridgeHost || DEFAULT_HOST,
-        port: cfg.bridgePort || DEFAULT_PORT,
-      });
+    sendResponse({
+      connState,
+      host: cachedBridgeHost,
+      port: cachedBridgePort,
     });
-    return true;
+    return false;
   }
   if (msg && msg.__bctl_connect) {
     startConnecting();
@@ -199,18 +335,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return;
   }
 });
-
-const DEFAULT_HOST = "127.0.0.1";
-const DEFAULT_PORT = 8765;
-const RECONNECT_MS = 2000;
-const MAX_BACKOFF_MS = 30000;
-let socket = null;
-let attempts = 0;
-let reconnectTimer = null;
-let connecting = false;
-
-let wantConnect = false;
-let connState = "idle";
 
 async function bridgeWsUrl() {
   const { bridgeHost = DEFAULT_HOST, bridgePort = DEFAULT_PORT } = await chrome.storage.local.get([
@@ -289,6 +413,29 @@ function detectBrowserType() {
   return "chromium";
 }
 
+async function isBridgeReachable(url) {
+  if (typeof fetch !== "function") return true;
+  try {
+    const u = new URL(url);
+    const host = u.hostname || "127.0.0.1";
+    const port = u.port || "8765";
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    let timer = null;
+    if (controller) {
+      timer = setTimeout(() => controller.abort(), 1000);
+    }
+    const res = await fetch(`http://${host}:${port}/status`, {
+      method: "GET",
+      cache: "no-store",
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    if (timer) clearTimeout(timer);
+    return res.ok || res.status === 200;
+  } catch {
+    return false;
+  }
+}
+
 async function connect() {
   if (!wantConnect) return;
   if (
@@ -304,6 +451,14 @@ async function connect() {
   let url;
   try {
     url = await bridgeWsUrl();
+    const reachable = typeof isBridgeReachable === "function" ? await isBridgeReachable(url) : true;
+    if (!reachable) {
+      if (!wantConnect) return;
+      attempts++;
+      const delay = Math.min(RECONNECT_MS * 2 ** (attempts - 1), MAX_BACKOFF_MS);
+      reconnectTimer = setTimeout(connect, delay);
+      return;
+    }
   } finally {
     connecting = false;
   }
@@ -797,6 +952,17 @@ async function handleDrag(params) {
 
 async function handleCdpAction(action, params) {
   const tab = await targetTab(params);
+  if (isRestrictedUrl(tab.url || tab.pendingUrl)) {
+    throw new RpcError(
+      RPC_ERRORS.POLICY_RESTRICTION,
+      `Cannot execute '${action}' via CDP on restricted browser page (${tab.url || tab.pendingUrl}). Navigate to an http(s) page first.`,
+      {
+        reason: "POLICY_RESTRICTION",
+        url: tab.url || tab.pendingUrl,
+        retriable: false,
+      }
+    );
+  }
   const cdpParams =
     action === "capture_screenshot" ? { ...params, emulateFocus: !(await inFront(tab)) } : params;
   const reply = await handleCdp(action, cdpParams, tab.id);
@@ -808,6 +974,17 @@ async function handleCdpAction(action, params) {
 
 async function handleNetAction(action, params) {
   const tab = await targetTab(params);
+  if (isRestrictedUrl(tab.url || tab.pendingUrl)) {
+    throw new RpcError(
+      RPC_ERRORS.POLICY_RESTRICTION,
+      `Cannot execute '${action}' on restricted browser page (${tab.url || tab.pendingUrl}). Navigate to an http(s) page first.`,
+      {
+        reason: "POLICY_RESTRICTION",
+        url: tab.url || tab.pendingUrl,
+        retriable: false,
+      }
+    );
+  }
   return await handleNet(action, params, tab.id);
 }
 
@@ -1658,6 +1835,8 @@ async function cropVisibleTab(tab, rect, format = "png") {
 
 async function getDevicePixelRatio(tabId) {
   try {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab || isRestrictedUrl(tab.url || tab.pendingUrl)) return 1;
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId },
       func: () => window.devicePixelRatio || 1,
@@ -1885,6 +2064,13 @@ async function closeTab(params = {}) {
 // is not active. Background tabs are the state this product exists to drive.
 async function historyGo(params, delta) {
   const tab = await targetTab(params);
+  if (isRestrictedUrl(tab.url || tab.pendingUrl)) {
+    throw new RpcError(
+      RPC_ERRORS.POLICY_RESTRICTION,
+      `Cannot manipulate history on restricted page (${tab.url || tab.pendingUrl}).`,
+      { reason: "POLICY_RESTRICTION", url: tab.url || tab.pendingUrl, retriable: false }
+    );
+  }
   const before = tab.url;
   const done = waitForComplete(tab.id);
   const [res] = await chrome.scripting.executeScript({
@@ -2075,9 +2261,14 @@ async function wakeIfAsleep(tab) {
   // A loading page has no content script yet and a slow load looks like no answer, so only a
   // settled background page is checked
   if (tab.active || tab.status === "loading") return;
+  if (typeof isRestrictedUrl === "function" && isRestrictedUrl(tab.url || tab.pendingUrl)) return;
   let listening = true;
+  const sendFn =
+    typeof safeSendTabMessage === "function"
+      ? safeSendTabMessage
+      : (id, msg, opts) => chrome.tabs.sendMessage(id, msg, opts);
   const pinged = await answersWithin(
-    chrome.tabs.sendMessage(tab.id, { action: "__bctl_ping" }, { frameId: 0 }).catch((err) => {
+    sendFn(tab.id, { action: "__bctl_ping" }, { frameId: 0 }).catch((err) => {
       listening = false;
       throw err;
     }),
@@ -2085,14 +2276,16 @@ async function wakeIfAsleep(tab) {
   );
   let awake = pinged && listening;
   if (pinged && !listening) {
-    awake = await answersWithin(
-      chrome.scripting.executeScript({
-        target: { tabId: tab.id, frameIds: [0] },
-        func: () => 1,
-        injectImmediately: true,
-      }),
-      ASLEEP_PING_MS
-    );
+    if (typeof isRestrictedUrl !== "function" || !isRestrictedUrl(tab.url || tab.pendingUrl)) {
+      awake = await answersWithin(
+        chrome.scripting.executeScript({
+          target: { tabId: tab.id, frameIds: [0] },
+          func: () => 1,
+          injectImmediately: true,
+        }),
+        ASLEEP_PING_MS
+      );
+    }
   }
   // This wake rests on a guess (a page that did not answer in time), so a failed wake, such as
   // DevTools holding the tab, lets the command go ahead as it would have without the check
@@ -2105,13 +2298,25 @@ async function wakeIfAsleep(tab) {
 
 async function toContent(action, params, frameId = 0) {
   const tab = await targetTab(params);
+  const targetUrl = tab.url || tab.pendingUrl || "";
+  if (isRestrictedUrl(targetUrl)) {
+    throw new RpcError(
+      RPC_ERRORS.POLICY_RESTRICTION,
+      `Cannot execute '${action}' on restricted browser page (${targetUrl}). Navigate to an http(s) page first.`,
+      {
+        reason: "POLICY_RESTRICTION",
+        url: targetUrl,
+        retriable: false,
+      }
+    );
+  }
   await wakeIfAsleep(tab);
   const urlBefore = tab.url;
   const pendingBefore = tab.pendingUrl;
   const opts = { frameId };
   try {
     return await confirmNothingHappened(
-      await chrome.tabs.sendMessage(tab.id, { action, params }, opts),
+      await safeSendTabMessage(tab.id, { action, params }, opts),
       tab.id,
       urlBefore,
       pendingBefore
@@ -2148,12 +2353,24 @@ async function toContent(action, params, frameId = 0) {
         },
       };
     }
+    const currentUrl = (after && (after.url || after.pendingUrl)) || targetUrl;
+    if (isRestrictedUrl(currentUrl)) {
+      throw new RpcError(
+        RPC_ERRORS.POLICY_RESTRICTION,
+        `Cannot inject content script on restricted browser page (${currentUrl}). Navigate to an http(s) page first.`,
+        {
+          reason: "POLICY_RESTRICTION",
+          url: currentUrl,
+          retriable: false,
+        }
+      );
+    }
     await chrome.scripting.executeScript({
       target: { tabId: tab.id, frameIds: [frameId] },
       files: ["content.js"],
     });
     return await confirmNothingHappened(
-      await chrome.tabs.sendMessage(tab.id, { action, params }, opts),
+      await safeSendTabMessage(tab.id, { action, params }, opts),
       tab.id,
       urlBefore,
       pendingBefore

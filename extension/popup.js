@@ -46,8 +46,15 @@ async function myBrowserInfo(state) {
 
 async function refresh() {
   try {
-    const state = await chrome.runtime.sendMessage({ __bctl_getState: true });
-    render({ ...state, ...(await myBrowserInfo(state)) });
+    if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) return;
+    chrome.runtime.sendMessage({ __bctl_getState: true }, async (state) => {
+      void chrome.runtime?.lastError;
+      if (!state) return;
+      try {
+        const info = await myBrowserInfo(state);
+        render({ ...state, ...info });
+      } catch {}
+    });
   } catch {}
 }
 
@@ -55,8 +62,10 @@ btn.addEventListener("click", async () => {
   const act = btn.dataset.act;
   btn.disabled = true;
   try {
-    if (act === "disconnect") await chrome.runtime.sendMessage({ __bctl_disconnect: true });
-    else await chrome.runtime.sendMessage({ __bctl_connect: true });
+    const msg = act === "disconnect" ? { __bctl_disconnect: true } : { __bctl_connect: true };
+    chrome.runtime.sendMessage(msg, () => {
+      void chrome.runtime?.lastError;
+    });
   } catch {}
   setTimeout(refresh, 200);
 });

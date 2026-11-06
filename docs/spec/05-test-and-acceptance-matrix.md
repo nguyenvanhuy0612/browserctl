@@ -60,6 +60,17 @@ flowchart TD
 | `TC-DOM-08`  | Configurable Text Limit & Zero Loss (`maxText`)      | Defaults to `maxText: 150` with `...` truncation. When `maxText: 0` or `-1`, returns 100% full text without truncation. Input values capped at 200 chars. Rich annotations (`[disabled]`, `[checked]`, `[contenteditable]`, `[→ href]`). | Multi-paragraph articles, unlimit text reading, base64 input values, external links. |
 | `TC-DOM-09`  | Core Property & Text Reader (`browser_get_property`) | Promoted to `core` profile (20 core tools). Defaults to text reading (`property: 'text'`). Aliased by `get_text` and `browser_get_text` in tool registry.                                                                                | Reading text without passing property, reading attributes, count inspection.         |
 
+### 2.4 Extension Resilience & Zero-Error Matrix (`01-protocol-and-errors.md` §7)
+
+| Test Case ID | Test Description                             | Expected Result                                                                                                                                              | Edge Cases Covered                                                                            |
+| :----------- | :------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------- |
+| `TC-EXT-01`  | Restricted URL Security Guard                | Operations targeting restricted URLs (`chrome://*`, `chrome-extension://*`, `devtools://*`, `about:config`) reject immediately with `POLICY_RESTRICTION`.    | `about:blank` allowed; empty/null URLs; uppercase schemes; query parameters and hash fragments.|
+| `TC-EXT-02`  | Callback-Based Safe Message Dispatch         | `safeSendTabMessage` reads `chrome.runtime.lastError` in the callback, suppressing Chromium unchecked runtime error, resolving or rejecting Promise cleanly. | Tab closed during messaging; content script not loaded yet; asleep/unresponsive tab.          |
+| `TC-EXT-03`  | Global Error Boundaries                      | Top-level listeners catch `unhandledrejection` and `error` events for lifecycle teardowns and call `preventDefault()`.                                       | Port disconnected; extension context invalidated; script injection denied.                    |
+| `TC-EXT-04`  | Synchronous Popup State Dispatch             | `background.js` answers `__bctl_getState` synchronously (`return false`) from in-memory cached state without triggering unhandled port closure.              | Rapid popup open/close before storage resolution; daemon reconnecting.                        |
+| `TC-EXT-05`  | Content Script Messaging & Emission Boundary | `emitStep` consumes `lastError` in callback; `sendResponse` wrapped in safe handler absorbing closed message ports.                                          | Recording active while background service worker is idle; sender aborts before completion.     |
+| `TC-EXT-06`  | Daemon Reachability Pre-Flight               | `isBridgeReachable` verifies daemon status via HTTP fetch before calling `new WebSocket()`, preventing Blink `net::ERR_CONNECTION_REFUSED` console error.     | Daemon offline / stopped; invalid port configuration; HTTP timeout abort.                     |
+
 ---
 
 ## 3. Verification Execution Pipeline

@@ -2,6 +2,24 @@
   if (window.__browserctlLoaded) return;
   window.__browserctlLoaded = true;
 
+  if (typeof window !== "undefined" && window.addEventListener) {
+    window.addEventListener("unhandledrejection", (event) => {
+      if (event && event.reason) {
+        const msg = String(event.reason.message || event.reason);
+        if (
+          msg.includes("Could not establish connection") ||
+          msg.includes("message port closed") ||
+          msg.includes("Receiving end does not exist") ||
+          msg.includes("Extension context invalidated")
+        ) {
+          if (typeof event.preventDefault === "function") {
+            event.preventDefault();
+          }
+        }
+      }
+    });
+  }
+
   let indexedElements = [];
   let activeHoverLatch = null;
   const INTERACTIVE_SELECTOR = [
@@ -4732,7 +4750,11 @@
   function emitStep(step) {
     if (!recording) return;
     try {
-      chrome.runtime.sendMessage({ __bctl_record_step: step });
+      if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
+        chrome.runtime.sendMessage({ __bctl_record_step: step }, () => {
+          void chrome.runtime?.lastError;
+        });
+      }
     } catch (_err) {}
   }
 
@@ -6971,22 +6993,28 @@
     close_modal: dismiss_modal,
   };
 
+  function safeSendResponse(sendResponse, payload) {
+    try {
+      sendResponse(payload);
+    } catch {}
+  }
+
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     const handler = handlers[msg.action];
     if (!handler) {
-      sendResponse({ ok: false, error: `content: unknown action ${msg.action}` });
+      safeSendResponse(sendResponse, { ok: false, error: `content: unknown action ${msg.action}` });
       return false;
     }
     Promise.resolve()
       .then(() => handler(msg.params || {}))
-      .then((result) => sendResponse({ ok: true, result }))
+      .then((result) => safeSendResponse(sendResponse, { ok: true, result }))
       .catch((err) => {
         const errorMsg = String(err && err.message ? err.message : err);
         const res = { ok: false, error: errorMsg };
         if (err && err.code) res.code = err.code;
         if (err && err.diagnostics) res.diagnostics = err.diagnostics;
         if (err && err.recoveryHint) res.recoveryHint = err.recoveryHint;
-        sendResponse(res);
+        safeSendResponse(sendResponse, res);
       });
     return true;
   });
