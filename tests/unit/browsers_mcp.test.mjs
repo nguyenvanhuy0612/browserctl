@@ -58,6 +58,7 @@ const CASES = [
   "uc-browser-reconnects-and-resumes",
   "uc-new-session-after-other-select",
   "uc-first-call-one-agent-entry",
+  "uc-degraded-status",
 ];
 
 describe("session target across browsers", { concurrency: 6 }, () => {

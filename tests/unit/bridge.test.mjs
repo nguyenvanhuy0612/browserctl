@@ -9,6 +9,8 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { TABLESS_ACTIONS } from "../../bridge/routing.js";
 import { WebSocket } from "ws";
+import { Readable } from "node:stream";
+import http from "node:http";
 import { readFileSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,7 +34,7 @@ process.env.MAX_WS_PAYLOAD_BYTES = String(TEST_MAX_WS_PAYLOAD_BYTES);
 const TEST_CALL_LOG = join(tmpdir(), `browserctl-calls-${process.pid}.jsonl`);
 process.env.BROWSERCTL_CALL_LOG = TEST_CALL_LOG;
 
-const { server, wss, computeTimeoutMs } = await import("../../bridge/server.js");
+const { server, wss, computeTimeoutMs, readBody } = await import("../../bridge/server.js");
 
 if (!server.listening) {
   // Race the error against the success: a listen failure (e.g. PORT ignored and 8765
@@ -160,6 +162,71 @@ test("POST /command with an oversized HTTP body -> 400 too large", async () => {
   const data = await res.json().catch(() => ({}));
   assert.equal(res.status, 400);
   assert.match(data.error, /too large/);
+});
+
+// ---- readBody: byte-accurate, single decode ----
+test("readBody: a multibyte character split across two chunks is decoded intact", async () => {
+  const buf = Buffer.from(JSON.stringify({ a: "\u20ac" }));
+  const cut = buf.indexOf(0xe2) + 1; // inside the 3-byte character
+  const body = await readBody(Readable.from([buf.subarray(0, cut), buf.subarray(cut)]));
+  assert.deepEqual(body, { a: "\u20ac" });
+});
+
+test("readBody: the cap counts bytes, not characters", async () => {
+  const buf = Buffer.from(JSON.stringify({ a: "\u20ac".repeat(40) }));
+  assert.ok(buf.length > 100 && buf.toString().length < 100);
+  await assert.rejects(readBody(Readable.from([buf]), { maxBytes: 100 }), (err) => {
+    assert.equal(err.code, "BODY_TOO_LARGE");
+    assert.match(err.message, /request body too large/);
+    return true;
+  });
+});
+
+test("readBody: stops reading the stream once over the cap", async () => {
+  let pulled = 0;
+  async function* chunks() {
+    for (let i = 0; i < 1000; i++) {
+      pulled++;
+      yield Buffer.alloc(1024, 0x61);
+    }
+  }
+  await assert.rejects(readBody(Readable.from(chunks()), { maxBytes: 4096 }), {
+    code: "BODY_TOO_LARGE",
+  });
+  assert.ok(pulled < 1000, `pulled ${pulled} chunks`);
+});
+
+test("POST /command: a client still uploading a very large body gets the 400, not a reset", async () => {
+  const chunk = Buffer.alloc(1024 * 1024, 0x61);
+  const outcomes = [];
+  for (let run = 0; run < 3; run++) {
+    outcomes.push(
+      await new Promise((resolve) => {
+        let status = null;
+        let failure = null;
+        const req = http.request(
+          `${BASE}/command`,
+          { method: "POST", headers: { "content-type": "application/json" } },
+          (r) => {
+            status = r.statusCode;
+            r.resume();
+            r.on("end", () => resolve({ status, failure }));
+          }
+        );
+        req.on("error", (err) => {
+          failure = err.code;
+          resolve({ status, failure });
+        });
+        (async () => {
+          for (let i = 0; i < 60 && !req.destroyed; i++) {
+            if (!req.write(chunk)) await new Promise((r) => req.once("drain", r));
+          }
+          if (!req.destroyed) req.end();
+        })().catch(() => {});
+      })
+    );
+  }
+  for (const o of outcomes) assert.deepEqual(o, { status: 400, failure: null });
 });
 
 test("POST /command with action exec_system_cmd executes command on host", async () => {

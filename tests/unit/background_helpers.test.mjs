@@ -11,7 +11,7 @@ import vm from "node:vm";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { extractFunction as sliceFunction } from "./source-slice.mjs";
+import { extractFunction as sliceFunction, createSandbox } from "./source-slice.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SRC = readFileSync(join(__dirname, "..", "..", "extension", "background.js"), "utf8");
@@ -23,7 +23,7 @@ function extractFunction(name) {
 // `tabs` is the sequence chrome.tabs.get answers with, one per poll.
 function load(tabs) {
   const seen = [];
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     setTimeout,
     chrome: {
       tabs: {
@@ -135,7 +135,7 @@ test("an unmeasured effect (autoSettle off) is left alone", async () => {
 });
 
 function loadFrameRoute() {
-  const ctx = vm.createContext({});
+  const ctx = createSandbox({});
   vm.runInContext(extractFunction("frameRoute") + "\nglobalThis.__fn = frameRoute;", ctx);
   return ctx.__fn;
 }
@@ -166,7 +166,7 @@ test("the CLI's frame-qualified 'ref' still routes", () => {
 });
 
 test("mergeFrameResults: qualifies subframe census elements with frame-qualified refs [@f<id>:e<n>]", () => {
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     frameLabel: (u) => u,
   });
   vm.runInContext(
@@ -186,7 +186,7 @@ test("mergeFrameResults: qualifies subframe census elements with frame-qualified
 
 test("a visible-tab element capture crops the element's box, scaled to device pixels", async () => {
   const drawn = [];
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     chrome: {
       tabs: {
         captureVisibleTab: async () => "data:image/png;base64,AAAA",
@@ -237,7 +237,7 @@ test("a visible-tab element capture crops the element's box, scaled to device pi
 test("a11y coverage is measured against the whole census, not its first page", async () => {
   const names = Array.from({ length: 300 }, (_, i) => `Control ${i}`);
   let asked = null;
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     AX_CENSUS_LIMIT: 100000,
     toContent: async (action, params) => {
       asked = params;
@@ -276,7 +276,7 @@ function loadNavigate(play, { commitMs = 60 } = {}) {
     getFrame: async () => ({ errorOccurred: nav.frameError }),
   };
   const tab = { id: 7, url: "https://before.test/", status: "complete" };
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     setTimeout,
     clearTimeout,
     NAV_COMMIT_MS: commitMs,
@@ -361,7 +361,7 @@ test("an aborted earlier navigation is not reported as this one failing", async 
 });
 
 test("an element's frame is named by origin and path, without the iframe's query string", () => {
-  const ctx = vm.createContext({ URL });
+  const ctx = createSandbox({ URL });
   vm.runInContext(extractFunction("frameLabel") + "\nglobalThis.__fn = frameLabel;", ctx);
   const long = "https://www.google.com/recaptcha/api2/anchor?ar=1&k=" + "x".repeat(3000) + "#frag";
   assert.equal(ctx.__fn(long), "https://www.google.com/recaptcha/api2/anchor");
@@ -375,7 +375,7 @@ test("an element's frame is named by origin and path, without the iframe's query
 function loadTabOps() {
   const calls = [];
   const tab = { id: 9, windowId: 3, url: "https://t/", title: "T" };
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     chrome: {
       tabs: {
         async get(id) {
@@ -434,7 +434,7 @@ test("new_tab opens in the background unless activate is given", async () => {
 // A browser that does not paint a background tab (Edge) never answers the CDP capture. The capture
 // is bounded, and the error says how to bring the tab to the front.
 function loadCaptureBackground(captureViewport, ensureAttached = async () => ({})) {
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     setTimeout,
     clearTimeout,
     Promise,
@@ -471,7 +471,7 @@ test("a background capture the browser answers is returned unchanged", async () 
 // Chrome refuses a third captureVisibleTab within a second; every session on one browser shares
 // that budget, so concurrent captures are queued and spaced.
 function loadCaptureVisible(onCapture, activeOf = (id) => ({ id, active: true, windowId: id })) {
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     setTimeout,
     clearTimeout,
     Promise,
@@ -545,7 +545,7 @@ test("a visible-tab capture that never answers is bounded and frees the queue", 
 test("concurrent ensureAttached calls on one tab attach the debugger once", async () => {
   const CDP_SRC = readFileSync(join(__dirname, "..", "..", "extension", "cdp.js"), "utf8");
   let attaches = 0;
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     Map,
     Promise,
     setTimeout,
@@ -579,7 +579,7 @@ test("concurrent ensureAttached calls on one tab attach the debugger once", asyn
 function loadCdpCapture(onSend) {
   const CDP_SRC = readFileSync(join(__dirname, "..", "..", "extension", "cdp.js"), "utf8");
   const calls = [];
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     Map,
     Promise,
     Math,
@@ -690,7 +690,7 @@ test("a bounded background capture asks captureViewport for focus emulation unde
 // front; an attached tab anywhere else is a bounded background capture.
 function loadScreenshot({ tab, attached, windowFocused }) {
   const routes = [];
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     Promise,
     targetTab: async () => tab,
     isAttached: () => attached,
@@ -736,7 +736,7 @@ test("an attached active tab of an unfocused window takes the background capture
 test("a failed attach rejects every waiter, leaves no session, and a later call retries", async () => {
   const CDP_SRC = readFileSync(join(__dirname, "..", "..", "extension", "cdp.js"), "utf8");
   let attaches = 0;
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     Map,
     Promise,
     setTimeout,
@@ -766,7 +766,7 @@ test("a failed attach rejects every waiter, leaves no session, and a later call 
 
 test("a detach during Page.enable leaves no session and names the detach", async () => {
   const CDP_SRC = readFileSync(join(__dirname, "..", "..", "extension", "cdp.js"), "utf8");
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     Map,
     Promise,
     setTimeout,
@@ -791,7 +791,7 @@ test("a detach during Page.enable leaves no session and names the detach", async
 
 test("a background element or full-page capture that never answers is bounded with the hint", async () => {
   const CDP_SRC = readFileSync(join(__dirname, "..", "..", "extension", "cdp.js"), "utf8");
-  const ctx = vm.createContext({ Promise, setTimeout, clearTimeout });
+  const ctx = createSandbox({ Promise, setTimeout, clearTimeout });
   vm.runInContext(
     "const BACKGROUND_SHOT_MS = 50;\n" +
       sliceFunction(CDP_SRC, "boundBackgroundShot") +
@@ -813,7 +813,7 @@ function loadWakeIfAsleep(ping = "answers", script = true, wakeFails = false) {
   const woken = [];
   const pinged = [];
   const probed = [];
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     Promise,
     setTimeout,
     clearTimeout,
@@ -892,7 +892,7 @@ test("waking a frozen tab detaches again only when no session held it", async ()
   const CDP_SRC = readFileSync(join(__dirname, "..", "..", "extension", "cdp.js"), "utf8");
   const calls = [];
   const make = (held) => {
-    const ctx = vm.createContext({
+    const ctx = createSandbox({
       Map,
       Promise,
       sessions: new Map(held ? [[7, {}]] : []),
@@ -950,7 +950,7 @@ test("a tab switch during the visible capture itself is caught, not returned as 
 });
 
 function loadNavigationFailed() {
-  const ctx = vm.createContext({});
+  const ctx = createSandbox({});
   vm.runInContext(
     extractFunction("navigationFailed") + "\nglobalThis.__fn = navigationFailed;",
     ctx
@@ -974,7 +974,7 @@ test("any other network error on navigation carries no certificate code", () => 
 // The recorder is one per browser: a session may start, stop or read it only in the tab it is
 // recording (or last recorded), so one session never stops, wipes or reads another's recording.
 function loadRecorderGuard(state) {
-  const ctx = vm.createContext({ ...state });
+  const ctx = createSandbox({ ...state });
   vm.runInContext(extractFunction("recorderRefusal") + "\nglobalThis.__fn = recorderRefusal;", ctx);
   return ctx.__fn;
 }
@@ -1006,7 +1006,7 @@ test("a finished recording is read only from its tab; a new one may start anywhe
 // A closed tab that was being recorded (or held the last recording) leaves the recorder free for
 // any tab, instead of refusing every tab forever.
 test("closing the recorded tab frees the recorder", () => {
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     isRecording: true,
     recordingTabId: 5,
     recordedTabId: 5,
@@ -1033,7 +1033,7 @@ test("closing the recorded tab frees the recorder", () => {
 // The hello names the tabs the browser has open, so the bridge can tell a restarted browser (its
 // tab ids gone) from a restarted service worker (all still open).
 test("the hello lists the ids of the open tabs", async () => {
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     chrome: {
       storage: { local: { get: async () => ({}) } },
       windows: { getLastFocused: async () => ({ focused: true }) },
@@ -1047,7 +1047,7 @@ test("the hello lists the ids of the open tabs", async () => {
 });
 
 test("downloadFile: requires target or url", async () => {
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     setTimeout,
     clearTimeout,
     chrome: {
@@ -1074,7 +1074,7 @@ test("downloadFile: tracks url download to completion and returns metadata", asy
     fileSize: 1024,
     mime: "text/csv",
   };
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     setTimeout,
     clearTimeout,
     chrome: {
@@ -1118,7 +1118,7 @@ test("downloadFile: tracks url download to completion and returns metadata", asy
 
 test("downloadFile: handles interrupted download with clear error", async () => {
   let createdCb, changedCb;
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     setTimeout,
     clearTimeout,
     chrome: {
@@ -1165,7 +1165,7 @@ test("uploadWithChooserFallback: intercepts file chooser dialog and attaches fil
   let attachedFiles = null;
   let chooserCb = null;
 
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     setTimeout,
     clearTimeout,
     interceptFileChooser: async (tabId, enabled) => {
@@ -1208,7 +1208,7 @@ test("uploadWithChooserFallback: intercepts file chooser dialog and attaches fil
 });
 
 test("projectFrameRect: adds enclosing iframe coordinates across frame hierarchy", async () => {
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     chrome: {
       webNavigation: {
         getFrame: async ({ frameId }) => {
@@ -1248,7 +1248,7 @@ test("requestHelp: surfaces window, displays banner, and resolves on user comple
   let bannerState = null;
   let pollCount = 0;
 
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     setTimeout,
     clearTimeout,
     chrome: {
@@ -1289,7 +1289,7 @@ test("agentWindow: manages dedicated window lifecycle (open, get, focus, close)"
   let focused = null;
   let removed = null;
 
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     chrome: {
       windows: {
         create: async (opts) => {

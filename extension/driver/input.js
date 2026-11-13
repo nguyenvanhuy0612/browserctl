@@ -1,5 +1,4 @@
 // Native Input Dispatcher for browserctl.
-// Adheres strictly to docs/spec/00-architecture-overview.md and docs/spec/02-driver-and-cdp.md.
 
 import { sendCdpCommand } from "./session.js";
 

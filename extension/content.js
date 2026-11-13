@@ -78,11 +78,52 @@
     return hit || document.querySelector(sel);
   }
 
-  function createStructuredError(message, code, diagnostics = {}, recoveryHint = null) {
+  function createStructuredError(
+    message,
+    code,
+    diagnostics = {},
+    recoveryHint = null,
+    disposition = "not_delivered",
+    recovery = null
+  ) {
     const err = new Error(message);
     err.code = code;
     err.diagnostics = diagnostics;
     err.recoveryHint = recoveryHint;
+    err.disposition = disposition || "not_delivered";
+    if (recovery) {
+      err.recovery = recovery;
+    } else if (code === "STALE_REF") {
+      err.recovery = {
+        strategy: "refresh_snapshot_then_retry_original",
+        retryable: true,
+        requiresFreshSnapshot: true,
+      };
+    } else if (code === "AMBIGUOUS_TARGET") {
+      err.recovery = {
+        strategy: "narrow_target_then_retry",
+        retryable: true,
+        requiresFreshSnapshot: false,
+      };
+    } else if (code === "ELEMENT_DISABLED") {
+      err.recovery = {
+        strategy: "inspect_state_then_retry",
+        retryable: false,
+        requiresFreshSnapshot: false,
+      };
+    } else if (code === "ELEMENT_NOT_VISIBLE") {
+      err.recovery = {
+        strategy: "scroll_to_view_then_retry",
+        retryable: true,
+        requiresFreshSnapshot: false,
+      };
+    } else if (code === "ELEMENT_NOT_FOUND") {
+      err.recovery = {
+        strategy: "refresh_snapshot_then_retry",
+        retryable: true,
+        requiresFreshSnapshot: true,
+      };
+    }
     return err;
   }
 
@@ -2113,14 +2154,18 @@
     };
   }
 
-  function buildEffect({ urlBefore, el, mutationCount, measured }) {
-    return {
+  function buildEffect({ urlBefore, el, mutationCount, measured, openedDialogs }) {
+    const eff = {
       measured: !!measured,
       domMutated: mutationCount > 0,
       mutationCount,
       urlChanged: location.href !== urlBefore,
       targetStillPresent: !!(el && el.isConnected),
     };
+    if (openedDialogs && openedDialogs.length > 0) {
+      eff.opened = openedDialogs;
+    }
+    return eff;
   }
 
   // The element the latest resolveTarget call reached only as plain text inside a container,
@@ -3415,6 +3460,9 @@
     el.scrollIntoView({ block: "center", inline: "center" });
     const stability = await waitForStableRect(el);
     const coveredInfo = checkElementCovered(el);
+    const dialogsBefore = new Set(
+      typeof findOpenDialogs === "function" ? findOpenDialogs().map((d) => d.node) : []
+    );
     const mutations = startMutationCounter();
 
     const rect = el.getBoundingClientRect();
@@ -3466,10 +3514,28 @@
       waitedMs = settleRes.waitedMs || 0;
     }
     const mutationCount = mutations.stop();
+    const dialogsAfter = typeof findOpenDialogs === "function" ? findOpenDialogs() : [];
+    const openedDialogs = dialogsAfter
+      .filter((d) => !dialogsBefore.has(d.node))
+      .map((d) => ({
+        role: d.tag,
+        label: d.label,
+        ref: typeof getOrAssignRef === "function" ? getOrAssignRef(d.node) : undefined,
+      }));
+    const effect = buildEffect({
+      urlBefore,
+      el,
+      mutationCount,
+      measured: autoSettle && settleMs > 0,
+      openedDialogs,
+    });
+    const disposition =
+      effect.domMutated || effect.urlChanged ? "delivered_verified" : "delivered_unverified";
     const out = {
       clicked: target != null ? target : ref != null ? ref : selector || text || index,
       waitedMs,
-      effect: buildEffect({ urlBefore, el, mutationCount, measured: autoSettle && settleMs > 0 }),
+      disposition,
+      effect,
       resolved: el._resolved,
     };
     if (eventTarget !== el) {
@@ -3510,25 +3576,41 @@
   // like sanitize a partial value (so "1." reads back empty), and file refuses a value at all.
   const KEYSTROKE_INPUT_TYPES = new Set(["", "text", "search", "url", "tel", "password", "email"]);
 
-  function typeKeystrokes(el, text) {
+  function typeKeystrokes(el, text, { clearBefore = true } = {}) {
     const inputType = el.tagName === "INPUT" ? (el.type || "").toLowerCase() : "";
     const isField =
       (el.tagName === "INPUT" && KEYSTROKE_INPUT_TYPES.has(inputType)) || el.tagName === "TEXTAREA";
     if (!isField && !el.isContentEditable) return false;
     el.focus();
-    if (isField) {
-      setNativeValue(el, "");
+    if (clearBefore) {
+      if (isField) {
+        setNativeValue(el, "");
+      } else {
+        try {
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          const selection = window.getSelection();
+          selection.removeAllRanges();
+          selection.addRange(range);
+          document.execCommand("delete");
+        } catch {}
+      }
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContent" }));
+    } else if (isField) {
+      try {
+        const end = String(el.value ?? "").length;
+        el.setSelectionRange?.(end, end);
+      } catch {}
     } else {
       try {
         const range = document.createRange();
         range.selectNodeContents(el);
+        range.collapse(false);
         const selection = window.getSelection();
         selection.removeAllRanges();
         selection.addRange(range);
-        document.execCommand("delete");
       } catch {}
     }
-    el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContent" }));
     for (const ch of String(text)) {
       const keyOpts = { ...keyDetails(ch), bubbles: true, cancelable: true };
       const proceed = el.dispatchEvent(new KeyboardEvent("keydown", keyOpts));
@@ -3557,7 +3639,7 @@
     return true;
   }
 
-  function insertIntoEditable(el, text, { paste = false } = {}) {
+  function insertIntoEditable(el, text, { paste = false, clearBefore = true } = {}) {
     el.focus();
     const inputType = el.tagName === "INPUT" ? (el.type || "").toLowerCase() : "";
     if (inputType === "checkbox" || inputType === "radio") {
@@ -3580,6 +3662,7 @@
         const selection = window.getSelection();
         const range = document.createRange();
         range.selectNodeContents(el);
+        if (!clearBefore) range.collapse(false);
         selection.removeAllRanges();
         selection.addRange(range);
       } catch {}
@@ -3619,7 +3702,7 @@
 
       if (!inserted && text) {
         try {
-          el.textContent = text;
+          el.textContent = clearBefore ? text : (el.textContent || "") + text;
         } catch {}
       }
       el.dispatchEvent(new Event("input", { bubbles: true }));
@@ -3630,12 +3713,13 @@
     if ("value" in el) {
       const normalized =
         typeof text === "string" ? text.replace(/\r\n/g, "\n") : String(text ?? "");
-      setNativeValue(el, normalized);
+      const nextValue = clearBefore ? normalized : String(el.value ?? "") + normalized;
+      setNativeValue(el, nextValue);
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
       return {
         valueNow: String(el.value ?? "").slice(0, 200),
-        matched: String(el.value ?? "") === normalized,
+        matched: String(el.value ?? "") === nextValue,
       };
     }
 
@@ -3644,7 +3728,7 @@
       "input:not([type=hidden]), textarea, [contenteditable='true'], [contenteditable=''], #richInput"
     );
     if (innerEditable && innerEditable !== el) {
-      return insertIntoEditable(innerEditable, text, { paste });
+      return insertIntoEditable(innerEditable, text, { paste, clearBefore });
     }
 
     const candidateInputs = deepQueryAll(
@@ -3680,6 +3764,7 @@
     text = "",
     placeholder,
     method = "set",
+    clearBefore = true,
     submit,
     waitFor,
     autoSettle = true,
@@ -3697,14 +3782,15 @@
     }
     const warning = actionability(el);
     const urlBefore = location.href;
+    const valueBefore = "value" in el ? String(el.value ?? "") : "";
     el.scrollIntoView({ block: "center", inline: "center" });
     const mutations = startMutationCounter();
     const completes = !submit && suggestsCompletions(el);
     const optionsBefore = completes
       ? new Set(deepQueryAll('[role="option"]').filter(isVisible))
       : null;
-    if (method !== "type" || !typeKeystrokes(el, text)) {
-      insertIntoEditable(el, text, { paste: method === "paste" });
+    if (method !== "type" || !typeKeystrokes(el, text, { clearBefore })) {
+      insertIntoEditable(el, text, { paste: method === "paste", clearBefore });
     }
     if (submit) {
       const opts = { bubbles: true, cancelable: true, ...keyDetails("Enter") };
@@ -3744,7 +3830,9 @@
       resolved: el._resolved,
     };
     if ("value" in el) {
-      const expected = typeof text === "string" ? text.replace(/\r\n/g, "\n") : String(text ?? "");
+      const normalized =
+        typeof text === "string" ? text.replace(/\r\n/g, "\n") : String(text ?? "");
+      const expected = clearBefore === false ? valueBefore + normalized : normalized;
       out.effect.valueNow = String(el.value ?? "").slice(0, 200);
       out.effect.matched = String(el.value ?? "") === expected;
     } else if (el.isContentEditable) {
@@ -3772,6 +3860,7 @@
     selector,
     text = "",
     placeholder,
+    clearBefore = true,
     submit,
     waitFor,
     autoSettle = true,
@@ -3781,9 +3870,10 @@
     const el = resolveTarget({ target, index, ref, selector, placeholder });
     const warning = actionability(el);
     const urlBefore = location.href;
+    const valueBefore = "value" in el ? String(el.value ?? "") : "";
     el.scrollIntoView({ block: "center", inline: "center" });
     const mutations = startMutationCounter();
-    insertIntoEditable(el, text, { paste: true });
+    insertIntoEditable(el, text, { paste: true, clearBefore });
     if (submit) {
       const opts = { bubbles: true, cancelable: true, ...keyDetails("Enter") };
       const form = el.form;
@@ -3820,7 +3910,9 @@
       resolved: el._resolved,
     };
     if ("value" in el) {
-      const expected = typeof text === "string" ? text.replace(/\r\n/g, "\n") : String(text ?? "");
+      const normalized =
+        typeof text === "string" ? text.replace(/\r\n/g, "\n") : String(text ?? "");
+      const expected = clearBefore === false ? valueBefore + normalized : normalized;
       out.effect.valueNow = String(el.value ?? "").slice(0, 200);
       out.effect.matched = String(el.value ?? "") === expected;
     } else if (el.isContentEditable) {
@@ -5022,8 +5114,10 @@
         const tag = current.tagName ? current.tagName.toLowerCase() : "";
         if (
           (current.hasAttribute && current.hasAttribute("hidden")) ||
+          (current.hasAttribute && current.hasAttribute("data-bctl-overlay")) ||
           (current.hasAttribute && current.hasAttribute("data-browserctl-overlay")) ||
           (current.hasAttribute && current.hasAttribute("data-bsk-overlay")) ||
+          tag === "bctl-overlay" ||
           tag === "browserctl-overlay" ||
           tag === "browser-skill-overlay" ||
           closedDetailsContent(current) ||
@@ -6544,6 +6638,20 @@
 
   const MATCH_COUNTED = new Set(["text", "html", "attr", "attribute"]);
 
+  function cleanOuterHtml(el) {
+    if (!el || typeof el.cloneNode !== "function") return el?.outerHTML || "";
+    const clone = el.cloneNode(true);
+    for (const attrName of ["data-bctl-cdp-ref", "data-bctl-cdp-frame", "data-bctl-ref"]) {
+      clone.removeAttribute?.(attrName);
+      if (typeof clone.querySelectorAll === "function") {
+        for (const child of clone.querySelectorAll(`[${attrName}]`)) {
+          child.removeAttribute(attrName);
+        }
+      }
+    }
+    return clone.outerHTML || "";
+  }
+
   function readOneProperty(el, property, attr) {
     switch (property) {
       case "text":
@@ -6554,7 +6662,7 @@
           value: fromPage(el.value !== undefined ? el.value : el.innerText || ""),
         };
       case "html":
-        return { property: "html", value: fromPage(el.outerHTML || "") };
+        return { property: "html", value: fromPage(cleanOuterHtml(el)) };
       case "attr":
       case "attribute": {
         const has = !!(attr && el.hasAttribute && el.hasAttribute(attr));
@@ -6949,8 +7057,40 @@
     }
   }
 
+  function resolve_snap_target(params = {}) {
+    let el;
+    try {
+      el = resolveTarget(params);
+    } catch (err) {
+      const raw = params.target ?? params.selector;
+      if (
+        err?.code === "ELEMENT_NOT_FOUND" &&
+        typeof raw === "string" &&
+        !/^(@|text=|placeholder=|index=|css=)/i.test(raw.trim()) &&
+        isValidCss(raw.trim())
+      ) {
+        el = resolveTarget({ selector: raw.trim() });
+      } else {
+        throw err;
+      }
+    }
+    const token =
+      params.token || `st-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    el.setAttribute("data-bctl-snap-target", token);
+    return { token };
+  }
+
+  function clear_snap_target(params = {}) {
+    if (!params.token) return { cleared: false };
+    const hit = deepQuery(`[data-bctl-snap-target="${CSS.escape(String(params.token))}"]`);
+    if (hit) hit.removeAttribute("data-bctl-snap-target");
+    return { cleared: Boolean(hit) };
+  }
+
   const handlers = {
     snapshot,
+    resolve_snap_target,
+    clear_snap_target,
     find,
     find_text,
     click,
@@ -6999,6 +7139,27 @@
     } catch {}
   }
 
+  function hydrateCdpRef(params) {
+    if (!params) return;
+    if (Number.isInteger(params.__bctlMinRef) && refCounter < params.__bctlMinRef) {
+      refCounter = params.__bctlMinRef;
+    }
+    for (const [tokenKey, refKey] of [
+      ["__bctlCdpRefToken", params.target ?? params.ref ?? params.ref_id],
+      ["__bctlCdpSourceToken", params.source],
+    ]) {
+      const token = params[tokenKey];
+      const m =
+        typeof token === "string" && typeof refKey === "string" && refKey.match(/^@?(e\d+)$/);
+      if (!m) continue;
+      const hit = deepQuery(`[data-bctl-cdp-ref="${CSS.escape(token)}"]`);
+      if (hit) {
+        refMap[m[1]] = new WeakRef(hit);
+        reverseRefMap.set(hit, m[1]);
+      }
+    }
+  }
+
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     const handler = handlers[msg.action];
     if (!handler) {
@@ -7006,7 +7167,10 @@
       return false;
     }
     Promise.resolve()
-      .then(() => handler(msg.params || {}))
+      .then(() => {
+        hydrateCdpRef(msg.params);
+        return handler(msg.params || {});
+      })
       .then((result) => safeSendResponse(sendResponse, { ok: true, result }))
       .catch((err) => {
         const errorMsg = String(err && err.message ? err.message : err);

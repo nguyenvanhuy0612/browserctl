@@ -1,9 +1,8 @@
-// Unit Test Suite for In-Page Network Request and DevTools Monitor.
+// Unit Test Suite for Network driver helpers.
 // Validates:
 // 1. generateCurlCommand (shell quoting, minimal headers, query params, body)
-// 2. makeRequest (validation, execution, JSON serialization, pointer plucking, non-2xx handling, timeout)
-// 3. monitorRequests (wildcard filtering, method/status/type filtering, body retrieval, pointer resolution, clear)
-// 4. Backward-compatible aliases and tool registry integration
+// 2. resolveJsonPointer (RFC 6901 JSON pointer traversal)
+// 3. urlMatchesPattern (wildcard, exact, substring matching)
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -14,13 +13,6 @@ import {
   resolveJsonPointer,
   urlMatchesPattern,
 } from "../../extension/driver/network.js";
-
-import {
-  handleMakeRequest,
-  handleMonitorRequests,
-} from "../../extension/tools/network_tools.js";
-
-import { createDefaultRegistry } from "../../extension/tools/index.js";
 
 // =====================================================================================
 // 1. generateCurlCommand & shellQuote Invariants
@@ -101,114 +93,3 @@ test("urlMatchesPattern: evaluates exact, wildcard, and substring patterns", () 
   assert.equal(urlMatchesPattern("https://example.com", "*"), true);
 });
 
-// =====================================================================================
-// 4. make_request Handler Validation & In-Page Context Execution
-// =====================================================================================
-
-test("handleMakeRequest: requires url or requestId", async () => {
-  await assert.rejects(
-    async () => await handleMakeRequest({}, {}),
-    /make_request requires 'url' or 'requestId'/
-  );
-});
-
-test("handleMakeRequest: dispatches to contentBridge when present", async () => {
-  let bridgeCalledWith = null;
-  const mockBridge = {
-    send: async (action, params, tabId) => {
-      bridgeCalledWith = { action, params, tabId };
-      return {
-        ok: true,
-        status: 200,
-        statusText: "OK",
-        headers: { "content-type": "application/json" },
-        data: { success: true },
-        curl: "curl 'https://api.example.com'",
-      };
-    },
-  };
-
-  const res = await handleMakeRequest(
-    { url: "https://api.example.com", method: "GET" },
-    { contentBridge: mockBridge, resolveTabId: () => 12 }
-  );
-
-  assert.equal(bridgeCalledWith.action, "make_request");
-  assert.equal(bridgeCalledWith.tabId, 12);
-  assert.equal(res.ok, true);
-  assert.equal(res.status, 200);
-  assert.equal(res.data.success, true);
-});
-
-test("handleMakeRequest: dispatches to driver when contentBridge is absent", async () => {
-  let driverCalledWith = null;
-  const mockDriver = {
-    makeRequest: async (tabId, params) => {
-      driverCalledWith = { tabId, params };
-      return {
-        ok: false,
-        status: 401,
-        statusText: "Unauthorized",
-        data: { error: "AUTH_EXPIRED" },
-        curl: "curl 'https://teams.cloud.microsoft/api/chatsvc'",
-      };
-    },
-  };
-
-  const res = await handleMakeRequest(
-    { url: "https://teams.cloud.microsoft/api/chatsvc" },
-    { driver: mockDriver, resolveTabId: () => 7 }
-  );
-
-  assert.equal(driverCalledWith.tabId, 7);
-  assert.equal(res.ok, false);
-  assert.equal(res.status, 401);
-  assert.equal(res.data.error, "AUTH_EXPIRED");
-});
-
-// =====================================================================================
-// 5. ToolRegistry Integration & Aliases
-// =====================================================================================
-
-test("ToolRegistry: registers browser_make_request and browser_monitor_requests with aliases", () => {
-  const reg = createDefaultRegistry();
-
-  assert.ok(reg.has("browser_make_request"), "browser_make_request must be registered");
-  assert.ok(reg.has("make_request"), "make_request alias must be routable");
-  assert.ok(reg.has("request"), "request alias must be routable");
-  assert.ok(reg.has("fetch"), "fetch alias must be routable");
-  assert.ok(reg.has("network_replay"), "network_replay alias must be routable");
-
-  assert.ok(reg.has("browser_monitor_requests"), "browser_monitor_requests must be registered");
-  assert.ok(reg.has("monitor_requests"), "monitor_requests alias must be routable");
-  assert.ok(reg.has("monitor"), "monitor alias must be routable");
-  assert.ok(reg.has("wait_for_request"), "wait_for_request alias must be routable");
-});
-
-test("handleMonitorRequests: validates action parameter and dispatches to driver", async () => {
-  await assert.rejects(
-    async () => await handleMonitorRequests({ action: "get" }, {}),
-    /monitor_requests get requires 'requestId'/
-  );
-
-  let driverParams = null;
-  const mockDriver = {
-    monitorRequests: async (tabId, params) => {
-      driverParams = { tabId, params };
-      return {
-        ok: true,
-        result: { count: 1, requests: [{ requestId: "r1", url: "https://api.test", status: 200 }] },
-      };
-    },
-  };
-
-  const res = await handleMonitorRequests(
-    { action: "list", url_pattern: "*api*" },
-    { driver: mockDriver, resolveTabId: () => 5 }
-  );
-
-  assert.equal(driverParams.tabId, 5);
-  assert.equal(driverParams.params.url_pattern, "*api*");
-  assert.equal(res.ok, true);
-  assert.equal(res.result.count, 1);
-});

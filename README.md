@@ -339,6 +339,8 @@ Every error code and its fix: [docs/INSTALL.md](docs/INSTALL.md#troubleshooting)
 
 ## Documentation
 
+- [AGENTS.md](AGENTS.md) — guidance for AI coding agents, invariants, and truth hierarchy.
+- [CONCEPTS.md](CONCEPTS.md) — domain vocabulary, VOM, refs, and architectural concepts.
 - [docs/INSTALL.md](docs/INSTALL.md) — installation, loading the extension, daemon configuration.
 - [docs/REFERENCE.md](docs/REFERENCE.md) — parameters of the core tools and the target resolution rules.
 - [docs/TOOLS.md](docs/TOOLS.md) — generated catalogue of every tool in every profile.

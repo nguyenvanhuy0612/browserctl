@@ -1,6 +1,6 @@
 // Frame Tree Manager and Multi-Frame Executor for browserctl.
-// Adheres strictly to docs/spec/00-architecture-overview.md and docs/spec/02-driver-and-cdp.md.
 
+import { noteSwallowed } from "../util.js";
 import { sendCdpCommand } from "./session.js";
 
 /**
@@ -93,7 +93,9 @@ export async function projectFrameRect(tabId, frameId, localRect, toContentFn = 
     let frameInfo = null;
     try {
       frameInfo = await chrome.webNavigation.getFrame({ tabId, frameId: curFrameId });
-    } catch {}
+    } catch (err) {
+      noteSwallowed("driver.frame.projectFrameRect.chrome.webNavigation.getFrame", err);
+    }
     if (!frameInfo || frameInfo.parentFrameId == null) break;
 
     const parentFrameId = frameInfo.parentFrameId;

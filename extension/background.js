@@ -1,3 +1,4 @@
+import { swallow, noteSwallowed } from "./util.js";
 import {
   handleCdp,
   CDP_ACTIONS,
@@ -18,6 +19,13 @@ import {
   clickWithUserGesture,
 } from "./cdp.js";
 import { handleNet, NET_ACTIONS, dropTab as netDropTab } from "./netlog.js";
+import {
+  captureVomSnapshot,
+  resolveVomBackendNode,
+  resolveAttrTokenBackendNode,
+  paginateVomSnapshot,
+  dropVomTabState,
+} from "./snapshot.js";
 import {
   RpcError,
   RPC_ERRORS,
@@ -267,6 +275,8 @@ const CONTENT_ACTIONS = [
   "show_help_banner",
   "hide_help_banner",
   "check_help_resolved",
+  "resolve_snap_target",
+  "clear_snap_target",
 ];
 
 let recordingSteps = [];
@@ -274,7 +284,9 @@ const MAX_RECORD_STEPS = 5000;
 let isRecording = false;
 const RECORDING_KEY = "bctl_recording";
 function persistRecording(on) {
-  chrome.storage.session.set({ [RECORDING_KEY]: on }).catch(() => {});
+  chrome.storage.session
+    .set({ [RECORDING_KEY]: on })
+    .catch(swallow("background.persistRecording.chrome.storage.session.set"));
 }
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -289,7 +301,7 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
       if (cfg?.bridgeHost) cachedBridgeHost = cfg.bridgeHost;
       if (cfg?.bridgePort) cachedBridgePort = cfg.bridgePort;
     })
-    .catch(() => {});
+    .catch(swallow("background.loadBridgeConfig"));
 
   chrome.storage.onChanged?.addListener((changes, area) => {
     if (area === "local") {
@@ -359,7 +371,9 @@ function stopConnecting() {
   if (socket) {
     try {
       socket.close();
-    } catch {}
+    } catch (err) {
+      noteSwallowed("background.stopConnecting.closeSocket", err);
+    }
   }
   socket = null;
   connState = "idle";
@@ -386,16 +400,22 @@ async function helloExtras() {
   let label;
   try {
     ({ label } = await chrome.storage.local.get(["label"]));
-  } catch {}
+  } catch (err) {
+    noteSwallowed("background.helloExtras.label", err);
+  }
   let focused = false;
   try {
     focused = (await chrome.windows.getLastFocused()).focused === true;
-  } catch {}
+  } catch (err) {
+    noteSwallowed("background.helloExtras.focusedWindow", err);
+  }
   // The open tabs: the bridge keeps holds and targets only on tabs in this list
   let tabs = [];
   try {
     tabs = (await chrome.tabs.query({})).map((t) => t.id);
-  } catch {}
+  } catch (err) {
+    noteSwallowed("background.helloExtras.activeTabs", err);
+  }
   return {
     ...(label ? { label } : {}),
     focused,
@@ -483,7 +503,9 @@ async function connect() {
       const browserType = detectBrowserType();
       const extras = await helloExtras();
       ws.send(JSON.stringify({ type: "hello", instanceId, browserType, ...extras }));
-    } catch {}
+    } catch (err) {
+      noteSwallowed("background.connect.sendHello", err);
+    }
   });
 
   ws.addEventListener("message", async (event) => {
@@ -497,7 +519,9 @@ async function connect() {
     if (msg.type === "ping") {
       try {
         ws.send(JSON.stringify({ type: "pong" }));
-      } catch {}
+      } catch (err) {
+        noteSwallowed("background.connect.sendPong", err);
+      }
       return;
     }
     if (msg.type === "welcome" && typeof msg.instanceId === "string") {
@@ -523,11 +547,26 @@ async function connect() {
       ...(err && typeof err.code === "string" ? { code: err.code } : {}),
       ...(err && typeof err.recoveryHint === "string" ? { recoveryHint: err.recoveryHint } : {}),
     }));
-    reply.id = msg.id;
+    const wire =
+      reply instanceof Error
+        ? {
+            ok: false,
+            error: String(reply.error || reply.message || reply),
+            ...(reply.code !== undefined ? { code: reply.code } : {}),
+            ...(reply.reason ? { reason: reply.reason } : {}),
+            ...(reply.data ? { data: reply.data } : {}),
+            ...(reply.recoveryHint ? { recoveryHint: reply.recoveryHint } : {}),
+          }
+        : reply && typeof reply === "object"
+          ? { ...reply }
+          : { ok: false, error: String(reply) };
+    wire.id = msg.id;
     if (ws !== socket) return;
     try {
-      ws.send(JSON.stringify(reply));
-    } catch {}
+      ws.send(JSON.stringify(wire));
+    } catch (err) {
+      noteSwallowed("background.connect.sendReply", err);
+    }
   });
 
   ws.addEventListener("close", () => {
@@ -535,7 +574,9 @@ async function connect() {
     if (typeof abortAll === "function") {
       try {
         abortAll("WebSocket closed");
-      } catch {}
+      } catch (err) {
+        noteSwallowed("background.connect.abortAllOnClose", err);
+      }
     }
     const wasConnected = connState === "connected";
     socket = null;
@@ -555,11 +596,15 @@ async function connect() {
     if (typeof abortAll === "function") {
       try {
         abortAll("WebSocket error");
-      } catch {}
+      } catch (err) {
+        noteSwallowed("background.connect.abortAllOnError", err);
+      }
     }
     try {
       ws.close();
-    } catch {}
+    } catch (err) {
+      noteSwallowed("background.connect.closeSocket", err);
+    }
   });
 }
 
@@ -569,7 +614,9 @@ function reportFocus(focused) {
   if (socket && socket.readyState === WebSocket.OPEN) {
     try {
       socket.send(JSON.stringify({ type: "focus", focused }));
-    } catch {}
+    } catch (err) {
+      noteSwallowed("background.reportFocus.send", err);
+    }
   }
 }
 
@@ -578,7 +625,9 @@ function reportTabClosed(tabId) {
   if (socket && socket.readyState === WebSocket.OPEN) {
     try {
       socket.send(JSON.stringify({ type: "tab_closed", tabId }));
-    } catch {}
+    } catch (err) {
+      noteSwallowed("background.reportTabClosed.send", err);
+    }
   }
 }
 
@@ -631,7 +680,7 @@ const NOT_EXTENSION_ACTIONS = {
   action: "browser_action itself — it dispatches other actions and is not one",
 };
 
-// --- BSK-inspired RpcError taxonomy and error classification ---
+// --- RpcError taxonomy and error classification ---
 function createRpcError(code, message, { reason, data, recoveryHint } = {}) {
   const numericCode = typeof code === "number" ? code : (RPC_ERRORS[code] ?? -32603);
   const errReason = reason || (typeof code === "string" ? code : "UNKNOWN_ERROR");
@@ -725,7 +774,9 @@ async function uploadWithChooserFallback(tabId, p, files, frameId) {
       try {
         const evalRes = await clickWithUserGesture(tabId, clickScript);
         if (evalRes && evalRes.result && evalRes.result.value) clicked = true;
-      } catch {}
+      } catch (err) {
+        noteSwallowed("background.uploadWithChooserFallback.gestureClick", err);
+      }
     }
 
     if (!clicked) {
@@ -762,13 +813,18 @@ async function uploadWithChooserFallback(tabId, p, files, frameId) {
   } finally {
     clearTimeout(timer);
     if (stop) stop();
-    await interceptFileChooser(tabId, false).catch(() => {});
+    await interceptFileChooser(tabId, false).catch(
+      swallow("background.uploadWithChooserFallback.stopIntercept")
+    );
   }
 }
 
 async function handleUpload(params) {
   const tab = await targetTab(params);
-  const { frameId, params: p } = frameRoute(params);
+  const resolved = await resolveVomParams(tab.id, params);
+  const routed = frameRoute(resolved.params);
+  const frameId = resolved.frameId ?? routed.frameId;
+  const p = routed.params;
   const marked = await toContent(
     "upload_mark",
     {
@@ -778,6 +834,7 @@ async function handleUpload(params) {
       selector: p.selector,
       text: p.text,
       placeholder: p.placeholder,
+      ...(p.__bctlCdpRefToken ? { __bctlCdpRefToken: p.__bctlCdpRefToken } : {}),
       tabId: tab.id,
     },
     frameId
@@ -826,7 +883,10 @@ async function handleUpload(params) {
 
 async function handleElementRect(params) {
   const tab = await targetTab(params);
-  const { frameId, params: p } = frameRoute(params);
+  const resolved = await resolveVomParams(tab.id, params);
+  const routed = frameRoute(resolved.params);
+  const frameId = resolved.frameId ?? routed.frameId;
+  const p = routed.params;
   const rectReply = await toContent(
     "element_rect",
     {
@@ -836,6 +896,7 @@ async function handleElementRect(params) {
       ref: p.ref,
       text: p.text,
       placeholder: p.placeholder,
+      ...(p.__bctlCdpRefToken ? { __bctlCdpRefToken: p.__bctlCdpRefToken } : {}),
       tabId: tab.id,
     },
     frameId
@@ -848,7 +909,10 @@ async function handleElementRect(params) {
 
 async function handleElementScreenshot(params) {
   const tab = await targetTab(params);
-  const { frameId, params: p } = frameRoute(params);
+  const resolved = await resolveVomParams(tab.id, params);
+  const routed = frameRoute(resolved.params);
+  const frameId = resolved.frameId ?? routed.frameId;
+  const p = routed.params;
   const rectReply = await toContent(
     "element_rect",
     {
@@ -858,6 +922,7 @@ async function handleElementScreenshot(params) {
       ref: p.ref,
       text: p.text,
       placeholder: p.placeholder,
+      ...(p.__bctlCdpRefToken ? { __bctlCdpRefToken: p.__bctlCdpRefToken } : {}),
       tabId: tab.id,
     },
     frameId
@@ -900,10 +965,19 @@ async function handleWheel(params) {
   let x = params.x;
   let y = params.y;
   if (params.target) {
-    const rectRes = await toContent("element_rect", { target: params.target });
-    if (rectRes && rectRes.rect) {
-      x = rectRes.rect.x + rectRes.rect.width / 2;
-      y = rectRes.rect.y + rectRes.rect.height / 2;
+    const resolved = await resolveVomParams(tab.id, { target: params.target });
+    const frameId = resolved.frameId ?? 0;
+    const rectRes = await toContent("element_rect", resolved.params, frameId);
+    const rect = rectRes?.ok ? rectRes.result : rectRes?.rect ? rectRes : null;
+    if (rect && rect.rect) {
+      let box = rect.rect;
+      if (frameId > 0) box = await projectFrameRect(tab.id, frameId, box);
+      x = box.x + box.width / 2;
+      y = box.y + box.height / 2;
+    } else if (rect && typeof rect.x === "number") {
+      let box = frameId > 0 ? await projectFrameRect(tab.id, frameId, rect) : rect;
+      x = box.x + box.width / 2;
+      y = box.y + box.height / 2;
     }
   }
   return await handleCdp("wheel", { ...params, x, y }, tab.id);
@@ -917,10 +991,15 @@ async function handleDrag(params) {
   let toY = params.toY;
 
   if (params.source) {
-    const srcRect = await toContent("element_rect", { target: params.source });
-    if (srcRect && srcRect.rect) {
-      fromX = srcRect.rect.x + srcRect.rect.width / 2;
-      fromY = srcRect.rect.y + srcRect.rect.height / 2;
+    const resolved = await resolveVomParams(tab.id, { target: params.source });
+    const frameId = resolved.frameId ?? 0;
+    const srcReply = await toContent("element_rect", resolved.params, frameId);
+    const raw = srcReply?.ok ? srcReply.result : srcReply?.rect ? srcReply : null;
+    const rawRect = raw?.rect || (raw && typeof raw.x === "number" ? raw : null);
+    if (rawRect) {
+      const box = frameId > 0 ? await projectFrameRect(tab.id, frameId, rawRect) : rawRect;
+      fromX = box.x + box.width / 2;
+      fromY = box.y + box.height / 2;
     } else {
       throw createRpcError("ELEMENT_NOT_FOUND", `source element '${params.source}' not found`, {
         target: params.source,
@@ -929,10 +1008,15 @@ async function handleDrag(params) {
   }
 
   if (params.target) {
-    const dstRect = await toContent("element_rect", { target: params.target });
-    if (dstRect && dstRect.rect) {
-      toX = dstRect.rect.x + dstRect.rect.width / 2;
-      toY = dstRect.rect.y + dstRect.rect.height / 2;
+    const resolved = await resolveVomParams(tab.id, { target: params.target });
+    const frameId = resolved.frameId ?? 0;
+    const dstReply = await toContent("element_rect", resolved.params, frameId);
+    const raw = dstReply?.ok ? dstReply.result : dstReply?.rect ? dstReply : null;
+    const rawRect = raw?.rect || (raw && typeof raw.x === "number" ? raw : null);
+    if (rawRect) {
+      const box = frameId > 0 ? await projectFrameRect(tab.id, frameId, rawRect) : rawRect;
+      toX = box.x + box.width / 2;
+      toY = box.y + box.height / 2;
     } else {
       throw createRpcError("ELEMENT_NOT_FOUND", `target element '${params.target}' not found`, {
         target: params.target,
@@ -988,6 +1072,325 @@ async function handleNetAction(action, params) {
   return await handleNet(action, params, tab.id);
 }
 
+const vomSnapshotState = new Map();
+let vomSnapshotSeq = 0;
+
+function extractBareRef(val) {
+  if (typeof val !== "string") return null;
+  const m = val.match(/^@?(e\d+)$/);
+  return m ? m[1] : null;
+}
+
+async function resolveWebNavFrameId(tabId, state, entry, href, token) {
+  if (!entry.frameId || entry.frameId === state.rootFrameId) return 0;
+  let frames = [];
+  try {
+    frames = (await chrome.webNavigation.getAllFrames({ tabId })) || [];
+  } catch (err) {
+    noteSwallowed("background.resolveWebNavFrameId.getAllFrames", err);
+    return 0;
+  }
+  const subframes = frames.filter((f) => f.frameId !== 0);
+  if (!subframes.length) return 0;
+  const wantUrl = href || entry.frameUrl || "";
+  const exact = wantUrl ? subframes.filter((f) => f.url === wantUrl) : [];
+  if (exact.length === 1) return exact[0].frameId;
+  const stripHash = (u) => String(u || "").split("#")[0];
+  const byBase = wantUrl ? subframes.filter((f) => stripHash(f.url) === stripHash(wantUrl)) : [];
+  if (byBase.length === 1) return byBase[0].frameId;
+  const pool = exact.length ? exact : byBase.length ? byBase : subframes;
+  try {
+    const probed = await chrome.scripting.executeScript({
+      target: { tabId, frameIds: pool.map((f) => f.frameId) },
+      func: (t) =>
+        Boolean(
+          document.documentElement &&
+          document.documentElement.getAttribute("data-bctl-cdp-frame") === t
+        ),
+      args: [token],
+    });
+    const hit = probed.find((r) => r && r.result === true);
+    if (hit && typeof hit.frameId === "number") return hit.frameId;
+  } catch (err) {
+    noteSwallowed("background.resolveWebNavFrameId.probe", err);
+  }
+  return pool[0]?.frameId ?? 0;
+}
+
+async function resolveVomParams(tabId, params = {}) {
+  const state = vomSnapshotState.get(tabId);
+  if (!state) return { frameId: null, params };
+  const baseParams = state.maxRefNum > 0 ? { ...params, __bctlMinRef: state.maxRefNum } : params;
+  const refVal = baseParams.target ?? baseParams.ref ?? baseParams.ref_id;
+  const bareRef = extractBareRef(refVal);
+  const bareSrc = extractBareRef(baseParams.source);
+  if (!bareRef && !bareSrc) return { frameId: null, params: baseParams };
+
+  let resolvedFrameId = null;
+  const nextParams = { ...baseParams };
+  for (const [bare, tokenKey] of [
+    [bareRef, "__bctlCdpRefToken"],
+    [bareSrc, "__bctlCdpSourceToken"],
+  ]) {
+    if (!bare) continue;
+    const entry = state.refs.get(bare) || state.historyRefs?.get(bare);
+    if (!entry) continue;
+    const token = `${state.nonce}:${bare}`;
+    const resolved = await resolveVomBackendNode(tabId, entry, token);
+    if (!resolved.connected) {
+      throw createRpcError(
+        "STALE_REF",
+        `ref "@${bare}" is stale or detached — run snapshot again`,
+        {
+          ref: "@" + bare,
+        }
+      );
+    }
+    nextParams[tokenKey] = token;
+    if (tokenKey === "__bctlCdpRefToken" && resolvedFrameId === null) {
+      resolvedFrameId = await resolveWebNavFrameId(tabId, state, entry, resolved.href, token);
+    }
+  }
+  return { frameId: resolvedFrameId, params: nextParams };
+}
+
+const ONLY_KIND_ROLES = {
+  fields: new Set([
+    "textbox",
+    "searchbox",
+    "combobox",
+    "checkbox",
+    "radio",
+    "spinbutton",
+    "slider",
+    "switch",
+  ]),
+  buttons: new Set(["button", "menuitem", "menuitemcheckbox", "menuitemradio", "tab"]),
+  links: new Set(["link"]),
+};
+
+function filterVomByOnly(vomText, onlyKinds, keepProse) {
+  const allowedRoles = new Set();
+  for (const kind of onlyKinds) {
+    const roles = ONLY_KIND_ROLES[kind];
+    if (roles) for (const r of roles) allowedRoles.add(r);
+  }
+  const keepRefs = new Set();
+  const out = [];
+  for (const line of String(vomText || "").split("\n")) {
+    if (/^(@|L\d+\s)/.test(line)) {
+      out.push(line);
+      continue;
+    }
+    const refMatch = line.match(/^\s*@(e\d+)\s+([a-z0-9_-]+)/i);
+    if (refMatch) {
+      if (allowedRoles.has(refMatch[2].toLowerCase())) {
+        keepRefs.add(refMatch[1]);
+        out.push(line);
+      }
+      continue;
+    }
+    if (keepProse) out.push(line);
+  }
+  return { filteredText: out.join("\n"), keepRefs };
+}
+
+async function resolveSnapshotTarget(tab, params = {}) {
+  const refVal = params.target ?? params.ref ?? params.ref_id ?? params.selector ?? params.index;
+  if (refVal === undefined || refVal === null || refVal === "") return {};
+  const bare = extractBareRef(refVal);
+  if (bare) {
+    const state = vomSnapshotState.get(tab.id);
+    const entry = state?.refs.get(bare) || state?.historyRefs?.get(bare);
+    if (entry) {
+      return { targetBackendNodeId: entry.backendNodeId, targetFrameId: entry.frameId };
+    }
+  }
+  const token = `st-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const frames = await contentFrames(tab.id);
+  const ordered = [
+    ...frames.filter((f) => f.frameId === 0),
+    ...frames.filter((f) => f.frameId !== 0),
+  ];
+  let matched = null;
+  let lastReply = null;
+  for (const fr of ordered) {
+    try {
+      const reply = await toContent("resolve_snap_target", { ...params, token }, fr.frameId);
+      if (reply?.ok && reply.result?.token) {
+        matched = { frameId: fr.frameId, url: fr.url, token: reply.result.token };
+        break;
+      }
+      if (reply && !reply.ok) {
+        lastReply = reply;
+        if (reply.code && reply.code !== "ELEMENT_NOT_FOUND") break;
+      }
+    } catch (err) {
+      noteSwallowed("background.resolveSnapshotTarget", err);
+    }
+  }
+  if (!matched) {
+    const err = new Error(lastReply?.error || `no element matching ${JSON.stringify(refVal)}`);
+    if (lastReply?.code) err.code = lastReply.code;
+    if (lastReply?.diagnostics) err.diagnostics = lastReply.diagnostics;
+    if (lastReply?.recoveryHint) err.recoveryHint = lastReply.recoveryHint;
+    throw err;
+  }
+  try {
+    const backendNodeId = await resolveAttrTokenBackendNode(
+      tab.id,
+      "data-bctl-snap-target",
+      matched.token
+    );
+    if (!backendNodeId) {
+      const err = new Error(`could not resolve snapshot target ${JSON.stringify(refVal)}`);
+      err.code = "ELEMENT_NOT_FOUND";
+      throw err;
+    }
+    return { targetBackendNodeId: backendNodeId };
+  } finally {
+    await toContent("clear_snap_target", { token: matched.token }, matched.frameId).catch(() => {});
+  }
+}
+
+async function runVomSnapshot(tab, params = {}) {
+  await wakeIfAsleep(tab);
+  const scope = params.scope || "viewport";
+  const maxDepth = params.maxDepth;
+  const maxTokens = params.maxTokens;
+  const limit = params.limit;
+  const cursor = params.cursor;
+  const targetVal =
+    params.target ?? params.ref ?? params.ref_id ?? params.selector ?? params.index ?? null;
+  const targetKey = targetVal === null ? null : String(targetVal);
+  const onlyKinds = Array.isArray(params.only) && params.only.length ? params.only : null;
+  const onlyKey = onlyKinds ? onlyKinds.join(",") : "";
+  const baseUrl = String(tab.url || "").split("#")[0];
+  const prev = vomSnapshotState.get(tab.id);
+  const canReuseRender =
+    Number.isFinite(cursor) &&
+    cursor > 0 &&
+    prev?.lastRender &&
+    prev.baseUrl === baseUrl &&
+    prev.lastRender.scope === scope &&
+    prev.lastRender.maxDepth === maxDepth &&
+    prev.lastRender.maxTokens === maxTokens &&
+    prev.lastRender.targetKey === targetKey;
+
+  let res;
+  if (canReuseRender) {
+    res = prev.lastRender.res;
+  } else {
+    const { targetBackendNodeId, targetFrameId } = await resolveSnapshotTarget(tab, params);
+    res = await captureVomSnapshot(tab.id, tab.url, {
+      maxDepth,
+      maxTokens,
+      scope,
+      targetBackendNodeId,
+      targetFrameId,
+    });
+    const nonce = ++vomSnapshotSeq;
+    const sameDoc = prev && prev.baseUrl === baseUrl;
+    const historyRefs = sameDoc ? new Map(prev.historyRefs) : new Map();
+    for (const r of res.refs) historyRefs.set(r.ref, r);
+    const maxRefNum = Math.max(sameDoc ? prev.maxRefNum || 0 : 0, res.refs.length);
+    vomSnapshotState.set(tab.id, {
+      nonce,
+      baseUrl,
+      rootFrameId: res.rootFrameId,
+      refs: new Map(res.refs.map((r) => [r.ref, r])),
+      historyRefs,
+      maxRefNum,
+      lastRender: { scope, maxDepth, maxTokens, targetKey, onlyKey, res },
+    });
+  }
+
+  let elements = res.refs.map((r) => ({
+    ref: r.ref,
+    line: r.line,
+    tag: r.tag || r.role || "generic",
+    role: r.role || "generic",
+    text: r.name || "",
+    ...(r.ctx ? { ctx: r.ctx } : {}),
+    ...(r.href ? { href: r.href } : {}),
+    ...(r.placeholder ? { placeholder: r.placeholder } : {}),
+    ...(r.value !== undefined ? { value: r.value } : {}),
+    ...(r.state ? { state: r.state } : {}),
+    ...(r.inIframe ? { inIframe: true, frame: r.frameUrl || r.frameId } : {}),
+    ...(r.rect ? { rect: r.rect } : {}),
+  }));
+  let censusOut = res.text;
+  let keepProse = true;
+  if (onlyKinds) {
+    keepProse = typeof params.maxText === "number" && params.maxText > 0;
+    const { filteredText, keepRefs } = filterVomByOnly(res.text, onlyKinds, keepProse);
+    censusOut = filteredText;
+    const lineByRef = new Map();
+    const filteredLines = filteredText.split("\n");
+    for (let i = 0; i < filteredLines.length; i++) {
+      const m = filteredLines[i].match(/^\s*@(e\d+)\s/);
+      if (m) lineByRef.set(m[1], i);
+    }
+    elements = elements
+      .filter((el) => keepRefs.has(el.ref))
+      .map((el) => ({ ...el, line: lineByRef.get(el.ref) ?? el.line }));
+  }
+  const paged = paginateVomSnapshot({
+    text: censusOut,
+    refs: elements,
+    limit,
+    cursor,
+  });
+  const pagedElements = paged.refs.map(({ line: _line, ...rest }) => rest);
+  const textOut = onlyKinds && !keepProse ? "" : paged.text;
+  const hasActiveModal = Boolean(res.layer && res.layer.kind === "modal");
+  const openDialogs = Array.isArray(res.openDialogs) ? res.openDialogs : [];
+  const pageState = {
+    url: tab.url || "",
+    title: tab.title || "",
+    settled: true,
+    hasActiveModal,
+    ...(hasActiveModal ? { activeModalTag: "dialog" } : {}),
+    openDialogs,
+  };
+  return {
+    ok: true,
+    result: {
+      ok: true,
+      url: tab.url || "",
+      title: tab.title || "",
+      census: paged.text,
+      text: textOut,
+      scope,
+      ...(onlyKinds ? { only: onlyKinds } : {}),
+      structure: res.layer ? `L1 ${res.layer.kind}` : "VOM v1 (CDP)",
+      elements: pagedElements,
+      totalElementsCount: paged.inScope,
+      offscreenCount: res.offscreenCount || 0,
+      foldedCount: 0,
+      truncated: Boolean(res.truncated || paged.truncated),
+      ref_count: res.refs.length,
+      window: { offset: paged.offset, shown: paged.shown, inScope: paged.inScope },
+      ...(paged.next !== undefined ? { next: paged.next } : {}),
+      ...(res.layer ? { layer: { kind: res.layer.kind, coverage: res.layer.coverage } } : {}),
+      ...(res.viewport
+        ? {
+            viewport: {
+              ...res.viewport,
+              scrollX: 0,
+              scrollY: 0,
+              scrollHeight: res.viewport.height,
+              scrollPercent: 0,
+            },
+          }
+        : {}),
+      pageState,
+      ...(res.frames?.length ? { frames: res.frames } : {}),
+      ...(res.warnings?.length ? { warnings: res.warnings } : {}),
+    },
+  };
+}
+
 async function handleContentAction(action, params) {
   const tab = await targetTab(params);
   if (looksLikePdf(tab.url)) {
@@ -1005,17 +1408,22 @@ async function handleContentAction(action, params) {
         pruneClickCandidates();
         clickCandidates.push({ at: Date.now(), restoreTo: active.id });
       }
-    } catch {}
+    } catch (err) {
+      noteSwallowed("background.handleContentAction.recordClickCandidate", err);
+    }
   }
   if (action === "snapshot" || action === "find") {
-    return await crossFrame(action, params);
+    return action === "snapshot" ? await runVomSnapshot(tab, params) : await crossFrame(action, params);
   }
-  const { frameId, params: p } = frameRoute(params);
+  const resolved = await resolveVomParams(tab.id, params);
+  const routed = frameRoute(resolved.params);
+  const frameId = resolved.frameId ?? routed.frameId;
+  const p = routed.params;
   if (DIALOG_TRIGGERS.has(action)) return await withDialogGuard(action, p, frameId, tab.id);
   return await toContent(action, p, frameId);
 }
 
-// BSK-style Background Action Handler Registry
+// Background Action Handler Registry
 const BACKGROUND_HANDLERS = new Map([
   ["navigate", async (params) => ({ ok: true, result: await navigate(params) })],
   [
@@ -1173,7 +1581,9 @@ async function enrichAxWithRefs(axResult, tabId) {
       0
     );
     census = (snap && snap.ok && snap.result && snap.result.elements) || [];
-  } catch {}
+  } catch (err) {
+    noteSwallowed("background.enrichAxWithRefs.census", err);
+  }
 
   const norm = (t) =>
     String(t || "")
@@ -1289,7 +1699,9 @@ async function recordStop(params) {
   recordingTabId = null;
   try {
     await toContent("record_stop", { tabId });
-  } catch {}
+  } catch (err) {
+    noteSwallowed("background.recordStop.toContent", err);
+  }
   return { ok: true, result: { recording: false, count: recordingSteps.length } };
 }
 
@@ -1297,7 +1709,7 @@ async function recordStop(params) {
 // each time a new document finishes loading.
 chrome.tabs.onUpdated.addListener((tabId, info) => {
   if (!isRecording || tabId !== recordingTabId || info.status !== "complete") return;
-  toContent("record_start", { tabId }).catch(() => {});
+  toContent("record_start", { tabId }).catch(swallow("background.rearmRecording.toContent"));
 });
 
 async function replay({ steps, startUrl, tabId } = {}) {
@@ -1450,7 +1862,9 @@ async function projectFrameRect(tabId, frameId, localRect) {
     let frameInfo = null;
     try {
       frameInfo = await chrome.webNavigation.getFrame({ tabId, frameId: curFrameId });
-    } catch {}
+    } catch (err) {
+      noteSwallowed("background.projectFrameRect.chrome.webNavigation.getFrame", err);
+    }
     if (!frameInfo || frameInfo.parentFrameId == null) break;
 
     const parentFrameId = frameInfo.parentFrameId;
@@ -1482,11 +1896,17 @@ async function requestHelp(params, tabId) {
 
   const tab = await chrome.tabs.get(tabId);
   if (chrome.windows && chrome.windows.update) {
-    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+    await chrome.windows
+      .update(tab.windowId, { focused: true })
+      .catch(swallow("background.requestHelp.focusWindow"));
   }
-  await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+  await chrome.tabs
+    .update(tabId, { active: true })
+    .catch(swallow("background.requestHelp.activateTab"));
 
-  await toContent("show_help_banner", { reason, tabId }, 0).catch(() => {});
+  await toContent("show_help_banner", { reason, tabId }, 0).catch(
+    swallow("background.requestHelp.showBanner")
+  );
 
   const startTime = Date.now();
   let resolvedBy = null;
@@ -1522,7 +1942,9 @@ async function requestHelp(params, tabId) {
       await new Promise((r) => setTimeout(r, pollIntervalMs));
     }
   } finally {
-    await toContent("hide_help_banner", { tabId }, 0).catch(() => {});
+    await toContent("hide_help_banner", { tabId }, 0).catch(
+      swallow("background.requestHelp.hideBanner")
+    );
   }
 
   const durationMs = Date.now() - startTime;
@@ -1676,6 +2098,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   forgetRecordingTab(tabId);
   drivenTabIds.delete(tabId);
   pendingFocusRestores.delete(tabId);
+  vomSnapshotState.delete(tabId);
+  dropVomTabState(tabId);
   cdpDropTab(tabId);
   netDropTab(tabId);
 });
@@ -1685,14 +2109,18 @@ chrome.tabs.onCreated.addListener((tab) => {
   if (tab.openerTabId == null || clickCandidates.length === 0) return;
   const candidate = clickCandidates.shift();
   pendingFocusRestores.set(tab.id, candidate.restoreTo);
-  chrome.tabs.update(tab.id, { active: false }).catch(() => {});
+  chrome.tabs
+    .update(tab.id, { active: false })
+    .catch(swallow("background.focusRestore.deactivateNewTab"));
 });
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
   const restoreTo = pendingFocusRestores.get(tabId);
   if (restoreTo == null) return;
   pendingFocusRestores.delete(tabId);
-  chrome.tabs.update(restoreTo, { active: true }).catch(() => {});
+  chrome.tabs
+    .update(restoreTo, { active: true })
+    .catch(swallow("background.focusRestore.reactivate"));
 });
 
 async function currentTab(params) {
@@ -1732,7 +2160,9 @@ async function navigate(params = {}) {
   if (frame && frame.errorOccurred) throw navigationFailed(url);
   try {
     await toContent("wait_settle", { timeoutMs: 600, tabId: tab.id });
-  } catch {}
+  } catch (err) {
+    noteSwallowed("background.navigate.toContent", err);
+  }
   const updated = await chrome.tabs.get(tab.id);
   return { url: updated.url };
 }
@@ -1893,7 +2323,7 @@ function captureVisible(tabId, windowId, opts) {
     return shot;
   };
   const next = captureVisibleQueue.then(run, run);
-  captureVisibleQueue = next.catch(() => {});
+  captureVisibleQueue = next.catch(swallow("background.captureVisible.queueTail"));
   return next;
 }
 
@@ -1930,7 +2360,7 @@ async function captureBackground(tab, opts) {
       BACKGROUND_CAPTURE_MS
     );
   });
-  timeout.catch(() => {});
+  timeout.catch(swallow("background.captureBackground.deadline"));
   const capture = captureViewport(tab.id, { ...opts, emulateFocus: true, deadline: timeout });
   return Promise.race([capture, timeout]).finally(() => clearTimeout(timer));
 }
@@ -1966,7 +2396,9 @@ async function listTabs() {
   let lastFocused = null;
   try {
     lastFocused = await chrome.windows.getLastFocused();
-  } catch {}
+  } catch (err) {
+    noteSwallowed("background.listTabs.chrome.windows.getLastFocused", err);
+  }
   return {
     tabs: tabs.map((t) => ({
       id: t.id,
@@ -1995,12 +2427,16 @@ async function newTab({ url, wait = true, activate = false, windowId }) {
   try {
     await waitForComplete(tab.id);
     await toContent("wait_settle", { timeoutMs: 600, tabId: tab.id });
-  } catch {}
+  } catch (err) {
+    noteSwallowed("background.newTab.toContent", err);
+  }
   let ready = { url, title: "" };
   try {
     const updated = await chrome.tabs.get(tab.id);
     ready = { url: updated.url, title: updated.title || "" };
-  } catch {}
+  } catch (err) {
+    noteSwallowed("background.newTab.chrome.tabs.get", err);
+  }
   return { id: tab.id, ...ready, ready: true };
 }
 
@@ -2146,7 +2582,9 @@ async function confirmNothingHappened(reply, tabId, urlBefore, pendingBefore) {
     let after = null;
     try {
       after = await chrome.tabs.get(tabId);
-    } catch {}
+    } catch (err) {
+      noteSwallowed("background.confirmNothingHappened.chrome.tabs.get", err);
+    }
     const pending =
       after &&
       after.pendingUrl &&
@@ -2206,7 +2644,7 @@ async function withDialogGuard(action, params, frameId, tabId) {
   // action is still pending; it never ends the race on its own.
   let settled = false;
   const run = toContent(action, rest, frameId).finally(() => (settled = true));
-  run.catch(() => {});
+  run.catch(swallow("background.withDialogGuard.actionRejection"));
   try {
     return await Promise.race([
       run,
@@ -2292,7 +2730,9 @@ async function wakeIfAsleep(tab) {
   if (!awake) {
     try {
       await wakeFrozenTab(tab.id);
-    } catch {}
+    } catch (err) {
+      noteSwallowed("background.wakeIfAsleep.wakeFrozenTab", err);
+    }
   }
 }
 
@@ -2325,7 +2765,9 @@ async function toContent(action, params, frameId = 0) {
     let after = null;
     try {
       after = await chrome.tabs.get(tab.id);
-    } catch {}
+    } catch (err) {
+      noteSwallowed("background.toContent.chrome.tabs.get", err);
+    }
     // A navigation the action started shows as a changed url, a pending url that has not
     // committed yet, or a tab that was loaded and is loading again.
     const navigatedTo =
@@ -2421,12 +2863,15 @@ async function contentFrames(tabId) {
 
 async function crossFrame(action, params) {
   const tab = await targetTab(params);
+  const state = vomSnapshotState.get(tab.id);
+  const frameParams =
+    state && state.maxRefNum > 0 ? { ...params, __bctlMinRef: state.maxRefNum } : params;
   const frames = await contentFrames(tab.id);
   const errors = [];
   const per = await Promise.all(
     frames.map(async (fr) => {
       try {
-        const reply = await toContent(action, params, fr.frameId);
+        const reply = await toContent(action, frameParams, fr.frameId);
         if (reply && reply.ok) return { fr, result: reply.result };
         if (reply && reply.error) errors.push(`f${fr.frameId}: ${reply.error}`);
         return null;
@@ -2562,7 +3007,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (socket) {
       try {
         socket.close();
-      } catch {}
+      } catch (err) {
+        noteSwallowed("background.reconnectOnConfigChange.closeSocket", err);
+      }
     }
     socket = null;
     attempts = 0;

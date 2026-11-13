@@ -1,6 +1,6 @@
 // CDP Session Manager for browserctl.
-// Adheres strictly to docs/spec/00-architecture-overview.md and docs/spec/02-driver-and-cdp.md.
 
+import { swallow, noteSwallowed } from "../util.js";
 import { RpcError, RPC_ERRORS } from "../transport/errors.js";
 
 /**
@@ -25,7 +25,9 @@ const ATTACHED_KEY = "bctl_cdp_attached_tabs";
 
 function persistAttached() {
   if (typeof chrome !== "undefined" && chrome.storage?.session?.set) {
-    chrome.storage.session.set({ [ATTACHED_KEY]: [...sessions.keys()] }).catch(() => {});
+    chrome.storage.session
+      .set({ [ATTACHED_KEY]: [...sessions.keys()] })
+      .catch(swallow("driver.session.persistAttached.chrome.storage.session.set"));
   }
 }
 
@@ -168,7 +170,9 @@ export async function attach(tabId) {
     }
     try {
       await detach(tabId);
-    } catch {}
+    } catch (err) {
+      noteSwallowed("driver.session.attach.detach", err);
+    }
     try {
       await attachOnce(tabId);
     } catch {
@@ -188,7 +192,9 @@ export async function attach(tabId) {
       deviceScaleFactor: 1,
       mobile: false,
     });
-  } catch {}
+  } catch (err) {
+    noteSwallowed("driver.session.attach.Emulation.setDeviceMetricsOverride", err);
+  }
 }
 
 /**

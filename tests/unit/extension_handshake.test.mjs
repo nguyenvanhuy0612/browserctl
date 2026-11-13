@@ -7,7 +7,7 @@ import vm from "node:vm";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { extractFunction } from "./source-slice.mjs";
+import { extractFunction, createSandbox } from "./source-slice.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SRC = readFileSync(join(__dirname, "..", "..", "extension", "background.js"), "utf8");
@@ -59,7 +59,7 @@ function load({
     }
   }
 
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     console: { log() {}, warn() {} },
     WebSocket: FakeWebSocket,
     navigator: { userAgent, ...(brave ? { brave: {} } : {}) },
@@ -250,7 +250,7 @@ function loadListTabs({
   targetTabId = null,
   lastFocusedRejects = false,
 } = {}) {
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     chrome: {
       tabs: {
         async query() {

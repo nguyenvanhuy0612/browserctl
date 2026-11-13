@@ -1,6 +1,6 @@
 // Emulation and Device Controller for browserctl.
-// Adheres strictly to docs/spec/00-architecture-overview.md and docs/spec/02-driver-and-cdp.md.
 
+import { noteSwallowed } from "../util.js";
 import { sendCdpCommand } from "./session.js";
 
 export const DEVICE_PRESETS = Object.freeze({
@@ -159,7 +159,9 @@ export async function clearEmulation(tabId) {
   await sendCdpCommand(tabId, "Emulation.setEmulatedMedia", { media: "" });
   try {
     await sendCdpCommand(tabId, "Emulation.clearGeolocationOverride");
-  } catch {}
+  } catch (err) {
+    noteSwallowed("driver.emulate.clearEmulation.Emulation.clearGeolocationOverride", err);
+  }
   await setNetworkConditions(tabId, {
     offline: false,
     latency: 0,

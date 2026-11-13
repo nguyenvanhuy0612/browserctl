@@ -4,6 +4,9 @@
 // imported under Node; the tests evaluate these slices in a node:vm context instead, and a
 // test breaks when the real implementation changes.
 
+import vm from "node:vm";
+import { swallow, noteSwallowed } from "../../extension/util.js";
+
 // Pull `function <name>(...) { ... }` out of SRC by counting braces from the first `{`
 // to its match, so nested blocks inside the function don't truncate the slice early.
 export function extractFunction(src, name) {
@@ -43,4 +46,10 @@ export function extractConst(src, name) {
   const semi = src.indexOf(";", startMatch.index);
   if (semi < 0) throw new Error(`no terminating ';' found for const ${name}`);
   return src.slice(startMatch.index, semi + 1);
+}
+
+// A vm context for evaluating slices of extension code: the helpers the service worker imports
+// from util.js are present, as they are in the browser.
+export function createSandbox(globals = {}) {
+  return vm.createContext({ swallow, noteSwallowed, ...globals });
 }

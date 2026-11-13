@@ -2380,3 +2380,76 @@ test("extract_table: throws ELEMENT_NOT_FOUND when table element is missing", ()
   );
 });
 
+test("insertIntoEditable: clearBefore=false preserves and appends existing text", () => {
+  const slices = [
+    extractFunction(SRC, "findNativeSetter"),
+    extractFunction(SRC, "setNativeValue"),
+    extractFunction(SRC, "insertIntoEditable"),
+  ];
+  class Ev {
+    constructor(type, init) {
+      this.type = type;
+      Object.assign(this, init);
+    }
+  }
+  const { insertIntoEditable } = loadFromContentJs(slices, ["insertIntoEditable"], {
+    Event: class extends Ev {},
+  });
+
+  let val = "hello";
+  const input = {
+    tagName: "INPUT",
+    focus: () => {},
+    dispatchEvent: () => true,
+    get value() {
+      return val;
+    },
+    set value(v) {
+      val = v;
+    },
+  };
+
+  const res = insertIntoEditable(input, " world", { clearBefore: false });
+  assert.equal(val, "hello world");
+  assert.equal(res.valueNow, "hello world");
+  assert.equal(res.matched, true);
+});
+
+test("readOneProperty html: strips internal data-bctl-* attributes on clone", () => {
+  const { readOneProperty } = loadFromContentJs(
+    [
+      extractFunction(SRC, "cleanOuterHtml"),
+      extractFunction(SRC, "readOneProperty"),
+      extractFunction(SRC, "fromPage"),
+    ],
+    ["readOneProperty"]
+  );
+
+  const removed = [];
+  const child = {
+    removeAttribute: (a) => removed.push("child:" + a),
+  };
+  const cloned = {
+    removeAttribute: (a) => removed.push("root:" + a),
+    querySelectorAll: () => [child],
+    outerHTML: '<div id="box"><span>hi</span></div>',
+  };
+  const liveEl = {
+    tagName: "DIV",
+    cloneNode: (deep) => {
+      assert.equal(deep, true);
+      return cloned;
+    },
+    outerHTML: '<div id="box" data-bctl-cdp-ref="e1"><span data-bctl-ref="e2">hi</span></div>',
+  };
+
+  const out = readOneProperty(liveEl, "html");
+  assert.equal(out.property, "html");
+  assert.equal(out.value, '<div id="box"><span>hi</span></div>');
+  assert.ok(removed.includes("root:data-bctl-cdp-ref"));
+  assert.ok(removed.includes("root:data-bctl-ref"));
+  assert.ok(removed.includes("child:data-bctl-cdp-ref"));
+  assert.ok(removed.includes("child:data-bctl-cdp-frame"));
+  assert.ok(removed.includes("child:data-bctl-ref"));
+});
+

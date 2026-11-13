@@ -3,6 +3,15 @@
 One entry per published version. The reasoning and measurements behind each change are in the
 commit history and on the GitHub release.
 
+## Unreleased
+
+- **Dead Code and Stale Spec Retirement (Phase 0)**: Removed 17 unreachable/unshipped files under `extension/content/` and `extension/tools/` and retired `docs/spec/` (which described an obsolete JSON-RPC protocol). Relocated historical audit documentation to `docs/internal/`. Added automated preflight gates ensuring all extension files are reachable from manifest entry points and all backticked paths in documentation exist on disk.
+- **Unified Contributor & Agent Guidance (Phase 1)**: Created `AGENTS.md` as the canonical entry point defining tool invariants, commands, truth hierarchy, and autonomy boundaries; shrunk `CLAUDE.md` to import `@AGENTS.md`. Guarded `AGENTS.md` in preflight checks.
+- **Architectural Concepts & Complete Error Taxonomy (Phase 2)**: Added `CONCEPTS.md` detailing core domain entities (`Target`, `Ref`, `Snapshot`, `Census`, `VOM`, `PageState`, `Effect`, `Hold/Lease`, etc.). Added comprehensive "Results and errors" section to `docs/REFERENCE.md` documenting result envelopes and the exhaustive 19-code error taxonomy with actionable recovery guidance.
+- **Native Skill Packaging (Phase 3)**: Packaged agent instructions and recipes into native skill structure under `skills/browserctl/` (`SKILL.md`, `references/errors.md`, `references/workflows.md`, `references/multi-agent.md`) and added `skills/` to npm distribution files.
+- **Action Disposition & JIT Error Recovery (Phase 4)**: Added deterministic action `disposition` (`not_delivered`, `delivered_verified`, `delivered_unverified`, `delivery_uncertain`) and structured `recovery` payload (`strategy`, `retryable`, `requiresFreshSnapshot`, `recoveryHint`) across `extension/transport/errors.js`, `extension/content.js`, `bridge/server.js`, and `mcp/index.js`. Added opened dialog detection in `click` effect reporting.
+- **Definition of Done & Stranger Run (Phase 5)**: Codified strict release criteria in `AGENTS.md` and `CONTRIBUTING.md`, requiring verbatim example verification, stranger run execution using packed tarballs, and bridge call log validation before release.
+
 ## 0.9.8
 
 Promotion of property inspection (`browser_get_property` / `get text`) to core profile, Zero Content Loss full-text mode (`maxText: 0`), and compact MCP snapshot payloads.

@@ -8,6 +8,7 @@ import { markDaemonRunning, getStateDir } from "./state.js";
 import { createRegistry } from "./registry.js";
 import { createLeases } from "./leases.js";
 import { createOwners } from "./owners.js";
+import { createFaultLog } from "./crash.js";
 import { TABLESS_ACTIONS, ID_ACTIONS, isRead, tabOf, tabChoices } from "./routing.js";
 
 function envNum(name, fallback) {
@@ -33,6 +34,16 @@ const BUDGETED_ACTIONS = new Set([
   "download",
   "request_help",
   "exec_system_cmd",
+]);
+const MUTATING_ACTIONS = new Set([
+  "click",
+  "type",
+  "fill_form",
+  "select_option",
+  "press_key",
+  "file_upload",
+  "evaluate",
+  "make_request",
 ]);
 const TIMEOUT_BUFFER_MS = 5_000;
 const MAX_TIMEOUT_MS = 300_000;
@@ -71,6 +82,9 @@ const owners = createOwners();
 // The target of each sticky session (the CLI): session -> {browser, tabId}. A CLI process runs
 // one command, so the bridge keeps the tab its next command goes to.
 const stickyTargets = new Map();
+
+// Uncaught exceptions the bridge survived; /status reports them as `degraded`.
+const faults = createFaultLog();
 
 const pending = new Map();
 
@@ -375,6 +389,7 @@ function statusPayload() {
     })),
     runId: RUN_ID,
     pid: process.pid,
+    degraded: faults.snapshot(),
     callLog: CALL_LOG_PATH || null,
     callLogBytes: CALL_LOG_PATH ? callLogSize() : null,
     callLogMaxBytes: CALL_LOG_PATH ? CALL_LOG_MAX_BYTES : null,
@@ -983,9 +998,18 @@ async function handleCommand(body, res, local = false) {
     .catch((err) => {
       done();
       record(false, { failure: "timeout" });
+      const isMutating = MUTATING_ACTIONS.has(action);
       return sendJson(res, 504, {
         ok: false,
+        code: "COMMAND_TIMEOUT_MS",
         error: String(err.message || err),
+        disposition: isMutating ? "delivery_uncertain" : "not_delivered",
+        recovery: {
+          strategy: "inspect_state_then_retry",
+          retryable: !isMutating,
+          requiresFreshSnapshot: true,
+        },
+        recoveryHint: "Call browser_snapshot to check whether the command took effect.",
         browser: entry.alias,
       });
     });
@@ -1085,9 +1109,16 @@ function afterReply(action, params, result, alias, who) {
   if (action === "close_tab" && Number.isInteger(params.id)) forgetTab(alias, params.id);
 }
 
-function readBody(req) {
+const MAX_HTTP_BODY_BYTES = 5_000_000;
+
+// Reads a request body as JSON, counting bytes and decoding once so a multibyte character split
+// across chunks stays intact. Over `maxBytes` it stops collecting and rejects with code
+// BODY_TOO_LARGE, while the rest of the upload is read and dropped so the client receives the
+// reply instead of a reset; an empty body reads as {}.
+function readBody(req, { maxBytes = MAX_HTTP_BODY_BYTES } = {}) {
   return new Promise((resolve, reject) => {
-    let raw = "";
+    let chunks = [];
+    let size = 0;
     let settled = false;
     const done = (fn, arg) => {
       if (!settled) {
@@ -1097,17 +1128,22 @@ function readBody(req) {
     };
     req.on("data", (chunk) => {
       if (settled) return;
-      raw += chunk;
-      if (raw.length > 5_000_000) {
-        raw = "";
-        done(reject, new Error("request body too large"));
+      size += chunk.length;
+      if (size > maxBytes) {
+        chunks = [];
+        const err = new Error("request body too large");
+        err.code = "BODY_TOO_LARGE";
+        done(reject, err);
+        return;
       }
+      chunks.push(chunk);
     });
     req.on("end", () => {
+      if (settled) return;
+      const raw = Buffer.concat(chunks).toString("utf8");
       if (!raw) return done(resolve, {});
       try {
-        const parsed = JSON.parse(raw);
-        done(resolve, parsed);
+        done(resolve, JSON.parse(raw));
       } catch {
         done(reject, new Error("invalid JSON body"));
       }
@@ -1144,6 +1180,7 @@ process.on("uncaughtException", (err) => {
     );
     process.exit(1);
   }
+  faults.record(err);
   console.error("uncaught exception:", err);
 });
 process.on("unhandledRejection", (err) => {
@@ -1167,4 +1204,4 @@ server.listen(PORT, HOST, () => {
   }
 });
 
-export { computeTimeoutMs, server, wss };
+export { computeTimeoutMs, readBody, server, wss };

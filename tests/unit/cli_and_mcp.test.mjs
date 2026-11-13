@@ -358,18 +358,20 @@ test("MCP: schemas and descriptions document SPA settle, tolerance, and CSP fall
     process.env.BROWSERCTL_MCP_PROFILE = "all";
     const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
 
-    // 1. Check browser_wait_network_idle schema has maxInFlight
-    const waitNet = server._registeredTools["browser_wait_network_idle"];
-    if (!waitNet) throw new Error("browser_wait_network_idle not registered");
-    if (!waitNet.description.includes("SPAs")) throw new Error("Missing SPA guidance in wait_network_idle");
-    const netShape = waitNet.inputSchema.shape;
-    if (!netShape.maxInFlight) throw new Error("Missing maxInFlight parameter in wait_network_idle schema");
-
-    // 2. The settle guidance now lives on browser_wait_for({for:"settle"})
+    // 1. Check browser_wait_for absorbs network-idle with maxInFlight + SPA guidance
     const waitFor = server._registeredTools["browser_wait_for"];
     if (!waitFor) throw new Error("browser_wait_for not registered");
-    if (!waitFor.description.includes("SPA")) throw new Error("Missing SPA guidance in wait_for description");
-    if (!waitFor.inputSchema.shape.for) throw new Error("wait_for lost the 'for' parameter that absorbed wait_settle");
+    if (!waitFor.description.includes("SPAs")) throw new Error("Missing SPA guidance in wait_for");
+    const waitShape = waitFor.inputSchema.shape;
+    if (!waitShape.for) throw new Error("wait_for lost the 'for' parameter");
+    if (!waitShape.idleMs) throw new Error("Missing idleMs parameter in wait_for schema");
+    if (!waitShape.maxInFlight) throw new Error("Missing maxInFlight parameter in wait_for schema");
+
+    // 2. Check browser_navigate supports history back/forward
+    const nav = server._registeredTools["browser_navigate"];
+    if (!nav || !nav.inputSchema?.shape?.history) {
+      throw new Error("browser_navigate must expose history ('back' | 'forward')");
+    }
 
     // 3. Check browser_evaluate description
     const evalJs = server._registeredTools["browser_evaluate"];
@@ -1327,14 +1329,10 @@ test("The accessibility tree is exposed as an actionable second opinion (F69)", 
   );
 
   const tools = await mcpDescriptions();
-  const d = tools["browser_a11y_snapshot"].description;
-  assert.ok(
-    /debugging this browser|banner/i.test(d),
-    "the debugger banner cost must be stated up front"
-  );
-  assert.ok(
-    /browser_snapshot first|not a replacement/i.test(d),
-    "it is a diagnostic, not the default reader"
+  assert.equal(
+    tools["browser_a11y_snapshot"],
+    undefined,
+    "browser_a11y_snapshot removed in favor of CDP DOMSnapshot + AXTree browser_snapshot"
   );
 });
 
@@ -1750,10 +1748,15 @@ test("MCP: loadable element tools take 'target' and refuse the removed spellings
     const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
     const call = (n, a) => server._registeredTools[n].handler(a);
 
-    const shot = await call("browser_element_screenshot", { target: "@e2", format: "png" });
-    if (shot.isError) throw new Error("element_screenshot refused target: " + shot.content[0].text);
+    const shot = await call("browser_take_screenshot", { target: "@e2", format: "png" });
+    if (shot.isError) throw new Error("take_screenshot refused target: " + shot.content[0].text);
     if (calls.at(-1).action !== "element_screenshot" || calls.at(-1).params.target !== "@e2") {
-      throw new Error("element_screenshot did not forward target: " + JSON.stringify(calls.at(-1)));
+      throw new Error("take_screenshot(target) did not forward target: " + JSON.stringify(calls.at(-1)));
+    }
+    const hover = await call("browser_hover", { target: "@e2" });
+    if (hover.isError) throw new Error("hover refused target: " + hover.content[0].text);
+    if (calls.at(-1).action !== "hover" || calls.at(-1).params.target !== "@e2") {
+      throw new Error("hover did not forward target: " + JSON.stringify(calls.at(-1)));
     }
     const desc = await call("browser_describe_element", { target: "css=#btn" });
     if (desc.isError) throw new Error("describe_element refused target: " + desc.content[0].text);
@@ -1763,8 +1766,9 @@ test("MCP: loadable element tools take 'target' and refuse the removed spellings
 
     const sent = calls.length;
     for (const [tool, args] of [
-      ["browser_element_screenshot", { ref: "e2" }],
-      ["browser_element_screenshot", { index: 3 }],
+      ["browser_hover", { ref: "e2" }],
+      ["browser_hover", { index: 3 }],
+      ["browser_take_screenshot", { ref: "e2" }],
       ["browser_describe_element", { selector: "#btn" }],
       ["browser_describe_element", { placeholder: "Email" }],
     ]) {
@@ -1948,6 +1952,10 @@ test("MCP: each parameter value dispatches to the action that performs it", asyn
     if (lastAction() !== "fill") throw new Error("default method is not fill: " + lastAction());
     await call("browser_type", { target: "@e1", text: "hi", method: "type" });
     if (lastAction() !== "type") throw new Error("method=type did not reach the type action");
+    await call("browser_type", { target: "@e1", text: " world", method: "type", clearBefore: false });
+    if (calls.at(-1).params.clearBefore !== false) {
+      throw new Error("clearBefore=false did not reach type: " + JSON.stringify(calls.at(-1)));
+    }
     await call("browser_type", { target: "@e1", text: "hi", method: "paste" });
     if (lastAction() !== "paste") throw new Error("method=paste did not reach the paste action");
     await call("browser_select_option", { target: "@e1", option: "Vietnam" });
@@ -2065,6 +2073,11 @@ test("Snapshot is paged, and the frame merge cannot drop what it was not taught 
     await server._registeredTools["browser_snapshot"].handler({ scope: "all", limit: 8, cursor: 8 });
     const p = calls.at(-1).params;
     if (p.limit !== 8 || p.cursor !== 8) throw new Error("snapshot dropped limit/cursor: " + JSON.stringify(p));
+    await server._registeredTools["browser_snapshot"].handler({ target: "#main", scope: "viewport" });
+    const pt = calls.at(-1).params;
+    if (pt.target !== "#main" || pt.scope !== "viewport") {
+      throw new Error("snapshot dropped target/scope: " + JSON.stringify(pt));
+    }
     console.log("SNAPSHOT_PAGING_OK");
     process.exit(0);
   `;
@@ -2349,4 +2362,273 @@ test("CLI: status prints one line per connected browser, aliases included", asyn
 
 test("CLI: tab list gains a BROWSER column once more than one browser is connected", async () => {
   await runCliBrowserCase("tab-list-shows-browser-column-with-two-browsers");
+});
+
+test("MCP: Batch 1 consolidated tools dispatch history navigation and network-idle, and drop redundant tools", async () => {
+  const script = `
+    import http from "node:http";
+    const calls = [];
+    const stub = http.createServer((req, res) => {
+      if (req.url === "/status") {
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ ok: true }));
+      }
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        calls.push(JSON.parse(body));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, result: { ok: true } }));
+      });
+    });
+    await new Promise((r) => stub.listen(0, "127.0.0.1", r));
+    process.env.BROWSERCTL_BRIDGE_URL = "http://127.0.0.1:" + stub.address().port;
+    process.env.BROWSERCTL_MCP_PROFILE = "all";
+    const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
+    const call = (n, a) => server._registeredTools[n].handler(a);
+
+    for (const removed of [
+      "browser_element_screenshot",
+      "browser_a11y_snapshot",
+      "browser_coordinate_drag",
+      "browser_go_back",
+      "browser_go_forward",
+      "browser_wait_network_idle",
+      "browser_get_network_requests",
+      "browser_get_network_request",
+      "browser_get_response_body",
+      "browser_reload_extension",
+    ]) {
+      if (server._registeredTools[removed]) throw new Error(removed + " should be removed");
+    }
+
+    const back = await call("browser_navigate", { history: "back" });
+    if (back.isError || calls.at(-1).action !== "go_back") {
+      throw new Error("navigate history:back failed: " + JSON.stringify(calls.at(-1)));
+    }
+    const fwd = await call("browser_navigate", { history: "forward" });
+    if (fwd.isError || calls.at(-1).action !== "go_forward") {
+      throw new Error("navigate history:forward failed: " + JSON.stringify(calls.at(-1)));
+    }
+    const idle = await call("browser_wait_for", {
+      for: "network-idle",
+      idleMs: 250,
+      maxInFlight: 1,
+      timeoutMs: 3000,
+    });
+    const last = calls.at(-1);
+    if (
+      idle.isError ||
+      last.action !== "wait_network_idle" ||
+      last.params.idleMs !== 250 ||
+      last.params.maxInFlight !== 1
+    ) {
+      throw new Error("wait_for network-idle failed: " + JSON.stringify(last));
+    }
+    console.log("BATCH1_OK");
+    process.exit(0);
+  `;
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]);
+  assert.ok(stdout.includes("BATCH1_OK"));
+});
+
+test("MCP: Batch 2 consolidated state & network capture tools route actions and validate params", async () => {
+  const script = `
+    import http from "node:http";
+    const calls = [];
+    const stub = http.createServer((req, res) => {
+      if (req.url === "/status") {
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ ok: true }));
+      }
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        calls.push(JSON.parse(body));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, result: { ok: true } }));
+      });
+    });
+    await new Promise((r) => stub.listen(0, "127.0.0.1", r));
+    process.env.BROWSERCTL_BRIDGE_URL = "http://127.0.0.1:" + stub.address().port;
+    process.env.BROWSERCTL_MCP_PROFILE = "all";
+    const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
+    const call = (n, a) => server._registeredTools[n].handler(a);
+
+    for (const removed of [
+      "browser_get_cookies",
+      "browser_set_cookie",
+      "browser_delete_cookies",
+      "browser_storage_get",
+      "browser_storage_set",
+      "browser_storage_remove",
+      "browser_storage_clear",
+      "browser_net_start",
+      "browser_net_stop",
+      "browser_net_get",
+      "browser_net_clear",
+    ]) {
+      if (server._registeredTools[removed]) throw new Error(removed + " should be removed");
+    }
+
+    for (const added of ["browser_cookies", "browser_storage", "browser_net_capture"]) {
+      const t = server._registeredTools[added];
+      if (!t || !t.inputSchema?.shape?.tabId) {
+        throw new Error(added + " must be registered with tabId on inputSchema.shape");
+      }
+    }
+
+    const r1 = await call("browser_cookies", { allDomains: true });
+    if (r1.isError || calls.at(-1).action !== "get_cookies" || calls.at(-1).params.allDomains !== true) {
+      throw new Error("cookies default get failed: " + JSON.stringify(calls.at(-1)));
+    }
+    const r2 = await call("browser_cookies", { action: "set", name: "sid", value: "abc", url: "https://x.test" });
+    if (r2.isError || calls.at(-1).action !== "set_cookie" || calls.at(-1).params.name !== "sid") {
+      throw new Error("cookies set failed: " + JSON.stringify(calls.at(-1)));
+    }
+    const r3 = await call("browser_cookies", { action: "delete", name: "sid" });
+    if (r3.isError || calls.at(-1).action !== "delete_cookies") {
+      throw new Error("cookies delete failed: " + JSON.stringify(calls.at(-1)));
+    }
+
+    const sentBeforeBad = calls.length;
+    const badCookie = await call("browser_action", {
+      action: "cookies",
+      params: { action: "set", name: "sid" },
+    });
+    const badStorage = await call("browser_action", {
+      action: "storage",
+      params: { action: "remove" },
+    });
+    if (!badCookie.isError || !badStorage.isError || calls.length !== sentBeforeBad) {
+      throw new Error("missing required per-action fields should fail before bridge");
+    }
+
+    for (const [args, expAction] of [
+      [{ area: "session", key: "k" }, "storage_get"],
+      [{ action: "set", key: "k", value: "v" }, "storage_set"],
+      [{ action: "remove", key: "k" }, "storage_remove"],
+      [{ action: "clear", area: "local" }, "storage_clear"],
+    ]) {
+      const r = await call("browser_storage", args);
+      if (r.isError || calls.at(-1).action !== expAction) {
+        throw new Error("storage action failed for " + expAction + ": " + JSON.stringify(calls.at(-1)));
+      }
+    }
+
+    for (const [args, expAction] of [
+      [{ action: "start" }, "net_start"],
+      [{ action: "get", urlContains: "/api", limit: 10 }, "net_get"],
+      [{ action: "stop" }, "net_stop"],
+      [{ action: "clear" }, "net_clear"],
+    ]) {
+      const r = await call("browser_net_capture", args);
+      if (r.isError || calls.at(-1).action !== expAction) {
+        throw new Error("net_capture failed for " + expAction + ": " + JSON.stringify(calls.at(-1)));
+      }
+    }
+
+    console.log("BATCH2_OK");
+    process.exit(0);
+  `;
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]);
+  assert.ok(stdout.includes("BATCH2_OK"));
+});
+
+test("MCP: Batch 3 consolidated record, tabs, windows, cdp, and input tools route actions and validate params", async () => {
+  const script = `
+    import http from "node:http";
+    const calls = [];
+    const stub = http.createServer((req, res) => {
+      if (req.url === "/status") {
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ ok: true }));
+      }
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const parsed = JSON.parse(body);
+        calls.push(parsed);
+        if (parsed.action === "group_tab") {
+          res.writeHead(200, { "content-type": "application/json" });
+          return res.end(JSON.stringify({ ok: true, browser: "chrome-1", result: { tabId: 42 } }));
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, browser: "chrome-1", result: { ok: true } }));
+      });
+    });
+    await new Promise((r) => stub.listen(0, "127.0.0.1", r));
+    process.env.BROWSERCTL_BRIDGE_URL = "http://127.0.0.1:" + stub.address().port;
+    process.env.BROWSERCTL_MCP_PROFILE = "all";
+    const { server } = await import("${join(__dirname, "..", "..", "mcp", "index.js")}");
+    const call = (n, a) => server._registeredTools[n].handler(a);
+
+    for (const removed of [
+      "browser_record_start",
+      "browser_record_stop",
+      "browser_record_get",
+      "browser_replay",
+      "browser_current_tab",
+      "browser_group_tab",
+      "browser_ungroup_tab",
+      "browser_list_windows",
+      "browser_focus_window",
+      "browser_agent_window",
+      "browser_cdp_attach",
+      "browser_cdp_detach",
+      "browser_cdp_send",
+      "browser_wheel",
+      "browser_insert_text",
+      "browser_network_replay",
+    ]) {
+      if (server._registeredTools[removed]) throw new Error(removed + " should be removed");
+    }
+
+    const totalTools = Object.keys(server._registeredTools).length;
+    if (totalTools !== 48) {
+      throw new Error("expected 48 registered tools after Batch 3, got " + totalTools);
+    }
+
+    const sentBeforeBad = calls.length;
+    const badCdp = await call("browser_action", { action: "cdp", params: { action: "send" } });
+    const badWin = await call("browser_action", { action: "windows", params: { action: "focus" } });
+    const badReq = await call("browser_action", { action: "make_request", params: {} });
+    if (!badCdp.isError || !badWin.isError || !badReq.isError || calls.length !== sentBeforeBad) {
+      throw new Error("invalid Batch 3 consolidated calls must fail validation before bridge");
+    }
+
+    for (const [toolName, args, expAction] of [
+      ["browser_cdp", { action: "attach" }, "cdp_attach"],
+      ["browser_cdp", { action: "send", method: "Page.getLayoutMetrics" }, "cdp_send"],
+      ["browser_cdp", { action: "detach" }, "cdp_detach"],
+      ["browser_windows", {}, "list_windows"],
+      ["browser_windows", { action: "focus", id: 7 }, "focus_window"],
+      ["browser_windows", { action: "open", url: "https://x.test" }, "agent_window"],
+      ["browser_windows", { action: "focus_agent" }, "agent_window"],
+      ["browser_record", { action: "start" }, "record_start"],
+      ["browser_record", { action: "stop" }, "record_stop"],
+      ["browser_record", { action: "get" }, "record_get"],
+      ["browser_record", { action: "replay", steps: [] }, "replay"],
+      ["browser_tabs", { action: "current" }, "current_tab"],
+      ["browser_tabs", { action: "group", id: 42, title: "work" }, "group_tab"],
+      ["browser_tabs", { action: "ungroup", id: 42 }, "ungroup_tab"],
+      ["browser_scroll", { mode: "wheel", deltaY: 120 }, "wheel"],
+      ["browser_make_request", { requestId: "req-1" }, "network_replay"],
+    ]) {
+      const r = await call(toolName, args);
+      if (r.isError || calls.at(-1).action !== expAction) {
+        throw new Error(toolName + " failed for " + expAction + ": " + JSON.stringify(calls.at(-1)) + " / " + JSON.stringify(r));
+      }
+    }
+
+    const rIme = await call("browser_type", { target: "@e1", text: "你好", method: "ime" });
+    if (rIme.isError || calls.at(-2).action !== "focus" || calls.at(-1).action !== "insert_text") {
+      throw new Error("browser_type ime should focus then insert_text: " + JSON.stringify(calls.slice(-2)));
+    }
+
+    console.log("BATCH3_OK");
+    process.exit(0);
+  `;
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]);
+  assert.ok(stdout.includes("BATCH3_OK"));
 });

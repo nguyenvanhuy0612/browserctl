@@ -8,8 +8,14 @@
 const ALLOWED_PRAGMA = /^\s*(prettier-ignore|eslint-|@ts-|global\s|globals\s|#|!)/;
 
 const HISTORY_IN_COMMENT = [
-  [/\b(used to|previously|formerly|originally|no longer|superseded|it turned out)\b/i, "narrates history"],
-  [/\bwe (tried|changed|renamed|moved|removed|added|had)\b/i, "narrates the change rather than the code"],
+  [
+    /\b(used to|previously|formerly|originally|no longer|superseded|it turned out)\b/i,
+    "narrates history",
+  ],
+  [
+    /\bwe (tried|changed|renamed|moved|removed|added|had)\b/i,
+    "narrates the change rather than the code",
+  ],
   [/\b(rev \d+|§\d)/i, "points into a design document"],
   [/\bv\d+\.\d+/i, "names a version; CHANGELOG.md owns versions"],
   [/\b20\d{2}-\d{2}-\d{2}\b/, "carries a date"],
@@ -94,7 +100,14 @@ export default [
   },
   // Node.js files
   {
-    files: ["cli.js", "bridge/**/*.js", "mcp/**/*.js", "scripts/**/*.js", "tests/**/*.js", "tests/**/*.mjs"],
+    files: [
+      "cli.js",
+      "bridge/**/*.js",
+      "mcp/**/*.js",
+      "scripts/**/*.js",
+      "tests/**/*.js",
+      "tests/**/*.mjs",
+    ],
     languageOptions: {
       ecmaVersion: "latest",
       sourceType: "module",
@@ -127,7 +140,8 @@ export default [
     rules: {
       "no-dupe-keys": "error",
       "no-duplicate-case": "error",
-      "no-empty": ["error", { allowEmptyCatch: true }],
+      // Service-worker code records an error it drops (swallow / noteSwallowed in util.js).
+      "no-empty": ["error", { allowEmptyCatch: false }],
       "no-extra-semi": "error",
       "no-unreachable": "warn",
       "no-unused-vars": [
@@ -139,6 +153,16 @@ export default [
         },
       ],
     },
+  },
+  // The content script and the popup and options pages are classic scripts that do not import
+  // util.js.
+  {
+    files: [
+      "extension/content.js",
+      "extension/popup.js",
+      "extension/options.js",
+    ],
+    rules: { "no-empty": ["error", { allowEmptyCatch: true }] },
   },
   // The published surface: exactly what package.json "files" ships, and nothing else.
   {

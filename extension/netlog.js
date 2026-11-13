@@ -1,3 +1,4 @@
+import { swallow } from "./util.js";
 const MAX_BUFFER = 2000;
 
 const capturing = new Set();
@@ -51,7 +52,9 @@ function clearBuffer(tabId) {
 
 const CAPTURING_KEY = "bctl_net_capturing_tabs";
 function persistCapturing() {
-  chrome.storage.session.set({ [CAPTURING_KEY]: [...capturing] }).catch(() => {});
+  chrome.storage.session
+    .set({ [CAPTURING_KEY]: [...capturing] })
+    .catch(swallow("netlog.persistCapturing.chrome.storage.session.set"));
 }
 async function wasCapturingBeforeRestart(tabId) {
   try {

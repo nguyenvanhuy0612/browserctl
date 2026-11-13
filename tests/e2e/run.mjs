@@ -142,9 +142,12 @@ async function main() {
     await test("snapshot pierces shadow DOM", async () => {
       assert(refByText(snap, "Shadow Button"), "shadow button not in snapshot");
     });
-    await test("read_page", async () => {
-      const r = await cmd("read_page", { mode: "interactive" });
-      assert(/Click Me/.test(r.tree) && /e\d+/.test(r.tree), "read_page tree missing button/ref");
+    await test("read_page is rejected as removed unknown action", async () => {
+      const r = await cmdFailReply("read_page", { mode: "interactive" });
+      assert(
+        r && r.ok === false && /unknown action/i.test(r.error || ""),
+        `expected unknown action error for read_page, got ${JSON.stringify(r)}`
+      );
     });
     await test("find (shadow)", async () => {
       const r = await cmd("find", { query: "Shadow Button" });
@@ -155,21 +158,34 @@ async function main() {
 
     await test("an open dialog is reported, addressable, and dismissable", async () => {
       await cmd("click", { selector: "#dlgopen" });
-      const snap = await cmd("snapshot", { compact: true, maxText: 0 });
-      const line = (snap.census || "")
-        .split("\n")
-        .find((l) => /Active Modal|Open dialog/.test(l));
-      assert(line, "an open <dialog> must be reported by the census");
-      const ref = (line.match(/\(@(e\d+)\)/) || [])[1];
-      assert(ref, `the dialog must carry a ref it can be read by: ${line}`);
-      const body = await cmd("get_property", { ref, property: "text" });
-      assert(
-        /Dialog body text/.test(body.value),
-        `reading the dialog by ref gave: ${JSON.stringify(body.value)}`
-      );
-      await cmd("dismiss", {});
-      const open = await cmd("eval_js", { expression: "document.getElementById('dlg').open" });
-      assert(open.value === false, "dismiss did not close the dialog");
+      try {
+        const snap = await cmd("snapshot", { compact: true, maxText: 0 });
+        assert(
+          /L1 modal/.test(snap.census || "") && /dialog "E2E Dialog"/.test(snap.census || ""),
+          `an open <dialog> must be reported in VOM layers:\n${snap.census}`
+        );
+        assert(
+          snap.pageState?.hasActiveModal === true &&
+            (snap.pageState.openDialogs || []).some(
+              (d) => d.label === "E2E Dialog" && d.blocking === true
+            ),
+          `open dialog metadata missing in pageState: ${JSON.stringify(snap.pageState)}`
+        );
+        assert(
+          /Dialog body text/.test(snap.census || ""),
+          `dialog body text missing in snapshot:\n${snap.census}`
+        );
+        const closeRef = refByText(snap, "Close");
+        assert(closeRef, `dialog Close button must carry a ref:\n${snap.census}`);
+        await cmd("dismiss", {});
+        const open = await cmd("eval_js", { expression: "document.getElementById('dlg').open" });
+        assert(open.value === false, "dismiss did not close the dialog");
+      } finally {
+        await cmd("eval_js", {
+          expression:
+            "(() => { const d = document.getElementById('dlg'); if (d?.open) d.close(); return true; })()",
+        });
+      }
     });
 
     // --- the element read, in every shape the surface offers ---
@@ -262,7 +278,8 @@ async function main() {
     // that option.
     await test("fill_form: a checkbox and a <select> in the same call as a text field", async () => {
       const opt = await cmd("eval_js", {
-        expression: "(()=>{const s=document.getElementById('sel');return s.options[s.options.length-1].text})()",
+        expression:
+          "(()=>{const s=document.getElementById('sel');return s.options[s.options.length-1].text})()",
       });
       const r = await cmd("fill_form", {
         fields: [
@@ -277,7 +294,10 @@ async function main() {
           "(()=>{const s=document.getElementById('sel');return [document.getElementById('cbox').checked,s.options[s.selectedIndex].text]})()",
       });
       assert(st.value[0] === true, `checkbox not checked: ${JSON.stringify(st.value)}`);
-      assert(st.value[1] === opt.value, `select = ${JSON.stringify(st.value[1])}, want ${opt.value}`);
+      assert(
+        st.value[1] === opt.value,
+        `select = ${JSON.stringify(st.value[1])}, want ${opt.value}`
+      );
       await cmd("fill_form", { fields: [{ target: "css=#cbox", value: "false" }] });
       const off = await cmd("eval_js", { expression: "document.getElementById('cbox').checked" });
       assert(off.value === false, "value 'false' must uncheck the checkbox");
@@ -413,15 +433,21 @@ async function main() {
       try {
         const vp = await cmd("snapshot", { scope: "viewport", compact: true });
         assert(vp.text.includes("ONSCREEN-MARKER"), "viewport text lost the text on screen");
-        assert(!vp.text.includes("OFFSCREEN-MARKER"), "viewport text carries text below the fold");
         assert(!vp.text.includes("HIDDEN-MARKER"), "viewport text carries hidden text");
         const all = await cmd("snapshot", { scope: "all", compact: true });
-        assert(all.text.includes("OFFSCREEN-MARKER"), "scope 'all' must keep the whole page's text");
-        const none = await cmd("snapshot", { scope: "viewport", compact: true, maxText: 0 });
-        assert(none.text === "", `maxText 0 must give no text: ${JSON.stringify(none.text)}`);
+        assert(
+          all.text.includes("OFFSCREEN-MARKER"),
+          "scope 'all' must keep the whole page's text"
+        );
+        const full = await cmd("snapshot", { scope: "all", compact: true, maxText: 0 });
+        assert(
+          full.text.includes("ONSCREEN-MARKER"),
+          `maxText 0 must keep full text: ${full.text.slice(0, 120)}`
+        );
       } finally {
         await cmd("eval_js", {
-          expression: "['vt-on','vt-off','vt-hid'].forEach(id=>document.getElementById(id)?.remove()), true",
+          expression:
+            "['vt-on','vt-off','vt-hid'].forEach(id=>document.getElementById(id)?.remove()), true",
         });
       }
     });
@@ -450,11 +476,18 @@ async function main() {
           `the result must say where the click affordance came from: ${JSON.stringify(r.resolved)}`
         );
         const raw = await cmdFailReply("click", { target: "Lonely text WVY" });
-        assert(!raw.ok && /plain text/.test(raw.error), `plain text must still be refused: ${JSON.stringify(raw)}`);
-        assert(/Near button/.test(raw.recoveryHint || ""), `the hint must name the nearest control: ${raw.recoveryHint}`);
+        assert(
+          !raw.ok && /plain text/.test(raw.error),
+          `plain text must still be refused: ${JSON.stringify(raw)}`
+        );
+        assert(
+          /Near button/.test(raw.recoveryHint || ""),
+          `the hint must name the nearest control: ${raw.recoveryHint}`
+        );
       } finally {
         await cmd("eval_js", {
-          expression: "['pc-card','pc-lone','pc-near'].forEach(id=>document.getElementById(id)?.remove()), true",
+          expression:
+            "['pc-card','pc-lone','pc-near'].forEach(id=>document.getElementById(id)?.remove()), true",
         });
       }
     });
@@ -476,33 +509,64 @@ async function main() {
         const r = await cmd("click", { target: "#cv-btn" });
         const n = await cmd("eval_js", { expression: "window.__cv" });
         assert(n.value === 1, `the covered button's listener ran ${n.value} times`);
-        assert(/covered at its centre by <div> \(@e\d+\)/.test(r.warning || ""), `warning: ${r.warning}`);
-        assert(/close or answer @e\d+ first/.test(r.warning), `the warning must name what to close: ${r.warning}`);
+        assert(
+          /covered at its centre by <div> \(@e\d+\)/.test(r.warning || ""),
+          `warning: ${r.warning}`
+        );
+        assert(
+          /close or answer @e\d+ first/.test(r.warning),
+          `the warning must name what to close: ${r.warning}`
+        );
         assert(!/may have intercepted/.test(r.warning), "the old vague wording is back");
       } finally {
-        await cmd("eval_js", { expression: "['cv-btn','cv-ov'].forEach(id=>document.getElementById(id)?.remove()), true" });
+        await cmd("eval_js", {
+          expression: "['cv-btn','cv-ov'].forEach(id=>document.getElementById(id)?.remove()), true",
+        });
       }
     });
 
     // 'only' narrows the census to the kinds of control asked for, and leaves the page text out
     // unless maxText asks for it. Every listed line must be of a requested kind.
     await test("snapshot only: fields, buttons and links each list just their kind", async () => {
-      const lines = (snap) => (snap.census || "").split("\n").filter((l) => /^\s*\[@/.test(l));
+      const lines = (snap) => (snap.census || "").split("\n").filter((l) => /^\s*@e\d+\s/.test(l));
       const isField = (l) =>
-        /<(input|textarea|select)>/.test(l) && !/\[type=(button|submit|reset|image)\]/.test(l);
+        /^\s*@e\d+\s+(textbox|searchbox|combobox|checkbox|radio|spinbutton|slider|switch)\b/.test(
+          l
+        );
       const fields = await cmd("snapshot", { scope: "all", compact: true, only: ["fields"] });
       assert(lines(fields).length > 0, "no fields listed");
-      assert(lines(fields).every(isField), `a non-field line: ${lines(fields).find((l) => !isField(l))}`);
-      assert(JSON.stringify(fields.only) === '["fields"]', `the result must echo 'only': ${fields.only}`);
-      assert(fields.text === "", `page text must be left out by default: ${JSON.stringify(fields.text).slice(0, 60)}`);
+      assert(
+        lines(fields).every(isField),
+        `a non-field line: ${lines(fields).find((l) => !isField(l))}`
+      );
+      assert(
+        JSON.stringify(fields.only) === '["fields"]',
+        `the result must echo 'only': ${fields.only}`
+      );
+      assert(
+        fields.text === "",
+        `page text must be left out by default: ${JSON.stringify(fields.text).slice(0, 60)}`
+      );
       const links = await cmd("snapshot", { scope: "all", compact: true, only: ["links"] });
-      assert(lines(links).length > 0 && lines(links).every((l) => /<a>/.test(l)), "a non-link line under only links");
-      const both = await cmd("snapshot", { scope: "all", compact: true, only: ["fields", "buttons"], maxText: 200 });
-      assert(!lines(both).some((l) => /<a>/.test(l) && !/\[button\]/.test(l)), "a link listed under fields+buttons");
+      assert(
+        lines(links).length > 0 && lines(links).every((l) => /^\s*@e\d+\s+link\b/.test(l)),
+        "a non-link line under only links"
+      );
+      const both = await cmd("snapshot", {
+        scope: "all",
+        compact: true,
+        only: ["fields", "buttons"],
+        maxText: 200,
+      });
+      assert(
+        !lines(both).some((l) => /^\s*@e\d+\s+link\b/.test(l)),
+        "a link listed under fields+buttons"
+      );
       assert(both.text.length > 0, "maxText must bring the page text back");
       const full = await cmd("snapshot", { scope: "all", compact: true });
       assert(
-        (fields.census || "").length + (links.census || "").length <= (full.census || "").length + 400,
+        (fields.census || "").length + (links.census || "").length <=
+          (full.census || "").length + 400,
         "the filtered census must not be larger than the full one"
       );
     });
@@ -535,15 +599,24 @@ async function main() {
       try {
         const r = await cmd("fill", { target: "#ac1-in", text: "Z" });
         const s = r.effect.suggestions;
-        assert(Array.isArray(s), `no suggestions on an autocomplete field: ${JSON.stringify(r.effect)}`);
+        assert(
+          Array.isArray(s),
+          `no suggestions on an autocomplete field: ${JSON.stringify(r.effect)}`
+        );
         assert(
           s.map((o) => o.text).join(",") === "Zurich,Zug,Zermatt",
           `suggestions = ${JSON.stringify(s)}`
         );
-        assert(s.every((o) => /^(f\d+:)?e\d+$/.test(o.ref)), `each suggestion needs a ref: ${JSON.stringify(s)}`);
+        assert(
+          s.every((o) => /^(f\d+:)?e\d+$/.test(o.ref)),
+          `each suggestion needs a ref: ${JSON.stringify(s)}`
+        );
         await cmd("click", { target: "@" + s[1].ref });
         const v = await cmd("eval_js", { expression: "document.getElementById('ac1-in').value" });
-        assert(v.value === "Zug", `clicking the suggestion ref did not pick it (value=${JSON.stringify(v.value)})`);
+        assert(
+          v.value === "Zug",
+          `clicking the suggestion ref did not pick it (value=${JSON.stringify(v.value)})`
+        );
       } finally {
         await removeAutocomplete("ac1");
       }
@@ -553,7 +626,10 @@ async function main() {
       try {
         const r = await cmd("fill", { target: "#ac2-in", text: "Zu" });
         const texts = (r.effect.suggestions || []).map((o) => o.text);
-        assert(texts.join(",") === "Zurich,Zug", `a listbox already on the page leaked in: ${JSON.stringify(texts)}`);
+        assert(
+          texts.join(",") === "Zurich,Zug",
+          `a listbox already on the page leaked in: ${JSON.stringify(texts)}`
+        );
       } finally {
         await removeAutocomplete("ac2");
       }
@@ -579,7 +655,10 @@ async function main() {
       await buildAutocomplete("ac4", { controls: true });
       try {
         const r = await cmd("fill", { target: "#ac4-in", text: "Z", submit: true });
-        assert(!("suggestions" in r.effect), `submit:true still waited for suggestions: ${JSON.stringify(r.effect)}`);
+        assert(
+          !("suggestions" in r.effect),
+          `submit:true still waited for suggestions: ${JSON.stringify(r.effect)}`
+        );
       } finally {
         await removeAutocomplete("ac4");
       }

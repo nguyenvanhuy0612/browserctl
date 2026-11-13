@@ -214,6 +214,8 @@ async function postCommand(
         throw appError(data.code, data.error || `command '${action}' failed (HTTP ${res.status})`, {
           ...(data.diagnostics ? { diagnostics: data.diagnostics } : {}),
           ...(data.recoveryHint ? { recoveryHint: data.recoveryHint } : {}),
+          ...(data.disposition ? { disposition: data.disposition } : {}),
+          ...(data.recovery ? { recovery: data.recovery } : {}),
           browser: data.browser,
         });
       }
@@ -696,6 +698,8 @@ function fail(err) {
   if (err && err.code) {
     const lines = [
       `Error [${err.code}]: ${err.message || err}`,
+      err.disposition ? `Disposition: ${err.disposition}` : null,
+      err.recovery ? `Recovery: ${JSON.stringify(err.recovery)}` : null,
       err.diagnostics ? `Diagnostics: ${JSON.stringify(err.diagnostics)}` : null,
       err.recoveryHint ? `Suggested Remedy: ${err.recoveryHint}` : null,
     ].filter(Boolean);
@@ -743,46 +747,13 @@ const TOOL_CATEGORIES = {
     "browser_load_tools",
   ],
   system: ["browser_exec_system_cmd"],
-  network: [
-    "browser_get_network_requests",
-    "browser_get_response_body",
-    "browser_get_network_request",
-    "browser_network_replay",
-    "browser_mock_route",
-    "browser_export_har",
-    "browser_net_start",
-    "browser_net_stop",
-    "browser_net_get",
-    "browser_net_clear",
-    "browser_wait_network_idle",
-  ],
-  cdp: [
-    "browser_handle_dialog",
-    "browser_cdp_attach",
-    "browser_cdp_detach",
-    "browser_cdp_send",
-    "browser_coordinate_click",
-    "browser_coordinate_drag",
-    "browser_insert_text",
-    "browser_audit",
-  ],
-  cookies: ["browser_get_cookies", "browser_set_cookie", "browser_delete_cookies"],
-  storage: [
-    "browser_storage_get",
-    "browser_storage_set",
-    "browser_storage_remove",
-    "browser_storage_clear",
-  ],
+  network: ["browser_mock_route", "browser_export_har", "browser_net_capture"],
+  cdp: ["browser_handle_dialog", "browser_cdp", "browser_coordinate_click", "browser_audit"],
+  cookies: ["browser_cookies"],
+  storage: ["browser_storage"],
   console: ["browser_get_console_logs"],
-  record: ["browser_record_start", "browser_record_stop", "browser_record_get", "browser_replay"],
-  tabs: [
-    "browser_list_windows",
-    "browser_focus_window",
-    "browser_group_tab",
-    "browser_ungroup_tab",
-    "browser_spoof_visibility",
-    "browser_current_tab",
-  ],
+  record: ["browser_record"],
+  tabs: ["browser_windows", "browser_spoof_visibility"],
   advanced: [
     "browser_find",
     "browser_get_content",
@@ -792,17 +763,10 @@ const TOOL_CATEGORIES = {
     "browser_list_available_tools",
     "browser_unload_tools",
     "browser_describe_element",
-    "browser_a11y_snapshot",
     "browser_read_pdf",
-    "browser_element_screenshot",
     "browser_print_pdf",
-    "browser_go_back",
-    "browser_go_forward",
-    "browser_reload_extension",
     "browser_download",
     "browser_request_help",
-    "browser_agent_window",
-    "browser_wheel",
     "browser_emulate",
     "browser_drag",
   ],
@@ -888,12 +852,12 @@ ADVANCED ACTIONS (via browser_action({action, params}) or browser_load_tools):
     browser_file_upload   attach local files to input element (target, files)
     browser_select_option, browser_press_key, browser_hover
   WAIT & MEDIA:
-    browser_wait_for      wait for condition (settle, selector, text, gone)
+    browser_wait_for      wait for condition (settle, selector, text, gone, network-idle)
     browser_take_screenshot (viewport, fullPage, element)
 
 ${loadableCount} further capabilities — network capture, HAR, cookies, storage, console, CDP, recording, PDF —
 are loadable via browser_load_tools({profile}), or callable instantly via browser_action({action, params}).
-Run browser_action() bare to list the 79-action catalogue before concluding something is impossible.
+Run browser_action() bare to list the protocol action catalogue before concluding something is impossible.
 
 FALLBACK:
 browser_evaluate works for arbitrary JS when standard tools cannot express the logic. Prefer dedicated tools first:
@@ -947,17 +911,11 @@ const TAB_ID_ALIAS = z.number().int().optional().describe("Alias for tabId.");
 
 const NO_TAB_TOOLS = new Set([
   "browser_tabs",
-  "browser_group_tab",
-  "browser_ungroup_tab",
-  "browser_list_windows",
-  "browser_focus_window",
-  "browser_reload_extension",
-  "browser_record_get",
+  "browser_windows",
   "browser_status",
   "browser_start",
   "browser_stop",
   "browser_exec_system_cmd",
-  "browser_agent_window",
 ]);
 
 const FORMAT_FIELD = z
@@ -1005,12 +963,10 @@ const PARAM_REDIRECTS = {
   browser_file_upload: TARGET_REDIRECT,
   browser_download: TARGET_REDIRECT,
   browser_request_help: TARGET_REDIRECT,
-  browser_wheel: TARGET_REDIRECT,
   browser_drag: TARGET_REDIRECT,
   browser_get_property: TARGET_REDIRECT,
   browser_hover: TARGET_REDIRECT,
   browser_take_screenshot: TARGET_REDIRECT,
-  browser_element_screenshot: TARGET_REDIRECT,
   browser_describe_element: TARGET_REDIRECT,
   browser_find: {
     text: "browser_find searches with 'query'. 'text' is what browser_type writes, so the two never share a name.",
@@ -1200,9 +1156,7 @@ server.registerTool(
       tools: z
         .array(z.string())
         .optional()
-        .describe(
-          "Specific tool names to load (e.g. ['browser_export_har', 'browser_get_cookies'])"
-        ),
+        .describe("Specific tool names to load (e.g. ['browser_export_har', 'browser_cookies'])"),
     },
   },
   async ({ profile, tools } = {}) => {
@@ -1393,7 +1347,7 @@ server.registerTool(
     title: "Universal Browser Action Dispatcher",
     description:
       "Dispatch any protocol action by name without loading its profile: browser_action({action, params}).\n" +
-      "Called with no arguments it prints the catalogue of all 79 actions.",
+      "Called with no arguments it prints the catalogue of all protocol actions.",
     inputSchema: {
       action: z
         .string()
@@ -1422,7 +1376,44 @@ server.registerTool(
         "paste",
         "select_option",
         "wait_settle",
+        "wait_network_idle",
         "capture_screenshot",
+        "element_screenshot",
+        "a11y_snapshot",
+        "coordinate_drag",
+        "go_back",
+        "go_forward",
+        "get_network_requests",
+        "get_network_request",
+        "get_response_body",
+        "reload_extension",
+        "get_cookies",
+        "set_cookie",
+        "delete_cookies",
+        "storage_get",
+        "storage_set",
+        "storage_remove",
+        "storage_clear",
+        "net_start",
+        "net_stop",
+        "net_get",
+        "net_clear",
+        "record_start",
+        "record_stop",
+        "record_get",
+        "replay",
+        "current_tab",
+        "group_tab",
+        "ungroup_tab",
+        "list_windows",
+        "focus_window",
+        "agent_window",
+        "cdp_attach",
+        "cdp_detach",
+        "cdp_send",
+        "wheel",
+        "insert_text",
+        "network_replay",
         "click_selector",
         "fill_selector",
         "navigate",
@@ -1464,6 +1455,14 @@ server.registerTool(
       return text(await selectTab({ tabId: id, activate: params.activate }));
     }
     if (action === "close_tab" && params.id != null) return text(await closeTabById(params.id));
+    if (action === "group_tab") {
+      return text(
+        await groupTab({ id: params.id ?? params.tabId, title: params.title, color: params.color })
+      );
+    }
+    if (action === "ungroup_tab") {
+      return text(await ungroupTab({ id: params.id ?? params.tabId }));
+    }
     const mapped = ACTION_ALIASES[action];
     if (mapped) return text(await callBridge(mapped.action, { ...mapped.params, ...params }));
     return text(await callBridge(action, params));
@@ -1471,26 +1470,35 @@ server.registerTool(
 );
 
 server.registerTool(
-  "browser_cdp_send",
+  "browser_cdp",
   {
-    title: "Send a raw CDP command",
+    title: "Chrome DevTools Protocol session & raw commands",
     description:
-      "POWER TOOL. Send any Chrome DevTools Protocol method to the target tab and get its result verbatim. Requires browser_cdp_attach first. Use it for capabilities that have no dedicated tool yet — Fetch.* (request interception / mocking / HTTP auth), DOM.setFileInputFiles (file upload), Page.handleJavaScriptDialog (alert/confirm), Emulation.* (device metrics, throttling, timezone, locale, geolocation, prefers-color-scheme), Storage.*, Tracing.*. Only domains in Chrome's chrome.debugger allowlist work; notably DOMStorage and IndexedDB are NOT available. Two footguns: enabling an interception domain without handling its events (e.g. Fetch.enable) pauses page traffic until you disable it, and Emulation.setDeviceMetricsOverride changes the screenshot scale that browser_coordinate_click depends on.",
-    inputSchema: {
-      method: z
-        .string()
-        .describe("CDP method, e.g. 'Page.getLayoutMetrics' or 'Emulation.setCPUThrottlingRate'"),
-      params: z
-        .record(z.string(), z.any())
-        .optional()
-        .describe(
-          "Method parameters as an object, e.g. { rate: 4 }. Omit for methods that take none."
-        ),
-    },
+      "Attach/detach the CDP debugger or send a raw CDP method on the target tab.\n" +
+      "'attach' starts console/network capture (shows 'is being debugged' bar). 'detach' stops it. 'send' runs any allowed CDP method (requires attach first; Fetch.enable pauses traffic unless handled).",
+    inputSchema: z
+      .object({
+        action: z
+          .enum(["attach", "detach", "send"])
+          .describe("CDP action: 'attach', 'detach', or 'send'"),
+        method: z
+          .string()
+          .optional()
+          .describe("CDP method for 'send', e.g. 'Page.getLayoutMetrics'"),
+        params: z
+          .record(z.string(), z.any())
+          .optional()
+          .describe("Method parameters object for 'send', e.g. { rate: 4 }"),
+      })
+      .refine((v) => v.action !== "send" || (typeof v.method === "string" && v.method !== ""), {
+        message: "method is required when action is 'send'.",
+      }),
   },
-  tool("cdp_send", async ({ method, params }) =>
-    text(await callBridge("cdp_send", { method, params }))
-  )
+  tool("cdp", async ({ action, method, params }) => {
+    if (action === "attach") return text(await callBridge("cdp_attach"));
+    if (action === "detach") return text(await callBridge("cdp_detach"));
+    return text(await callBridge("cdp_send", { method, params }));
+  })
 );
 
 server.registerTool(
@@ -1528,10 +1536,14 @@ server.registerTool(
           target: target.get(),
           mcpServerVersion: SERVER_VERSION,
           ready: data.extensionConnected === true,
+          ...(data.degraded ? { degraded: data.degraded } : {}),
           hint:
-            data.extensionConnected === true
+            (data.extensionConnected === true
               ? "ready"
-              : "bridge is up but no extension is connected — open the extension popup and press Connect",
+              : "bridge is up but no extension is connected — open the extension popup and press Connect") +
+            (data.degraded
+              ? `; the bridge survived ${data.degraded.count} uncaught exception(s), last: ${data.degraded.lastError} — browser_stop then browser_start if commands misbehave`
+              : ""),
         },
         format
       );
@@ -1742,7 +1754,7 @@ server.registerTool(
     title: "Type text into editable target",
     description:
       "Enter text into an input, textarea, contenteditable, or rich text editor.\n" +
-      "Method: 'set' (default, native setter for React/Vue), 'type' (keystroke events), 'paste' (clipboard).\n" +
+      "Method: 'set' (default, native setter for React/Vue), 'type' (keystroke events), 'paste' (clipboard), 'ime' (CDP Input.insertText for emoji/IME; requires attach).\n" +
       "Returns 'effect.suggestions' when typing opens autocomplete options.",
     inputSchema: z
       .object({
@@ -1751,12 +1763,16 @@ server.registerTool(
           .describe("Target element: token '@e1', CSS selector, placeholder, or index"),
         text: z.string().describe("Text to enter"),
         method: z
-          .enum(["set", "type", "paste"])
+          .enum(["set", "type", "paste", "ime"])
           .optional()
           .describe(
-            "Input method: 'set' (default, native setter), 'type' (keystrokes), 'paste' (clipboard)."
+            "Input method: 'set' (default, native setter), 'type' (keystrokes), 'paste' (clipboard), or 'ime' (CDP insertText)."
           ),
         submit: z.boolean().optional().describe("Press Enter after typing (default: false)"),
+        clearBefore: z
+          .boolean()
+          .optional()
+          .describe("Clear existing text before typing (default: true). Pass false to append."),
         waitFor: z.string().optional().describe("CSS selector to wait for after typing"),
         autoSettle: z
           .boolean()
@@ -1771,20 +1787,28 @@ server.registerTool(
           "Provide 'target': a token '@e1', a CSS selector, the control's visible text, or a snapshot index.",
       }),
   },
-  tool("type", async ({ target, text: t, method, submit, waitFor, autoSettle, settleMs }) => {
-    const action = method === "type" ? "type" : method === "paste" ? "paste" : "fill";
-    return text(
-      await callBridge(action, {
-        target,
-        text: t,
-        ...(method ? { method } : {}),
-        submit,
-        waitFor,
-        autoSettle,
-        settleMs,
-      })
-    );
-  })
+  tool(
+    "type",
+    async ({ target, text: t, method, submit, clearBefore, waitFor, autoSettle, settleMs }) => {
+      if (method === "ime") {
+        await callBridge("focus", { target });
+        return text(await callBridge("insert_text", { text: t }));
+      }
+      const action = method === "type" ? "type" : method === "paste" ? "paste" : "fill";
+      return text(
+        await callBridge(action, {
+          target,
+          text: t,
+          ...(method ? { method } : {}),
+          submit,
+          clearBefore,
+          waitFor,
+          autoSettle,
+          settleMs,
+        })
+      );
+    }
+  )
 );
 
 server.registerTool(
@@ -1882,25 +1906,41 @@ server.registerTool(
   {
     title: "Scroll page or container",
     description:
-      "Scroll the window or a specific scrollable container (modal, table, overflow div).\n" +
-      "Refuses non-scrollable targets with error. Use browser_snapshot({scope: 'all'}) to inspect offscreen content without scrolling.",
+      "Scroll the window or a specific scrollable container (modal, table, overflow div), or dispatch hardware wheel events (mode: 'wheel') for Canvas/WebGL/maps.\n" +
+      "Refuses non-scrollable targets in 'dom' mode. Use browser_snapshot({scope: 'all'}) to inspect offscreen content without scrolling.",
     inputSchema: {
+      mode: z
+        .enum(["dom", "wheel"])
+        .optional()
+        .describe("Scroll mode: 'dom' (default) or 'wheel' (CDP mouse wheel)"),
       direction: z
         .enum(["up", "down", "left", "right"])
         .optional()
-        .describe("Direction to scroll (default: 'down')"),
-      amount: z.number().optional().describe("Distance to scroll in pixels (default: 400)"),
+        .describe("Direction to scroll in 'dom' mode (default: 'down')"),
+      amount: z.number().optional().describe("Distance in pixels for 'dom' mode (default: 400)"),
       target: z
         .union([z.string(), z.number().int()])
         .optional()
-        .describe(
-          "Target scrollable element (token '@e1', CSS selector, or index). Omit to scroll window."
-        ),
+        .describe("Target element (token '@e1', CSS selector, or index). Omit to scroll window."),
+      x: z.number().optional().describe("X pixel coordinate for 'wheel' mode"),
+      y: z.number().optional().describe("Y pixel coordinate for 'wheel' mode"),
+      deltaX: z.number().optional().describe("Horizontal wheel delta for 'wheel' mode"),
+      deltaY: z
+        .number()
+        .optional()
+        .describe("Vertical wheel delta for 'wheel' mode (positive = down)"),
+      modifiers: z.array(z.string()).optional().describe("Modifier keys for 'wheel' mode"),
     },
   },
-  tool("scroll", async ({ direction, amount, target }) =>
-    text(await callBridge("scroll", { direction, amount, target }))
-  )
+  tool("scroll", async ({ mode, direction, amount, target, x, y, deltaX, deltaY, modifiers }) => {
+    if (
+      mode === "wheel" ||
+      ((deltaX !== undefined || deltaY !== undefined) && direction === undefined && mode !== "dom")
+    ) {
+      return text(await callBridge("wheel", { target, x, y, deltaX, deltaY, modifiers }));
+    }
+    return text(await callBridge("scroll", { direction, amount, target }));
+  })
 );
 
 server.registerTool(
@@ -1967,20 +2007,26 @@ server.registerTool(
 server.registerTool(
   "browser_navigate",
   {
-    title: "Navigate or reload target tab",
+    title: "Navigate, reload, or step history",
     description:
-      "Navigate session target tab to a URL, or reload it.\n" +
-      "Provide exactly one of 'url' or 'reload: true'. To open a new tab instead, call browser_tabs({action: 'new', url}).",
+      "Navigate session target tab to a URL, reload it, or step history.\n" +
+      "Provide exactly one of 'url', 'reload: true', or 'history'. To open a new tab instead, call browser_tabs({action: 'new', url}).",
     inputSchema: z
       .object({
         url: z.string().optional().describe("URL to navigate to"),
         reload: z.boolean().optional().describe("Set true to reload current page"),
+        history: z
+          .enum(["back", "forward"])
+          .optional()
+          .describe("Step browser history ('back' or 'forward')"),
       })
-      .refine((v) => (v.url !== undefined) !== (v.reload !== undefined), {
-        message: "Exactly one of 'url' or 'reload' must be present.",
+      .refine((v) => [v.url, v.reload, v.history].filter((x) => x !== undefined).length === 1, {
+        message: "Exactly one of 'url', 'reload', or 'history' must be present.",
       }),
   },
-  tool("navigate", async ({ url, reload }) => {
+  tool("navigate", async ({ url, reload, history }) => {
+    if (history === "back") return text(await callBridge("go_back"));
+    if (history === "forward") return text(await callBridge("go_forward"));
     if (reload) return text(await callBridge("reload", {}));
     return text(await callBridge("navigate", { url }));
   })
@@ -2057,24 +2103,55 @@ async function closeTabById(tabId) {
   return tagResult(data.result, data.browser);
 }
 
+async function groupTab({ id, title, color }) {
+  const { data, sentTo, first } = await callOnTab("group_tab", { id, title, color });
+  const groupedTabId = data.result?.tabId ?? sentTo.tabId;
+  if (Number.isInteger(groupedTabId)) target.set({ browser: data.browser, tabId: groupedTabId });
+  return tagResult(data.result, data.browser, first ? { target: first } : {});
+}
+
+async function ungroupTab({ id }) {
+  const { data, first } = await callOnTab("ungroup_tab", { id });
+  return tagResult(data.result, data.browser, first ? { target: first } : {});
+}
+
 server.registerTool(
   "browser_tabs",
   {
     title: "Manage browser tabs",
     description:
-      "List, open, select, close, release, or yield tabs across connected browsers.\n" +
-      "'list' inspects tabs without changing target. 'select'/'new' set this session's target tab. Set activate: true to foreground tab.\n" +
+      "List, new, select, close, release, yield, inspect current, or group/ungroup tabs across connected browsers.\n" +
+      "'list'/'current' inspect without changing target. 'select'/'new'/'group' set this session's target tab. Set activate: true to foreground tab.\n" +
       "If tab is leased by another session, 'select' requires user confirmation (or force: true).",
     inputSchema: z
       .object({
         action: z
-          .enum(["list", "new", "select", "close", "release", "yield"])
-          .describe("Tab action: 'list', 'new', 'select', 'close', 'release', or 'yield'"),
+          .enum([
+            "list",
+            "new",
+            "select",
+            "close",
+            "release",
+            "yield",
+            "current",
+            "group",
+            "ungroup",
+          ])
+          .describe(
+            "Tab action: 'list', 'new', 'select', 'close', 'release', 'yield', 'current', 'group', or 'ungroup'"
+          ),
         tabId: z
           .number()
           .int()
           .optional()
-          .describe("Target tab ID (required for 'close', or for 'select' by id)"),
+          .describe(
+            "Target tab ID (required for 'close', optional for 'select'/'group'/'ungroup')"
+          ),
+        id: z
+          .number()
+          .int()
+          .optional()
+          .describe("Alias for tabId when action is 'group' or 'ungroup'"),
         url: z.string().optional().describe("Initial URL for action 'new'"),
         browser: z
           .string()
@@ -2092,6 +2169,11 @@ server.registerTool(
           .boolean()
           .optional()
           .describe("Take leased tab from another session without prompt"),
+        title: z.string().optional().describe("Group label for 'group' (default 'bctl')"),
+        color: z
+          .enum(["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"])
+          .optional()
+          .describe("Group color for 'group' (default 'blue')"),
       })
       .refine((v) => v.action !== "select" || v.tabId !== undefined || v.browser !== undefined, {
         message: "tabId or browser is required when action is 'select'.",
@@ -2100,68 +2182,24 @@ server.registerTool(
         message: "tabId is required when action is 'close'.",
       }),
   },
-  tool("tabs", async ({ action, tabId, url, browser, query, activate, force }) => {
-    if (action === "list") return text(await listTabsView({ browser, query }));
-    if (action === "new") return text(await openTab({ url, browser, activate }));
-    if (action === "select") return text(await selectTab({ tabId, browser, activate, force }));
-    if (action === "close") return text(await closeTabById(tabId));
-    if (action === "release") {
-      const r = (await postCommand("release_tab", {})).result || {};
-      target.clear();
-      return text(r);
+  tool(
+    "tabs",
+    async ({ action, tabId, id, url, browser, query, activate, force, title, color }) => {
+      if (action === "list") return text(await listTabsView({ browser, query }));
+      if (action === "new") return text(await openTab({ url, browser, activate }));
+      if (action === "select") return text(await selectTab({ tabId, browser, activate, force }));
+      if (action === "close") return text(await closeTabById(tabId));
+      if (action === "release") {
+        const r = (await postCommand("release_tab", {})).result || {};
+        target.clear();
+        return text(r);
+      }
+      if (action === "yield") return text((await postCommand("yield_tab", {})).result || {});
+      if (action === "current") return text(await callBridge("current_tab"));
+      if (action === "group") return text(await groupTab({ id: id ?? tabId, title, color }));
+      if (action === "ungroup") return text(await ungroupTab({ id: id ?? tabId }));
     }
-    if (action === "yield") return text((await postCommand("yield_tab", {})).result || {});
-  })
-);
-
-server.registerTool(
-  "browser_group_tab",
-  {
-    title: "Group a tab (visual marker)",
-    description:
-      "Put a tab into a labeled, colored tab group so you (and the user) can see which tab the agent drives. Defaults to the target tab; pass id to group a specific tab. Does NOT activate the tab (no focus steal) and makes the grouped tab your target.",
-    inputSchema: {
-      id: z.number().int().optional().describe("Tab id to group (default: target tab)"),
-      title: z.string().optional().describe("Group label, default 'bctl'"),
-      color: z
-        .enum(["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"])
-        .optional()
-        .describe("Group color, default 'blue'"),
-    },
-  },
-  tool("group_tab", async ({ id, title, color }) => {
-    const { data, sentTo, first } = await callOnTab("group_tab", { id, title, color });
-    // The grouped tab becomes the session target
-    const tabId = data.result?.tabId ?? sentTo.tabId;
-    if (Number.isInteger(tabId)) target.set({ browser: data.browser, tabId });
-    return text(await tagResult(data.result, data.browser, first ? { target: first } : {}));
-  })
-);
-
-server.registerTool(
-  "browser_ungroup_tab",
-  {
-    title: "Ungroup a tab",
-    description: "Remove a tab from its tab group. Defaults to the target tab.",
-    inputSchema: {
-      id: z.number().int().optional().describe("Tab id to ungroup (default: target tab)"),
-    },
-  },
-  tool("ungroup_tab", async ({ id }) => {
-    const { data, first } = await callOnTab("ungroup_tab", { id });
-    return text(await tagResult(data.result, data.browser, first ? { target: first } : {}));
-  })
-);
-
-server.registerTool(
-  "browser_current_tab",
-  {
-    title: "Current target tab",
-    description:
-      "Report which tab commands currently act on (id, url, title). Your session's target is resolved on your first command and held across user tab switches. Call this to confirm you're on the right page before snapshotting or reading sensitive content.",
-    inputSchema: {},
-  },
-  tool("current_tab", async () => text(await callBridge("current_tab")))
+  )
 );
 
 server.registerTool(
@@ -2185,33 +2223,11 @@ server.registerTool(
 );
 
 server.registerTool(
-  "browser_cdp_attach",
-  {
-    title: "Attach debugger",
-    description:
-      "Attach the debugger to the target tab to start capturing console logs and network traffic. Shows an 'is being debugged' bar in the browser. Call this before get_console_logs / get_network_requests / export_har.",
-    inputSchema: {},
-  },
-  tool("cdp_attach", async () => text(await callBridge("cdp_attach")))
-);
-
-server.registerTool(
-  "browser_cdp_detach",
-  {
-    title: "Detach debugger",
-    description:
-      "Detach the debugger from the target tab and stop capturing. Removes the debugging bar.",
-    inputSchema: {},
-  },
-  tool("cdp_detach", async () => text(await callBridge("cdp_detach")))
-);
-
-server.registerTool(
   "browser_get_console_logs",
   {
     title: "Get console logs",
     description:
-      "Return buffered console messages (log/warn/error/exceptions) captured since attach. Requires browser_cdp_attach.",
+      "Return buffered console messages (log/warn/error/exceptions) captured since attach. Requires browser_cdp({action:'attach'}).",
     inputSchema: {
       limit: z.number().int().optional().describe("Max messages to return (default 200, newest)"),
       clear: z.boolean().optional().describe("Clear the buffer after reading"),
@@ -2223,29 +2239,11 @@ server.registerTool(
 );
 
 server.registerTool(
-  "browser_get_network_requests",
-  {
-    title: "Get network requests",
-    description:
-      "Return network requests captured since attach (method, url, status, type, size). Requires browser_cdp_attach.",
-    inputSchema: {
-      urlContains: z
-        .string()
-        .optional()
-        .describe("Only return requests whose URL contains this substring"),
-    },
-  },
-  tool("get_network_requests", async ({ urlContains }) =>
-    text(await callBridge("get_network_requests", { urlContains }))
-  )
-);
-
-server.registerTool(
   "browser_export_har",
   {
     title: "Export HAR",
     description:
-      "Export captured network traffic as a HAR 1.2 object (headers, status, timing). Headers are included verbatim (local tool, no redaction). Set bodies=true to also include response bodies (best-effort, slower). Requires browser_cdp_attach.",
+      "Export captured network traffic as a HAR 1.2 object (headers, status, timing). Headers are included verbatim (local tool, no redaction). Set bodies=true to also include response bodies (best-effort, slower). Requires browser_cdp({action:'attach'}).",
     inputSchema: { bodies: z.boolean().optional().describe("Include response bodies") },
   },
   tool("export_har", async ({ bodies }) => text(await callBridge("export_har", { bodies })))
@@ -2381,18 +2379,28 @@ server.registerTool(
   {
     title: "Wait for condition",
     description:
-      "Wait for element, text, or page settle condition.\n" +
-      "Set for: 'settle' to wait for DOM readyState and animations on an SPA. Set gone: true to wait until element or text disappears.",
+      "Wait for element, text, settle, or network-idle condition.\n" +
+      "Set for: 'settle' to wait for DOM readyState and animations on an SPA. Set for: 'network-idle' to wait for <= maxInFlight in-flight requests for idleMs (for modern SPAs with background telemetry, set maxInFlight >= 1). Set gone: true to wait until element or text disappears.",
     inputSchema: {
       for: z
-        .enum(["settle", "selector", "text"])
+        .enum(["settle", "selector", "text", "network-idle"])
         .optional()
         .describe(
-          "Wait condition: 'settle' (DOM quiet), 'selector', or 'text'. Inferred if omitted."
+          "Wait condition: 'settle' (DOM quiet), 'selector', 'text', or 'network-idle'. Inferred if omitted."
         ),
       selector: z.string().optional().describe("CSS selector to wait for"),
       text: z.string().optional().describe("Page text string to wait for"),
       gone: z.boolean().optional().describe("Wait for selector or text to disappear instead"),
+      idleMs: z
+        .number()
+        .int()
+        .optional()
+        .describe("Quiet period in ms for 'network-idle' (default 500)"),
+      maxInFlight: z
+        .number()
+        .int()
+        .optional()
+        .describe("Tolerate <= N background requests for 'network-idle' (default 0)"),
       timeoutMs: z
         .number()
         .int()
@@ -2400,10 +2408,14 @@ server.registerTool(
         .describe("Timeout in ms (default: 8000 for conditions, 1000 for settle)"),
     },
   },
-  tool("wait_for", async ({ for: waitFor, selector, text: t, gone, timeoutMs }) =>
-    waitFor === "settle"
-      ? text(await callBridge("wait_settle", { timeoutMs }))
-      : text(await callBridge("wait_for", { selector, text: t, gone, timeoutMs }))
+  tool(
+    "wait_for",
+    async ({ for: waitFor, selector, text: t, gone, idleMs, maxInFlight, timeoutMs }) => {
+      if (waitFor === "settle") return text(await callBridge("wait_settle", { timeoutMs }));
+      if (waitFor === "network-idle")
+        return text(await callBridge("wait_network_idle", { idleMs, timeoutMs, maxInFlight }));
+      return text(await callBridge("wait_for", { selector, text: t, gone, timeoutMs }));
+    }
   )
 );
 
@@ -2514,106 +2526,65 @@ server.registerTool(
 );
 
 server.registerTool(
-  "browser_go_back",
-  { title: "Go back", description: "Navigate back in the target tab's history.", inputSchema: {} },
-  tool("go_back", async () => text(await callBridge("go_back")))
-);
-
-server.registerTool(
-  "browser_go_forward",
+  "browser_windows",
   {
-    title: "Go forward",
-    description: "Navigate forward in the target tab's history.",
-    inputSchema: {},
-  },
-  tool("go_forward", async () => text(await callBridge("go_forward")))
-);
-
-server.registerTool(
-  "browser_list_windows",
-  {
-    title: "List windows",
-    description: "List all browser windows with their tabs.",
-    inputSchema: {},
-  },
-  tool("list_windows", async () => text(await callBridge("list_windows")))
-);
-
-server.registerTool(
-  "browser_focus_window",
-  {
-    title: "Focus window",
+    title: "Manage browser windows",
     description:
-      "Bring the window with the given id to the foreground. Steals the user's OS focus — use only when the user explicitly asks to surface a window, not as part of background work.",
-    inputSchema: { id: z.number().int().describe("Window id from browser_list_windows") },
+      "List or focus browser windows, or manage the dedicated agent window.\n" +
+      "'list' (default) returns all windows with tabs. 'focus' surfaces a window by id (steals OS focus). 'get'/'open'/'close'/'focus_agent' manage the isolated agent window.",
+    inputSchema: z
+      .object({
+        action: z
+          .enum(["list", "focus", "get", "open", "close", "focus_agent"])
+          .optional()
+          .describe(
+            "Window action: 'list' (default), 'focus', or agent window ('get', 'open', 'close', 'focus_agent')"
+          ),
+        id: z.number().int().optional().describe("Window id (required for 'focus')"),
+        url: z.string().optional().describe("Initial URL when opening agent window ('open')"),
+        width: z.number().int().optional().describe("Agent window width in pixels ('open')"),
+        height: z.number().int().optional().describe("Agent window height in pixels ('open')"),
+      })
+      .refine((v) => (v.action || "list") !== "focus" || v.id !== undefined, {
+        message: "id is required when action is 'focus'.",
+      }),
   },
-  tool("focus_window", async ({ id }) => text(await callBridge("focus_window", { id })))
+  tool("windows", async ({ action = "list", id, url, width, height }) => {
+    if (action === "focus") return text(await callBridge("focus_window", { id }));
+    if (action === "get" || action === "open" || action === "close") {
+      return text(await callBridge("agent_window", { action, url, width, height }));
+    }
+    if (action === "focus_agent") {
+      return text(await callBridge("agent_window", { action: "focus", url, width, height }));
+    }
+    return text(await callBridge("list_windows"));
+  })
 );
 
 server.registerTool(
-  "browser_net_start",
+  "browser_net_capture",
   {
-    title: "Start network capture (light)",
+    title: "Capture network traffic (light webRequest)",
     description:
-      "Start capturing network requests for the target tab via webRequest. No debugger banner, but no response bodies. Clears the previous buffer.",
-    inputSchema: {},
-  },
-  tool("net_start", async () => text(await callBridge("net_start")))
-);
-
-server.registerTool(
-  "browser_net_stop",
-  {
-    title: "Stop network capture (light)",
-    description: "Stop the webRequest capture for the target tab.",
-    inputSchema: {},
-  },
-  tool("net_stop", async () => text(await callBridge("net_stop")))
-);
-
-server.registerTool(
-  "browser_net_get",
-  {
-    title: "Get captured network (light)",
-    description:
-      "Return network requests captured by the light webRequest capture (method, url, type, status, timing). Headers are included verbatim (local tool, no redaction).",
+      "Start, stop, read, or clear lightweight webRequest network capture on the target tab (no debugger banner, no response bodies; headers are included verbatim).",
     inputSchema: {
-      urlContains: z.string().optional().describe("Filter by URL substring"),
-      limit: z.number().int().optional().describe("Max requests (default 200, newest)"),
-    },
-  },
-  tool("net_get", async ({ urlContains, limit }) =>
-    text(await callBridge("net_get", { urlContains, limit }))
-  )
-);
-
-server.registerTool(
-  "browser_net_clear",
-  {
-    title: "Clear network capture (light)",
-    description: "Clear the light network capture buffer for the target tab.",
-    inputSchema: {},
-  },
-  tool("net_clear", async () => text(await callBridge("net_clear")))
-);
-
-server.registerTool(
-  "browser_get_response_body",
-  {
-    title: "Get response body",
-    description:
-      "Fetch the response body of a captured request by its requestId (from get_network_requests). Best-effort; bodies may be evicted. Supports optional pointer (RFC 6901 JSON pointer). Requires browser_cdp_attach.",
-    inputSchema: {
-      requestId: z.string().describe("requestId from the CDP network capture"),
-      pointer: z
-        .string()
+      action: z
+        .enum(["start", "stop", "get", "clear"])
+        .describe("Capture action: 'start', 'stop', 'get', or 'clear'"),
+      urlContains: z.string().optional().describe("Filter by URL substring (for action 'get')"),
+      limit: z
+        .number()
+        .int()
         .optional()
-        .describe("RFC 6901 JSON pointer to extract a specific sub-tree or field"),
+        .describe("Max requests to return (for action 'get', default 200, newest)"),
     },
   },
-  tool("get_response_body", async ({ requestId, pointer }) =>
-    text(await callBridge("get_response_body", { requestId, pointer }))
-  )
+  tool("net_capture", async ({ action, urlContains, limit }) => {
+    if (action === "start") return text(await callBridge("net_start"));
+    if (action === "stop") return text(await callBridge("net_stop"));
+    if (action === "clear") return text(await callBridge("net_clear"));
+    return text(await callBridge("net_get", { urlContains, limit }));
+  })
 );
 
 server.registerTool(
@@ -2621,7 +2592,7 @@ server.registerTool(
   {
     title: "Click at coordinates",
     description:
-      "Click at pixel coordinates measured against the most recent screenshot of the target tab (for canvas/WebGL/maps where DOM clicks fail). Coordinates are auto-mapped from screenshot pixels to the viewport, so pass the x/y you read off the screenshot. Pair with a screenshot first. Requires browser_cdp_attach. REQUIRES the target tab in the FOREGROUND: Chrome silently drops CDP synthetic mouse input for background tabs, so this errors rather than pretending to click. For background work use browser_click (ref, selector or text) instead.",
+      "Click at pixel coordinates measured against the most recent screenshot of the target tab (for canvas/WebGL/maps where DOM clicks fail). Coordinates are auto-mapped from screenshot pixels to the viewport, so pass the x/y you read off the screenshot. Pair with a screenshot first. Requires browser_cdp({action:'attach'}). REQUIRES the target tab in the FOREGROUND: Chrome silently drops CDP synthetic mouse input for background tabs, so this errors rather than pretending to click. For background work use browser_click (ref, selector or text) instead.",
     inputSchema: {
       x: z.number().describe("X in screenshot pixels"),
       y: z.number().describe("Y in screenshot pixels"),
@@ -2632,70 +2603,6 @@ server.registerTool(
   tool("coordinate_click", async ({ x, y, button, clickCount }) =>
     text(await callBridge("coordinate_click", { x, y, button, clickCount }))
   )
-);
-
-server.registerTool(
-  "browser_insert_text",
-  {
-    title: "Insert text (CDP)",
-    description:
-      "Type text into the focused element via CDP Input.insertText — robust for emoji/IME/multibyte that key-by-key typing can't represent. Click/focus the field first. Requires browser_cdp_attach.",
-    inputSchema: { text: z.string().describe("Text to insert at the focus") },
-  },
-  tool("insert_text", async ({ text: t }) => text(await callBridge("insert_text", { text: t })))
-);
-
-server.registerTool(
-  "browser_coordinate_drag",
-  {
-    title: "Drag between coordinates",
-    description:
-      "Press at (fromX,fromY), move to (toX,toY), release. Requires browser_cdp_attach. REQUIRES the target tab in the FOREGROUND: Chrome silently drops CDP synthetic mouse input for background tabs, so this errors rather than pretending to click. For background work use browser_click (ref, selector or text) instead.",
-    inputSchema: {
-      fromX: z.number(),
-      fromY: z.number(),
-      toX: z.number(),
-      toY: z.number(),
-    },
-  },
-  tool("coordinate_drag", async (a) => text(await callBridge("coordinate_drag", a)))
-);
-
-server.registerTool(
-  "browser_a11y_snapshot",
-  {
-    title: "Accessibility snapshot",
-    description:
-      "SECOND OPINION on the page, from Chrome itself. Returns Chrome's own accessibility tree — the role, name and state it computes for every control by the HTML-AAM spec — not browserctl's census. Each node carries a 'ref' where the census has the same control, so results are directly actionable.\n" +
-      "Use it when browser_snapshot's answer looks wrong or incomplete: a control you can see but cannot find, a name that does not match what is on screen, or a form whose state you want confirmed independently. 'censusCoverage' says how much of Chrome's control list the census also had, and 'notInCensus' names the difference — usually screen-reader-only text, occasionally a real gap.\n" +
-      "COST: attaches the debugger, so Chrome shows a 'browserctl started debugging this browser' banner on that tab, and it is ~3x slower and ~2x larger than browser_snapshot. It is a diagnostic, not a replacement — reach for browser_snapshot first. Attaches on its own; no separate browser_cdp_attach needed.",
-    inputSchema: { max: z.number().int().optional().describe("Max nodes (default 200)") },
-  },
-  tool("a11y_snapshot", async ({ max }) => text(await callBridge("a11y_snapshot", { max })))
-);
-
-server.registerTool(
-  "browser_element_screenshot",
-  {
-    title: "Screenshot one element",
-    description:
-      "Capture just one element as an image, named by 'target' (ref '@e1', CSS selector, visible text, or snapshot index). Same capture as browser_take_screenshot with a target: a visible tab is cropped without the debugger, a background tab attaches it.",
-    inputSchema: {
-      target: z
-        .union([z.string(), z.number().int()])
-        .describe("Element to capture: ref '@e1', CSS selector, visible text, or index"),
-      format: z.enum(["png", "jpeg"]).optional(),
-    },
-  },
-  tool("element_screenshot", async ({ target, format }) => {
-    const { dataUrl } = await callBridge("element_screenshot", { target, format });
-    const m = dataUrl.match(/^data:image\/(png|jpeg);base64,(.*)$/);
-    if (!m)
-      throw new Error(
-        `element_screenshot returned an unrecognized data URL (expected data:image/png|jpeg;base64,...)`
-      );
-    return { content: [{ type: "image", data: m[2], mimeType: `image/${m[1]}` }] };
-  })
 );
 
 server.registerTool(
@@ -2722,7 +2629,7 @@ server.registerTool(
   {
     title: "Print page to PDF",
     description:
-      "Render the page to a PDF; returns base64 (save it to a .pdf file). Requires browser_cdp_attach.",
+      "Render the page to a PDF; returns base64 (save it to a .pdf file). Requires browser_cdp({action:'attach'}).",
     inputSchema: {},
   },
   tool("print_pdf", async () => text(await callBridge("print_pdf")))
@@ -2733,150 +2640,141 @@ server.registerTool(
   {
     title: "Audit page",
     description:
-      "Lightweight audit: performance metrics (DOM nodes, JS heap, layout/script timing) plus an accessibility count of interactive elements missing a name. Requires browser_cdp_attach.",
+      "Lightweight audit: performance metrics (DOM nodes, JS heap, layout/script timing) plus an accessibility count of interactive elements missing a name. Requires browser_cdp({action:'attach'}).",
     inputSchema: {},
   },
   tool("audit", async () => text(await callBridge("audit")))
 );
 
 server.registerTool(
-  "browser_get_cookies",
+  "browser_cookies",
   {
-    title: "Get cookies",
+    title: "Manage cookies",
     description:
-      "Return the cookies that apply to the TARGET TAB's current page (this is the default scope, and the answer to \"what cookies did this page set\"). Pass allDomains:true to read every cookie in the browser profile instead — that returns the user's whole session jar across all sites, so ask for it only when the task really needs it. Capped at 200 cookies; the response says when it truncated. Requires browser_cdp_attach.",
-    inputSchema: {
-      urlContains: z
-        .string()
-        .optional()
-        .describe("Keep only cookies whose domain contains this substring"),
-      url: z
-        .string()
-        .optional()
-        .describe("Scope to this URL instead of the target tab's current page"),
-      allDomains: z
-        .boolean()
-        .optional()
-        .describe("Read every cookie in the browser profile, not just this page's. Default false."),
-      limit: z.number().int().optional().describe("Max cookies to return (default 200)"),
-    },
+      "Read, set, or delete browser cookies (requires browser_cdp({action:'attach'})).\n" +
+      "'get' (default) returns cookies for the target tab's current page (pass allDomains:true for the whole profile jar, capped at 200). 'set' requires name and value (plus url or domain). 'delete' requires name.",
+    inputSchema: z
+      .object({
+        action: z
+          .enum(["get", "set", "delete"])
+          .optional()
+          .describe("Cookie action: 'get' (default), 'set', or 'delete'"),
+        urlContains: z
+          .string()
+          .optional()
+          .describe("Keep only cookies whose domain contains this substring ('get')"),
+        url: z.string().optional().describe("Scope URL ('get', 'set', or 'delete')"),
+        allDomains: z
+          .boolean()
+          .optional()
+          .describe("Read every cookie in the browser profile instead of current page ('get')"),
+        limit: z.number().int().optional().describe("Max cookies to return ('get', default 200)"),
+        name: z.string().optional().describe("Cookie name (required for 'set' and 'delete')"),
+        value: z.string().optional().describe("Cookie value (required for 'set')"),
+        domain: z.string().optional().describe("Cookie domain ('set')"),
+        path: z.string().optional().describe("Cookie path ('set')"),
+        secure: z.boolean().optional().describe("Secure flag ('set')"),
+        httpOnly: z.boolean().optional().describe("HttpOnly flag ('set')"),
+        expires: z.number().optional().describe("Expiration epoch seconds ('set')"),
+      })
+      .refine(
+        (v) => (v.action || "get") !== "set" || (v.name !== undefined && v.value !== undefined),
+        {
+          message: "name and value are required when action is 'set'.",
+        }
+      )
+      .refine((v) => (v.action || "get") !== "delete" || v.name !== undefined, {
+        message: "name is required when action is 'delete'.",
+      }),
   },
-  tool("get_cookies", async ({ urlContains, url, allDomains, limit }) =>
-    text(await callBridge("get_cookies", { urlContains, url, allDomains, limit }))
+  tool(
+    "cookies",
+    async ({
+      action = "get",
+      urlContains,
+      url,
+      allDomains,
+      limit,
+      name,
+      value,
+      domain,
+      path,
+      secure,
+      httpOnly,
+      expires,
+    }) => {
+      if (action === "set")
+        return text(
+          await callBridge("set_cookie", {
+            name,
+            value,
+            url,
+            domain,
+            path,
+            secure,
+            httpOnly,
+            expires,
+          })
+        );
+      if (action === "delete") return text(await callBridge("delete_cookies", { name, url }));
+      return text(await callBridge("get_cookies", { urlContains, url, allDomains, limit }));
+    }
   )
 );
 
 server.registerTool(
-  "browser_set_cookie",
+  "browser_storage",
   {
-    title: "Set cookie",
+    title: "Manage web storage",
     description:
-      "Set a cookie (provide url or domain). Useful for test setup. Requires browser_cdp_attach.",
+      "Read, write, remove, or clear localStorage or sessionStorage on the target tab.\n" +
+      "'get' (default) returns one key's value or all items; 'set' requires key and value; 'remove' requires key; 'clear' empties the selected area.",
+    inputSchema: z
+      .object({
+        action: z
+          .enum(["get", "set", "remove", "clear"])
+          .optional()
+          .describe("Storage action: 'get' (default), 'set', 'remove', or 'clear'"),
+        area: z
+          .enum(["local", "session"])
+          .optional()
+          .describe("Storage area: 'local' (default) or 'session'"),
+        key: z
+          .string()
+          .optional()
+          .describe("Storage key (required for 'set'/'remove'; optional for 'get')"),
+        value: z.string().optional().describe("Value to write (required for 'set')"),
+      })
+      .refine(
+        (v) => (v.action || "get") !== "set" || (v.key !== undefined && v.value !== undefined),
+        {
+          message: "key and value are required when action is 'set'.",
+        }
+      )
+      .refine((v) => (v.action || "get") !== "remove" || v.key !== undefined, {
+        message: "key is required when action is 'remove'.",
+      }),
+  },
+  tool("storage", async ({ action = "get", area, key, value }) => {
+    if (action === "set") return text(await callBridge("storage_set", { area, key, value }));
+    if (action === "remove") return text(await callBridge("storage_remove", { area, key }));
+    if (action === "clear") return text(await callBridge("storage_clear", { area }));
+    return text(await callBridge("storage_get", { area, key }));
+  })
+);
+
+server.registerTool(
+  "browser_record",
+  {
+    title: "Record and replay interactions",
+    description:
+      "Record user interactions on the target tab or replay recorded/supplied steps.\n" +
+      "'start' begins capturing clicks/field changes; 'stop' halts recording; 'get' returns recorded steps; 'replay' runs steps (optionally navigating to startUrl first).",
     inputSchema: {
-      name: z.string(),
-      value: z.string(),
-      url: z.string().optional(),
-      domain: z.string().optional(),
-      path: z.string().optional(),
-      secure: z.boolean().optional(),
-      httpOnly: z.boolean().optional(),
-      expires: z.number().optional(),
-    },
-  },
-  tool("set_cookie", async (a) => text(await callBridge("set_cookie", a)))
-);
-
-server.registerTool(
-  "browser_delete_cookies",
-  {
-    title: "Delete cookies",
-    description:
-      "Delete cookies by name (optionally scoped to a url). Requires browser_cdp_attach.",
-    inputSchema: { name: z.string(), url: z.string().optional() },
-  },
-  tool("delete_cookies", async (a) => text(await callBridge("delete_cookies", a)))
-);
-
-server.registerTool(
-  "browser_storage_get",
-  {
-    title: "Read web storage",
-    description:
-      "Read localStorage or sessionStorage. With a key returns its value; without, returns all items.",
-    inputSchema: { area: z.enum(["local", "session"]).optional(), key: z.string().optional() },
-  },
-  tool("storage_get", async ({ area, key }) => text(await callBridge("storage_get", { area, key })))
-);
-
-server.registerTool(
-  "browser_storage_set",
-  {
-    title: "Write web storage",
-    description: "Set a key in localStorage or sessionStorage (test fixtures, feature flags).",
-    inputSchema: {
-      area: z.enum(["local", "session"]).optional(),
-      key: z.string(),
-      value: z.string(),
-    },
-  },
-  tool("storage_set", async (a) => text(await callBridge("storage_set", a)))
-);
-
-server.registerTool(
-  "browser_storage_remove",
-  {
-    title: "Remove web storage key",
-    description: "Remove a key from localStorage or sessionStorage.",
-    inputSchema: { area: z.enum(["local", "session"]).optional(), key: z.string() },
-  },
-  tool("storage_remove", async (a) => text(await callBridge("storage_remove", a)))
-);
-
-server.registerTool(
-  "browser_storage_clear",
-  {
-    title: "Clear web storage",
-    description: "Clear all of localStorage or sessionStorage.",
-    inputSchema: { area: z.enum(["local", "session"]).optional() },
-  },
-  tool("storage_clear", async ({ area }) => text(await callBridge("storage_clear", { area })))
-);
-
-server.registerTool(
-  "browser_record_start",
-  {
-    title: "Start recording",
-    description:
-      "Start recording user interactions (clicks, field changes) in the target tab. Replay later with browser_replay.",
-    inputSchema: {},
-  },
-  tool("record_start", async () => text(await callBridge("record_start")))
-);
-
-server.registerTool(
-  "browser_record_stop",
-  { title: "Stop recording", description: "Stop recording interactions.", inputSchema: {} },
-  tool("record_stop", async () => text(await callBridge("record_stop")))
-);
-
-server.registerTool(
-  "browser_record_get",
-  {
-    title: "Get recorded steps",
-    description: "Return the recorded interaction steps.",
-    inputSchema: {},
-  },
-  tool("record_get", async () => text(await callBridge("record_get")))
-);
-
-server.registerTool(
-  "browser_replay",
-  {
-    title: "Replay steps",
-    description:
-      "Replay recorded steps (or supplied steps) against the target tab. Optionally navigate to startUrl first.",
-    inputSchema: {
-      startUrl: z.string().optional(),
+      action: z
+        .enum(["start", "stop", "get", "replay"])
+        .describe("Recording action: 'start', 'stop', 'get', or 'replay'"),
+      startUrl: z.string().optional().describe("Optional initial URL to navigate to for 'replay'"),
       steps: z
         .array(
           z.object({
@@ -2886,39 +2784,16 @@ server.registerTool(
             url: z.string().optional(),
           })
         )
-        .optional(),
+        .optional()
+        .describe("Optional steps array for 'replay'"),
     },
   },
-  tool("replay", async ({ startUrl, steps }) =>
-    text(await callBridge("replay", { startUrl, steps }))
-  )
-);
-
-server.registerTool(
-  "browser_wait_network_idle",
-  {
-    title: "Wait for network idle",
-    description:
-      "Wait until the target tab has had no in-flight requests for idleMs (default 500), up to timeoutMs (default 10000). For modern SPAs with persistent WebSockets, telemetry, or long-polling (YouTube, Algolia, Twitter, Azure Portal), network-idle may time out waiting for 0 requests; use browser_wait_for({for:'settle'}) instead or set maxInFlight to tolerate background connections.",
-    inputSchema: {
-      idleMs: z
-        .number()
-        .int()
-        .optional()
-        .describe("Quiet period in ms with <= maxInFlight requests (default 500)"),
-      timeoutMs: z.number().int().optional().describe("Maximum wait timeout in ms (default 10000)"),
-      maxInFlight: z
-        .number()
-        .int()
-        .optional()
-        .describe(
-          "Tolerate up to N background/in-flight requests (e.g. 1 for WebSockets/telemetry, default 0)"
-        ),
-    },
-  },
-  tool("wait_network_idle", async ({ idleMs, timeoutMs, maxInFlight }) =>
-    text(await callBridge("wait_network_idle", { idleMs, timeoutMs, maxInFlight }))
-  )
+  tool("record", async ({ action, startUrl, steps }) => {
+    if (action === "start") return text(await callBridge("record_start"));
+    if (action === "stop") return text(await callBridge("record_stop"));
+    if (action === "get") return text(await callBridge("record_get"));
+    return text(await callBridge("replay", { startUrl, steps }));
+  })
 );
 
 server.registerTool(
@@ -3002,17 +2877,6 @@ server.registerTool(
 );
 
 server.registerTool(
-  "browser_reload_extension",
-  {
-    title: "Reload the extension",
-    description:
-      "Reload the browser extension itself from disk (dev convenience; picks up edited extension code). The connection drops briefly and reconnects.",
-    inputSchema: {},
-  },
-  tool("reload_extension", async () => text(await callBridge("reload_extension")))
-);
-
-server.registerTool(
   "browser_download",
   {
     title: "Download file",
@@ -3065,49 +2929,6 @@ server.registerTool(
     text(
       await callBridge("request_help", { target, reason, timeoutMs, waitForUrl, waitForSelector })
     )
-  )
-);
-
-server.registerTool(
-  "browser_agent_window",
-  {
-    title: "Agent window isolation",
-    description:
-      "Manages a dedicated agent window to isolate automation from the user's active windows. When open, newly created tabs automatically belong to the agent window.",
-    inputSchema: {
-      action: z
-        .enum(["get", "open", "close", "focus"])
-        .optional()
-        .describe("Action to perform: 'get' (default), 'open', 'close', or 'focus'"),
-      url: z.string().optional().describe("Initial URL when opening"),
-      width: z.number().int().optional().describe("Window width in pixels"),
-      height: z.number().int().optional().describe("Window height in pixels"),
-    },
-  },
-  tool("agent_window", async ({ action, url, width, height }) =>
-    text(await callBridge("agent_window", { action, url, width, height }))
-  )
-);
-
-server.registerTool(
-  "browser_wheel",
-  {
-    title: "Mouse wheel scroll",
-    description:
-      "Dispatch hardware mouse wheel events via CDP at coordinates or target element. Useful for Canvas, WebGL, maps, and virtualized scroll containers where DOM scrolling fails.",
-    inputSchema: {
-      target: TARGET_FIELD.optional().describe(
-        "Target element to center the wheel event over (e.g. '@e1')"
-      ),
-      x: z.number().optional().describe("X coordinate in pixels"),
-      y: z.number().optional().describe("Y coordinate in pixels"),
-      deltaX: z.number().optional().describe("Horizontal scroll delta (default 0)"),
-      deltaY: z.number().optional().describe("Vertical scroll delta (positive = scroll down)"),
-      modifiers: z.array(z.string()).optional().describe("Modifier keys (e.g. ['Shift', 'Alt'])"),
-    },
-  },
-  tool("wheel", async ({ target, x, y, deltaX, deltaY, modifiers }) =>
-    text(await callBridge("wheel", { target, x, y, deltaX, deltaY, modifiers }))
   )
 );
 
@@ -3172,87 +2993,57 @@ server.registerTool(
 );
 
 server.registerTool(
-  "browser_get_network_request",
-  {
-    title: "Inspect single network request",
-    description:
-      "Inspect full details of a single network request by requestId. Supports slicing by part ('response', 'request', 'headers', 'timing') and querying JSON Pointer.",
-    inputSchema: {
-      requestId: z.string().describe("requestId from get_network_requests"),
-      part: z
-        .enum(["all", "response", "request", "headers", "timing"])
-        .optional()
-        .describe("Which part of the request to return (default: 'all')"),
-      pointer: z
-        .string()
-        .optional()
-        .describe("RFC 6901 JSON pointer to extract a specific field from the response body"),
-    },
-  },
-  tool("get_network_request", async ({ requestId, part, pointer }) =>
-    text(await callBridge("get_network_request", { requestId, part, pointer }))
-  )
-);
-
-server.registerTool(
-  "browser_network_replay",
-  {
-    title: "Replay network request with session cookies",
-    description:
-      "Re-executes a previously captured network request inside the target page context with current session cookies and credentials. Returns response status, headers, and body or JSON slice.",
-    inputSchema: {
-      requestId: z.string().describe("requestId of the request to replay"),
-      url: z.string().optional().describe("Override request URL"),
-      method: z.string().optional().describe("Override HTTP method"),
-      headers: z.record(z.string()).optional().describe("Override or add request headers"),
-      body: z.string().optional().describe("Override request body"),
-      pointer: z
-        .string()
-        .optional()
-        .describe("RFC 6901 JSON pointer to extract from the replayed response"),
-    },
-  },
-  tool("network_replay", async (params) => text(await callBridge("network_replay", params)))
-);
-
-server.registerTool(
   "browser_make_request",
   {
-    title: "Make HTTP request inside page context",
+    title: "Make or replay HTTP request inside page context",
     description:
-      "Execute an HTTP request directly inside the target tab context with options to inherit session credentials or run custom isolated requests. Generates executable minimal curl command.",
-    inputSchema: {
-      url: z.string().describe("Target URL (absolute or relative to current page)"),
-      method: z
-        .enum(["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
-        .optional()
-        .describe("HTTP method (default: GET)"),
-      headers: z.record(z.string()).optional().describe("Request headers dictionary"),
-      body: z.string().optional().describe("Request body payload"),
-      json: z
-        .any()
-        .optional()
-        .describe("JSON payload object (auto-serializes and sets Content-Type)"),
-      query: z.record(z.any()).optional().describe("Query parameters dictionary to append to URL"),
-      credentials: z
-        .enum(["include", "same-origin", "omit"])
-        .optional()
-        .describe("Credentials mode (default: 'include' inherits session cookies)"),
-      timeout_ms: z
-        .number()
-        .optional()
-        .describe("Request timeout in milliseconds (default: 15000)"),
-      pointer: z
-        .string()
-        .optional()
-        .describe("RFC 6901 JSON pointer to extract from response JSON"),
-      requestId: z
-        .string()
-        .optional()
-        .describe("Optional requestId of a recorded request to replay"),
-    },
+      "Execute an HTTP request directly inside the target tab context inheriting session cookies, or replay a captured request by requestId. Generates executable minimal curl command.",
+    inputSchema: z
+      .object({
+        url: z
+          .string()
+          .optional()
+          .describe("Target URL (absolute or relative; optional when replaying requestId)"),
+        method: z
+          .enum(["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+          .optional()
+          .describe("HTTP method (default: GET)"),
+        headers: z.record(z.string()).optional().describe("Request headers dictionary"),
+        body: z.string().optional().describe("Request body payload"),
+        json: z
+          .any()
+          .optional()
+          .describe("JSON payload object (auto-serializes and sets Content-Type)"),
+        query: z
+          .record(z.any())
+          .optional()
+          .describe("Query parameters dictionary to append to URL"),
+        credentials: z
+          .enum(["include", "same-origin", "omit"])
+          .optional()
+          .describe("Credentials mode (default: 'include' inherits session cookies)"),
+        timeout_ms: z
+          .number()
+          .optional()
+          .describe("Request timeout in milliseconds (default: 15000)"),
+        pointer: z
+          .string()
+          .optional()
+          .describe("RFC 6901 JSON pointer to extract from response JSON"),
+        requestId: z
+          .string()
+          .optional()
+          .describe("Optional requestId of a recorded request to replay"),
+      })
+      .refine((v) => v.url !== undefined || v.requestId !== undefined, {
+        message: "Provide 'url' or 'requestId'.",
+      }),
   },
-  tool("make_request", async (params) => text(await callBridge("make_request", params)))
+  tool("make_request", async (params) =>
+    text(
+      await callBridge(params.requestId !== undefined ? "network_replay" : "make_request", params)
+    )
+  )
 );
 
 server.registerTool(

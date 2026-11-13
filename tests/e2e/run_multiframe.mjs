@@ -98,123 +98,87 @@ async function main() {
     let snap;
     await test("snapshot(compact, scope=all) succeeds on a multi-frame page", async () => {
       snap = await cmd("snapshot", { compact: true, scope: "all" });
-      assert(
-        typeof snap.census === "string" && snap.census.length > 0,
-        "no census returned"
-      );
+      assert(typeof snap.census === "string" && snap.census.length > 0, "no census returned");
     });
 
-    await test("the merged census is the only copy: sub-frames in 'census', no 'compactView'", async () => {
+    await test("the merged census is the only copy: VOM v1 with Iframe node, no 'compactView'", async () => {
       assert(!("compactView" in snap), "a second copy of the census came back as compactView");
-      assert(/\[iframe f\d+ /.test(snap.census), "the sub-frame's census is not appended to 'census'");
+      assert(/^@vom 1\b/m.test(snap.census), `missing @vom 1 header:\n${snap.census}`);
+      assert(/Iframe "childframe"/.test(snap.census), "the sub-frame's tree is not in 'census'");
     });
 
-    await test("compact view keeps landmark grouping (not rebuilt flat)", async () => {
-      assert(
-        /\[Header \/ Banner\]/.test(snap.census),
-        "missing [Header / Banner] landmark header"
-      );
-      assert(/\[Navigation\]/.test(snap.census), "missing [Navigation] landmark header");
+    await test("VOM tree preserves landmark grouping (banner, navigation, main)", async () => {
+      assert(/\bbanner\b/.test(snap.census), "missing banner landmark");
+      assert(/\bnavigation\b/.test(snap.census), "missing navigation landmark");
+      assert(/\bmain\b/.test(snap.census), "missing main landmark");
     });
 
-    await test("compact view keeps hoisted key-inputs block", async () => {
+    await test("VOM tree keeps search input and sign-in control inside banner", async () => {
       assert(
-        /\[Key Inputs & Search Fields\]/.test(snap.census),
-        "missing [Key Inputs & Search Fields] block"
+        /@e\d+\s+textbox "Search site"/.test(snap.census),
+        `missing Search site textbox in banner:\n${snap.census}`
       );
-      const idx = snap.census.indexOf("[Key Inputs & Search Fields]");
       assert(
-        idx >= 0 && /Search site/.test(snap.census.slice(idx, idx + 300)),
-        "key-inputs block missing the hoisted search field"
-      );
-    });
-
-    await test("compact view keeps repetitive-run folding (5 identical Remove buttons)", async () => {
-      assert(
-        /folded 3 repetitive <button> "Remove"/.test(snap.census),
-        `no folded-run line found:\n${snap.census}`
+        /@e\d+\s+button "Sign In"/.test(snap.census),
+        `missing Sign In button in banner:\n${snap.census}`
       );
     });
 
-    await test("the merge keeps duplicate-link suppression, and counts it", async () => {
-      // The notice line became a field when results stopped carrying prose (0.7.1). The
-      // behaviour under test is the same: one row printed, and the page says how many it
-      // collapsed — the count is what tells a reader the census is not the whole DOM.
+    await test("VOM tree renders all 5 repetitive Remove buttons with row context", async () => {
+      const matches = snap.census.match(/@e\d+\s+button "Remove" \[ctx: Item [A-E]\]/g) || [];
       assert(
-        snap.duplicateCount >= 1,
-        `expected a duplicate to be counted, got ${snap.duplicateCount}`
-      );
-      // Only ONE "View Details" *anchor row* should be printed, not two. (Matched on the
-      // `<a> "View Details"` listing form specifically — not on the substring anywhere in
-      // the page, which would also catch the unrelated "(row: ...)" context annotations
-      // the Remove-button run picks up; see the report for that separate finding.)
-      const count = (snap.census.match(/<a> "View Details"/g) || []).length;
-      assert(count === 1, `expected exactly 1 "View Details" anchor row, found ${count}`);
-    });
-
-    await test("scope=all still folds repetitive runs, and says how many", async () => {
-      // scope:"all" is what an agent escalates to for completeness, so it folding silently
-      // was the worst case of a census not admitting what it withheld.
-      assert(
-        snap.foldedCount >= 3,
-        `expected folding to be reported at full scope, got ${snap.foldedCount}`
+        matches.length === 5,
+        `expected 5 contextual Remove buttons, found ${matches.length}:\n${snap.census}`
       );
     });
 
-    await test("compact view keeps the truncation hint for a 200+ char label", async () => {
-      const el = (snap.elements || []).find((e) => (e.href || "").includes("/product/999"));
-      assert(el, "long-label anchor not found in elements");
+    await test("VOM tree keeps distinct View Details links and long-label anchor", async () => {
+      const count = (snap.census.match(/@e\d+\s+link "View Details"/g) || []).length;
+      assert(count === 2, `expected 2 "View Details" link rows, found ${count}`);
+      const longEl = (snap.elements || []).find((e) => (e.href || "").includes("/product/999"));
+      assert(longEl, "long-label anchor not found in elements");
       assert(
-        el.textTruncatedBy > 0,
-        `expected textTruncatedBy > 0, got ${JSON.stringify(el.textTruncatedBy)}`
-      );
-      assert(
-        new RegExp(`\\[\\+${el.textTruncatedBy} chars: get text @${el.ref}\\]`).test(
-          snap.census
-        ),
-        "compact view missing the truncation-hint annotation for the long label"
+        /hot swappable switches/.test(longEl.text || ""),
+        `unexpected long-label text: ${JSON.stringify(longEl)}`
       );
     });
 
-    await test("compact view reports the open, non-blocking dialog", async () => {
+    await test("snapshot reports the open, non-blocking dialog in VOM and pageState", async () => {
       assert(
         snap.pageState && snap.pageState.hasActiveModal === false,
         `dialog wrongly reported as blocking: ${JSON.stringify(snap.pageState)}`
       );
       assert(
-        snap.pageState.openDialogs.some((d) => d.label === "Notifications"),
+        (snap.pageState.openDialogs || []).some((d) => d.label === "Notifications" && !d.blocking),
         `open dialog not reported: ${JSON.stringify(snap.pageState && snap.pageState.openDialogs)}`
       );
       assert(
-        /\[Open dialog: "Notifications"/.test(snap.census),
-        "compact view missing the open-dialog line"
+        /dialog "Notifications"/.test(snap.census),
+        `VOM missing dialog "Notifications":\n${snap.census}`
       );
       assert(
-        !/\[Active Modal\/Drawer:/.test(snap.census),
-        "non-blocking dialog was reported as a blocking Active Modal/Drawer"
+        /@layers 1 focus=L1/.test(snap.census),
+        `non-blocking dialog promoted to L1 modal layer:\n${snap.census}`
       );
     });
 
-    await test("sub-frame content is appended under an [iframe f<id> ...] header, not merged flat", async () => {
+    await test('sub-frame content sits nested under Iframe "childframe" with sequential @eN refs', async () => {
       assert(
-        /\[iframe f\d+ /.test(snap.census),
-        `missing [iframe f<id> ...] section header:\n${snap.census}`
+        /Iframe "childframe"/.test(snap.census),
+        `missing Iframe "childframe":\n${snap.census}`
       );
       assert(
-        /f\d+:e\d+/.test(snap.census),
-        "no frame-qualified ref (f<id>:eN) found in compact view"
+        /@e\d+\s+button "Iframe Action"/.test(snap.census),
+        `missing sequential @eN ref for Iframe Action:\n${snap.census}`
       );
     });
 
     await test("the merged census carries no server prose at all", async () => {
-      // There used to be a guidance footer, and the merge could emit one per frame. Results
-      // are data now: the census is page content and nothing else, so the invariant is
-      // stronger and simpler — no footer, from any frame.
       const strays = snap.census.match(/\[(Quick Actions|Next|More):/g) || [];
       assert(strays.length === 0, `the census must carry no advice, found: ${strays.join(", ")}`);
     });
 
-    // --- menuitemradio: present in both readers, with ARIA state, clickable by ref ---
+    // --- menuitemradio: present in VOM + elements, with ARIA state, clickable by ref ---
     let sortNewestRef, sortRelevanceRef;
     await test("snapshot elements carry menuitemradio role + aria-checked state", async () => {
       const items = (snap.elements || []).filter((e) => e.role === "menuitemradio");
@@ -233,15 +197,14 @@ async function main() {
       sortRelevanceRef = relevance.ref;
     });
 
-    await test("read_page tree also carries the menuitemradio items with state", async () => {
-      const r = await cmd("read_page", { mode: "interactive" });
+    await test("VOM tree carries the menuitemradio items with [checked] / [unchecked] markers", async () => {
       assert(
-        /menuitemradio "Newest"/.test(r.tree),
-        `read_page tree missing Newest menuitemradio:\n${r.tree}`
+        /menuitemradio "Newest" \[unchecked\]/.test(snap.census),
+        `VOM tree missing Newest menuitemradio:\n${snap.census}`
       );
       assert(
-        /menuitemradio "Relevance" \[checked\]/.test(r.tree),
-        `read_page tree missing checked Relevance menuitemradio:\n${r.tree}`
+        /menuitemradio "Relevance" \[checked\]/.test(snap.census),
+        `VOM tree missing checked Relevance menuitemradio:\n${snap.census}`
       );
     });
 
@@ -251,40 +214,42 @@ async function main() {
       const newest = after.elements.find((e) => e.ref === sortNewestRef);
       const relevance = after.elements.find((e) => e.ref === sortRelevanceRef);
       assert(
-        newest.state && newest.state.checked === "true",
+        newest && newest.state && newest.state.checked === "true",
         `click did not check Newest: ${JSON.stringify(newest)}`
       );
       assert(
-        relevance.state && relevance.state.checked === "false",
+        relevance && relevance.state && relevance.state.checked === "false",
         `click did not uncheck Relevance: ${JSON.stringify(relevance)}`
       );
     });
 
-    // --- read_page: portal-rendered panel behind a zero-size wrapper must NOT be pruned ---
-    await test("read_page returns the portal-rendered panel's contents (through the merge)", async () => {
-      const r = await cmd("read_page", { mode: "interactive" });
+    // --- portal-rendered panel behind a zero-size wrapper must NOT be pruned ---
+    await test("VOM tree retains the portal-rendered panel behind a zero-size wrapper", async () => {
       assert(
-        /heading "Portal Panel"/.test(r.tree),
-        `portal panel heading missing from read_page tree:\n${r.tree}`
+        /heading "Portal Panel"/.test(snap.census),
+        `portal panel heading missing from VOM tree:\n${snap.census}`
       );
-      const m = r.tree.match(/button "Portal Action" \[(f\d+:e\d+)\]/);
-      assert(m, `portal panel button missing / not frame-qualified in read_page tree:\n${r.tree}`);
+      const portalEl = (snap.elements || []).find((e) => (e.text || "").includes("Portal Action"));
+      assert(
+        portalEl && /^e\d+$/.test(portalEl.ref),
+        `portal panel button missing from snapshot elements: ${JSON.stringify(portalEl)}`
+      );
     });
 
-    // --- a frame-qualified ref round-trips through click AND get_text ---
+    // --- an iframe @eN ref round-trips through click AND get_property ---
     let iframeBtnRef;
-    await test("snapshot finds the same-origin iframe button with a frame-qualified ref", async () => {
+    await test("snapshot finds the same-origin iframe button with an @eN ref", async () => {
       const el = (snap.elements || []).find((e) => (e.text || "").includes("Iframe Action"));
       assert(
-        el && /^f\d+:/.test(el.ref),
-        `iframe button missing / not frame-qualified (ref=${el && el.ref})`
+        el && /^e\d+$/.test(el.ref) && el.inIframe === true,
+        `iframe button missing / wrong metadata (${JSON.stringify(el)})`
       );
       iframeBtnRef = el.ref;
     });
-    await test("frame-qualified ref clicks the right element in the right frame", async () => {
+    await test("iframe ref clicks the right element in the right frame", async () => {
       await cmd("click", { ref: iframeBtnRef });
     });
-    await test("frame-qualified ref reads text (get_text) from the right frame after the click", async () => {
+    await test("iframe ref reads text (get_text) from the right frame after the click", async () => {
       const r = await cmd("get_property", { property: "text", ref: iframeBtnRef });
       assert(
         /Iframe Clicked/.test(r.value || r.text || JSON.stringify(r)),
@@ -292,7 +257,7 @@ async function main() {
       );
     });
     // The MCP surface passes the same ref as 'target', so the frame has to be read from there too.
-    await test("frame-qualified ref passed as target reaches the right frame", async () => {
+    await test("iframe ref passed as target reaches the right frame", async () => {
       const r = await cmd("get_property", {
         property: "text",
         target: "@" + iframeBtnRef.replace(/^@/, ""),
@@ -301,7 +266,7 @@ async function main() {
         /Iframe Clicked/.test(r.value || JSON.stringify(r)),
         `target missed the iframe: ${JSON.stringify(r)}`
       );
-      const c = await cmd("click", { target: iframeBtnRef });
+      const c = await cmd("click", { target: "@" + iframeBtnRef.replace(/^@/, "") });
       assert(
         c.resolved && c.resolved.matchCount === 1,
         `click by target did not resolve in the frame: ${JSON.stringify(c)}`

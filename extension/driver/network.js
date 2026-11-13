@@ -1,6 +1,6 @@
 // Network Controller and Interceptor for browserctl.
-// Adheres strictly to docs/spec/00-architecture-overview.md and docs/spec/02-driver-and-cdp.md.
 
+import { noteSwallowed } from "../util.js";
 import { sendCdpCommand } from "./session.js";
 
 /**
@@ -112,7 +112,9 @@ export async function removeFetchRule(tabId, session, ruleId) {
   if (session.fetchRules.length === 0) {
     try {
       await sendCdpCommand(tabId, "Fetch.disable");
-    } catch {}
+    } catch (err) {
+      noteSwallowed("driver.network.removeFetchRule.Fetch.disable", err);
+    }
   }
   return { removed: ruleId, remaining: session.fetchRules.length };
 }
@@ -128,7 +130,9 @@ export async function clearFetchRules(tabId, session) {
   session.fetchRules = [];
   try {
     await sendCdpCommand(tabId, "Fetch.disable");
-  } catch {}
+  } catch (err) {
+    noteSwallowed("driver.network.clearFetchRules.Fetch.disable", err);
+  }
   return { cleared: true };
 }
 

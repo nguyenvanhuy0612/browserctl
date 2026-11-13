@@ -1,4 +1,4 @@
-# Tool surface as it actually is — generated 2026-11-05, browserctl 0.9.8
+# Tool surface as it actually is — generated 2026-11-12, browserctl 0.9.8
 
 Generated from the running server (`server._registeredTools`), not written by hand — the last
 hand-written version of this list claimed `all` on a tool that did not have it.
@@ -17,15 +17,15 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 | `extract` | *selector, fields, max, format | [READ] Extract structured rows from repeating containers without writing JavaScript. |
 | `get_property` | target, property, attr, format | [READ] Read an element's text, value, HTML, box, an attribute, or how many match. |
 | `click` | *target, doubleClick, button, waitFor, autoSettle, settleMs, format | [ACT] Click an element by target (@e token like '@e1', CSS selector, visible text, or index). |
-| `type` | *target, *text, method, submit, waitFor, autoSettle, settleMs, format | [ACT] Enter text into an input, textarea, contenteditable, or rich text editor. |
+| `type` | *target, *text, method, submit, clearBefore, waitFor, autoSettle, settleMs, format | [ACT] Enter text into an input, textarea, contenteditable, or rich text editor. |
 | `fill_form` | *fields, submitTarget, format | [ACT] Fill multiple form inputs, checkboxes, radios, and selects in a single batch. |
-| `scroll` | direction, amount, target, format | [ACT] Scroll the window or a specific scrollable container (modal, table, overflow div). |
+| `scroll` | mode, direction, amount, target, x, y, deltaX, deltaY, modifiers, format | [ACT] Scroll the window or a specific scrollable container (modal, table, overflow div), or dispatch hardware wheel events (mode: 'wheel') for Canvas/WebGL/maps. |
 | `file_upload` | target, files, file, format | [ACT] Attach local files to an <input type=file> and trigger input/change events. |
-| `wait_for` | for, selector, text, gone, timeoutMs, format | [WAIT] Wait for element, text, or page settle condition. |
+| `wait_for` | for, selector, text, gone, idleMs, maxInFlight, timeoutMs, format | [WAIT] Wait for element, text, settle, or network-idle condition. |
 | `take_screenshot` | fullPage, target, format, quality | [WAIT] Capture viewport or element image without activating the window. Default format: JPEG (or 'png' for lossless). |
-| `navigate` | url, reload, format | [NAV] Navigate session target tab to a URL, or reload it. |
-| `tabs` | *action, url, browser, query, activate, force | [NAV] List, open, select, close, release, or yield tabs across connected browsers. |
-| `make_request` | *url, method, headers, body, json, query, credentials, timeout_ms, pointer, requestId, format | [NET] Execute an HTTP request directly inside the target tab context with options to inherit session credentials or run custom isolated requests. Generates executable minimal curl command. |
+| `navigate` | url, reload, history, format | [NAV] Navigate session target tab to a URL, reload it, or step history. |
+| `tabs` | *action, id, url, browser, query, activate, force, title, color | [NAV] List, new, select, close, release, yield, inspect current, or group/ungroup tabs across connected browsers. |
+| `make_request` | url, method, headers, body, json, query, credentials, timeout_ms, pointer, requestId, format | [NET] Execute an HTTP request directly inside the target tab context inheriting session cookies, or replay a captured request by requestId. Generates executable minimal curl command. |
 | `monitor_requests` | action, url_pattern, method, status, resource_type, limit, since_id, include_body, requestId, pointer, timeout_ms, format | [NET] Inspect, filter, or wait for captured network requests. Supports filtering by url_pattern, method, status, type, inline response bodies, inspecting single request details, or waiting for request to finish. |
 | `evaluate` | *expression, format | [EXTEND] Evaluate a JavaScript expression in the page context and return serialized result. |
 | `action` | action, params, format | [EXTEND] Dispatch any protocol action by name without loading its profile: browser_action({action, params}). |
@@ -37,79 +37,55 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 |---|---|---|
 | `exec_system_cmd` | *command, cwd, env, timeoutMs | [SESSION] Execute a shell/system command on the host running the bridge server. Returns exitCode, stdout, stderr, all (combined output), failed, timedOut, and signal. |
 
-### network (11)
+### network (3)
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `get_network_requests` | urlContains, format | Return network requests captured since attach (method, url, status, type, size). Requires browser_cdp_attach. |
-| `get_response_body` | *requestId, pointer, format | Fetch the response body of a captured request by its requestId (from get_network_requests). Best-effort; bodies may be evicted. Supports optional pointer (RFC 6901 JSON pointer). Requires browser_cdp_attach. |
-| `get_network_request` | *requestId, part, pointer, format | Inspect full details of a single network request by requestId. Supports slicing by part ('response', 'request', 'headers', 'timing') and querying JSON Pointer. |
-| `network_replay` | *requestId, url, method, headers, body, pointer, format | Re-executes a previously captured network request inside the target page context with current session cookies and credentials. Returns response status, headers, and body or JSON slice. |
 | `mock_route` | *action, ruleId, match, effect, format | Add, remove, list, or clear declarative network interception rules via CDP Fetch domain. Allows mocking response body/status or blocking URLs. |
-| `export_har` | bodies, format | Export captured network traffic as a HAR 1.2 object (headers, status, timing). Headers are included verbatim (local tool, no redaction). Set bodies=true to also include response bodies (best-effort, slower). Requires browser_cdp_attach. |
-| `net_start` | format | Start capturing network requests for the target tab via webRequest. No debugger banner, but no response bodies. Clears the previous buffer. |
-| `net_stop` | format | Stop the webRequest capture for the target tab. |
-| `net_get` | urlContains, limit, format | Return network requests captured by the light webRequest capture (method, url, type, status, timing). Headers are included verbatim (local tool, no redaction). |
-| `net_clear` | format | Clear the light network capture buffer for the target tab. |
-| `wait_network_idle` | idleMs, timeoutMs, maxInFlight, format | Wait until the target tab has had no in-flight requests for idleMs (default 500), up to timeoutMs (default 10000). For modern SPAs with persistent WebSockets, telemetry, or long-polling (YouTube, Algolia, Twitter, Azure Portal), network-idle may time out waiting for 0 requests; use browser_wait_for({for:'settle'}) instead or set maxInFlight to tolerate background connections. |
+| `export_har` | bodies, format | Export captured network traffic as a HAR 1.2 object (headers, status, timing). Headers are included verbatim (local tool, no redaction). Set bodies=true to also include response bodies (best-effort, slower). Requires browser_cdp({action:'attach'}). |
+| `net_capture` | *action, urlContains, limit, format | Start, stop, read, or clear lightweight webRequest network capture on the target tab (no debugger banner, no response bodies; headers are included verbatim). |
 
-### cdp (8)
+### cdp (4)
 
 | Tool | Parameters | Description |
 |---|---|---|
 | `handle_dialog` | action, promptText, format | Answer an alert/confirm/prompt that is ALREADY open and suspending the page. Call it bare, or action: 'peek', to read one without answering. |
-| `cdp_attach` | format | Attach the debugger to the target tab to start capturing console logs and network traffic. Shows an 'is being debugged' bar in the browser. Call this before get_console_logs / get_network_requests / export_har. |
-| `cdp_detach` | format | Detach the debugger from the target tab and stop capturing. Removes the debugging bar. |
-| `cdp_send` | *method, params, format | POWER TOOL. Send any Chrome DevTools Protocol method to the target tab and get its result verbatim. Requires browser_cdp_attach first. Use it for capabilities that have no dedicated tool yet — Fetch.* (request interception / mocking / HTTP auth), DOM.setFileInputFiles (file upload), Page.handleJavaScriptDialog (alert/confirm), Emulation.* (device metrics, throttling, timezone, locale, geolocation, prefers-color-scheme), Storage.*, Tracing.*. Only domains in Chrome's chrome.debugger allowlist work; notably DOMStorage and IndexedDB are NOT available. Two footguns: enabling an interception domain without handling its events (e.g. Fetch.enable) pauses page traffic until you disable it, and Emulation.setDeviceMetricsOverride changes the screenshot scale that browser_coordinate_click depends on. |
-| `coordinate_click` | *x, *y, button, clickCount, format | Click at pixel coordinates measured against the most recent screenshot of the target tab (for canvas/WebGL/maps where DOM clicks fail). Coordinates are auto-mapped from screenshot pixels to the viewport, so pass the x/y you read off the screenshot. Pair with a screenshot first. Requires browser_cdp_attach. REQUIRES the target tab in the FOREGROUND: Chrome silently drops CDP synthetic mouse input for background tabs, so this errors rather than pretending to click. For background work use browser_click (ref, selector or text) instead. |
-| `coordinate_drag` | *fromX, *fromY, *toX, *toY, format | Press at (fromX,fromY), move to (toX,toY), release. Requires browser_cdp_attach. REQUIRES the target tab in the FOREGROUND: Chrome silently drops CDP synthetic mouse input for background tabs, so this errors rather than pretending to click. For background work use browser_click (ref, selector or text) instead. |
-| `insert_text` | *text, format | Type text into the focused element via CDP Input.insertText — robust for emoji/IME/multibyte that key-by-key typing can't represent. Click/focus the field first. Requires browser_cdp_attach. |
-| `audit` | format | Lightweight audit: performance metrics (DOM nodes, JS heap, layout/script timing) plus an accessibility count of interactive elements missing a name. Requires browser_cdp_attach. |
+| `cdp` | *action, method, params, format | Attach/detach the CDP debugger or send a raw CDP method on the target tab. |
+| `coordinate_click` | *x, *y, button, clickCount, format | Click at pixel coordinates measured against the most recent screenshot of the target tab (for canvas/WebGL/maps where DOM clicks fail). Coordinates are auto-mapped from screenshot pixels to the viewport, so pass the x/y you read off the screenshot. Pair with a screenshot first. Requires browser_cdp({action:'attach'}). REQUIRES the target tab in the FOREGROUND: Chrome silently drops CDP synthetic mouse input for background tabs, so this errors rather than pretending to click. For background work use browser_click (ref, selector or text) instead. |
+| `audit` | format | Lightweight audit: performance metrics (DOM nodes, JS heap, layout/script timing) plus an accessibility count of interactive elements missing a name. Requires browser_cdp({action:'attach'}). |
 
-### cookies (3)
+### cookies (1)
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `get_cookies` | urlContains, url, allDomains, limit, format | Return the cookies that apply to the TARGET TAB's current page (this is the default scope, and the answer to "what cookies did this page set"). Pass allDomains:true to read every cookie in the browser profile instead — that returns the user's whole session jar across all sites, so ask for it only when the task really needs it. Capped at 200 cookies; the response says when it truncated. Requires browser_cdp_attach. |
-| `set_cookie` | *name, *value, url, domain, path, secure, httpOnly, expires, format | Set a cookie (provide url or domain). Useful for test setup. Requires browser_cdp_attach. |
-| `delete_cookies` | *name, url, format | Delete cookies by name (optionally scoped to a url). Requires browser_cdp_attach. |
+| `cookies` | action, urlContains, url, allDomains, limit, name, value, domain, path, secure, httpOnly, expires, format | Read, set, or delete browser cookies (requires browser_cdp({action:'attach'})). |
 
-### storage (4)
+### storage (1)
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `storage_get` | area, key, format | Read localStorage or sessionStorage. With a key returns its value; without, returns all items. |
-| `storage_set` | area, *key, *value, format | Set a key in localStorage or sessionStorage (test fixtures, feature flags). |
-| `storage_remove` | area, *key, format | Remove a key from localStorage or sessionStorage. |
-| `storage_clear` | area, format | Clear all of localStorage or sessionStorage. |
+| `storage` | action, area, key, value, format | Read, write, remove, or clear localStorage or sessionStorage on the target tab. |
 
 ### console (1)
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `get_console_logs` | limit, clear, format | Return buffered console messages (log/warn/error/exceptions) captured since attach. Requires browser_cdp_attach. |
+| `get_console_logs` | limit, clear, format | Return buffered console messages (log/warn/error/exceptions) captured since attach. Requires browser_cdp({action:'attach'}). |
 
-### record (4)
-
-| Tool | Parameters | Description |
-|---|---|---|
-| `record_start` | format | Start recording user interactions (clicks, field changes) in the target tab. Replay later with browser_replay. |
-| `record_stop` | format | Stop recording interactions. |
-| `record_get` | (none) | Return the recorded interaction steps. |
-| `replay` | startUrl, steps, format | Replay recorded steps (or supplied steps) against the target tab. Optionally navigate to startUrl first. |
-
-### tabs (6)
+### record (1)
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `list_windows` | (none) | List all browser windows with their tabs. |
-| `focus_window` | *id | Bring the window with the given id to the foreground. Steals the user's OS focus — use only when the user explicitly asks to surface a window, not as part of background work. |
-| `group_tab` | id, title, color | Put a tab into a labeled, colored tab group so you (and the user) can see which tab the agent drives. Defaults to the target tab; pass id to group a specific tab. Does NOT activate the tab (no focus steal) and makes the grouped tab your target. |
-| `ungroup_tab` | id | Remove a tab from its tab group. Defaults to the target tab. |
+| `record` | *action, startUrl, steps, format | Record user interactions on the target tab or replay recorded/supplied steps. |
+
+### tabs (2)
+
+| Tool | Parameters | Description |
+|---|---|---|
+| `windows` | action, id, url, width, height | List or focus browser windows, or manage the dedicated agent window. |
 | `spoof_visibility` | restore, format | Make the target tab's page JS believe it's visible/focused (document.hidden=false, document.visibilityState='visible', fires a visibilitychange event), WITHOUT actually foregrounding the tab or stealing the user's focus. Use this when scrolling a backgrounded tab isn't loading new content — many sites (e.g. infinite-scroll feeds) deliberately pause lazy-loading via the Page Visibility API while a tab is hidden, as a resource-saving pattern. This is explicit and opt-in on purpose: call it once before scrolling a background tab that needs to lazy-load, not automatically on every scroll — visibility state is also used for other things a site might not want spoofed unconditionally (video autoplay, polling/websocket resume, analytics time-on-page). Attaches the CDP debugger if not already attached (shows the 'is being debugged' bar). KNOWN LIMITATION: this patches JS-visible state only — it does not lift Chrome's renderer-level throttling of a backgrounded tab (requestAnimationFrame doesn't fire, IntersectionObserver rides the same throttled pipeline). If a site's lazy-load is driven by rAF/IO rather than a visibilitychange or scroll listener, this may not help; there is no further automatic fallback (foregrounding the tab, even briefly, is a deliberate manual decision this tool will never make for you). The spoof lasts until the page navigates or reloads; call it again on the new page, or pass restore: true to undo it. |
-| `current_tab` | format | Report which tab commands currently act on (id, url, title). Your session's target is resolved on your first command and held across user tab switches. Call this to confirm you're on the right page before snapshotting or reading sensitive content. |
 
-### advanced (21)
+### advanced (14)
 
 | Tool | Parameters | Description |
 |---|---|---|
@@ -121,16 +97,9 @@ hand-written version of this list claimed `all` on a tool that did not have it.
 | `list_available_tools` | format | Every capability this server has, loaded or not, with its parameters. |
 | `unload_tools` | profile, tools, format | [EXTEND] Unload specific tool categories or reset active tools back to the lightweight 'core' profile. Frees system prompt tokens when specialized tools are no longer needed. |
 | `describe_element` | *target, format | Given a 'target' (ref '@e1', CSS selector, visible text, or snapshot index), return everything useful for debugging it: tag, full attribute dump, bounding rect, visibility verdict WITH the specific reason ('visible' \| 'display:none' \| 'visibility:hidden' \| 'zero-size rect' \| 'opacity:0' \| 'disabled'), and whether it matches the interactive selector. Pierces open Shadow DOM. |
-| `a11y_snapshot` | max, format | SECOND OPINION on the page, from Chrome itself. Returns Chrome's own accessibility tree — the role, name and state it computes for every control by the HTML-AAM spec — not browserctl's census. Each node carries a 'ref' where the census has the same control, so results are directly actionable. |
 | `read_pdf` | format | Call this when the target tab is showing a PDF (browser_get_content/browser_find/browser_snapshot/browser_click all fail on a PDF tab with 'no readable DOM' — Chrome's built-in PDF viewer isn't a real DOM, so those tools cannot see its text). Returns the tab's URL and an isPdf verdict; this extension does NOT extract PDF text itself (a hand-rolled parser silently mis-reads subset/CID-font PDFs — dangerous for numeric data like a rate sheet). Fetch the returned URL yourself and read it with your own PDF-reading capability instead of retrying the DOM-based tools. |
-| `element_screenshot` | *target, format | Capture just one element as an image, named by 'target' (ref '@e1', CSS selector, visible text, or snapshot index). Same capture as browser_take_screenshot with a target: a visible tab is cropped without the debugger, a background tab attaches it. |
-| `print_pdf` | format | Render the page to a PDF; returns base64 (save it to a .pdf file). Requires browser_cdp_attach. |
-| `go_back` | format | Navigate back in the target tab's history. |
-| `go_forward` | format | Navigate forward in the target tab's history. |
-| `reload_extension` | (none) | Reload the browser extension itself from disk (dev convenience; picks up edited extension code). The connection drops briefly and reconnects. |
+| `print_pdf` | format | Render the page to a PDF; returns base64 (save it to a .pdf file). Requires browser_cdp({action:'attach'}). |
 | `download` | target, url, filename, timeoutMs, format | Click an element to trigger a file download or download directly from a URL, waiting until the file finishes saving to disk. Returns filename, filePath, and fileSize. |
 | `request_help` | target, *reason, timeoutMs, waitForUrl, waitForSelector, format | Requests human assistance (e.g. solving CAPTCHA, 2FA, biometric auth). Focuses the browser, displays an in-page banner, and waits until the user clicks 'Done', or until a URL pattern or selector is matched. |
-| `agent_window` | action, url, width, height | Manages a dedicated agent window to isolate automation from the user's active windows. When open, newly created tabs automatically belong to the agent window. |
-| `wheel` | target, x, y, deltaX, deltaY, modifiers, format | Dispatch hardware mouse wheel events via CDP at coordinates or target element. Useful for Canvas, WebGL, maps, and virtualized scroll containers where DOM scrolling fails. |
 | `emulate` | device, viewport, colorScheme, geolocation, offline, clear, format | Emulate device metrics, mobile user-agent, touch events, dark/light color scheme, or geolocation. Use clear: true to restore defaults. |
 | `drag` | source, target, fromX, fromY, toX, toY, format | Drag an element from source to target, or between coordinates. Dispatches native CDP mouse and drag events. |

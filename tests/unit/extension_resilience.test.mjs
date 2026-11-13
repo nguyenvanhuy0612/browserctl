@@ -1,5 +1,4 @@
-// Unit & Acceptance tests for Extension Zero-Error & Boundary Containment Specification
-// Adheres strictly to docs/spec/01-protocol-and-errors.md §7 and docs/spec/05-test-and-acceptance-matrix.md §2.4
+// Unit & Acceptance tests for Extension Zero-Error & Boundary Containment
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -7,13 +6,13 @@ import vm from "node:vm";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { extractFunction, extractConst } from "./source-slice.mjs";
+import { extractFunction, extractConst, createSandbox } from "./source-slice.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BG_SRC = readFileSync(join(__dirname, "..", "..", "extension", "background.js"), "utf8");
 
 test("TC-EXT-01: isRestrictedUrl correctly classifies restricted schemes", () => {
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     URL,
     Set,
   });
@@ -30,7 +29,10 @@ test("TC-EXT-01: isRestrictedUrl correctly classifies restricted schemes", () =>
   // Restricted schemes
   assert.equal(isRestricted("chrome://extensions"), true);
   assert.equal(isRestricted("chrome://settings/"), true);
-  assert.equal(isRestricted("chrome-extension://agamchohpgmnoidpppbjpjghcagppmdo/popup.html"), true);
+  assert.equal(
+    isRestricted("chrome-extension://agamchohpgmnoidpppbjpjghcagppmdo/popup.html"),
+    true
+  );
   assert.equal(isRestricted("devtools://devtools/bundled/inspector.html"), true);
   assert.equal(isRestricted("edge://settings"), true);
   assert.equal(isRestricted("brave://settings"), true);
@@ -58,7 +60,7 @@ test("TC-EXT-02: safeSendTabMessage consumes lastError and prevents unhandled ru
   let callbackInvoked = false;
   let lastErrorChecked = false;
 
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     Promise,
     Error,
     chrome: {
@@ -102,7 +104,7 @@ test("TC-EXT-02: safeSendTabMessage consumes lastError and prevents unhandled ru
 });
 
 test("TC-EXT-02b: safeSendTabMessage resolves successfully on normal response", async () => {
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     Promise,
     Error,
     chrome: {
@@ -134,7 +136,7 @@ test("TC-EXT-03: wakeIfAsleep skips restricted URLs entirely", async () => {
   let pingSent = false;
   let scriptExecuted = false;
 
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     URL,
     Set,
     Error,
@@ -171,7 +173,7 @@ test("TC-EXT-03: wakeIfAsleep skips restricted URLs entirely", async () => {
 });
 
 test("TC-EXT-04: toContent rejects with POLICY_RESTRICTION on restricted URL", async () => {
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     URL,
     Set,
     Error,
@@ -212,7 +214,7 @@ test("TC-EXT-04: toContent rejects with POLICY_RESTRICTION on restricted URL", a
 });
 
 test("TC-EXT-05: handleCdpAction and handleNetAction reject with POLICY_RESTRICTION on restricted URL", async () => {
-  const ctx = vm.createContext({
+  const ctx = createSandbox({
     URL,
     Set,
     Error,
@@ -262,11 +264,14 @@ test("TC-EXT-05: handleCdpAction and handleNetAction reject with POLICY_RESTRICT
 });
 
 test("TC-EXT-06: isBridgeReachable checks daemon status and absorbs failures cleanly", async () => {
-  const BG_SRC_UPDATED = readFileSync(join(__dirname, "..", "..", "extension", "background.js"), "utf8");
+  const BG_SRC_UPDATED = readFileSync(
+    join(__dirname, "..", "..", "extension", "background.js"),
+    "utf8"
+  );
   const isBridgeReachableCode = extractFunction(BG_SRC_UPDATED, "isBridgeReachable");
 
   // Subtest 1: Bridge is up (fetch succeeds with 200)
-  const ctxSuccess = vm.createContext({
+  const ctxSuccess = createSandbox({
     URL,
     Promise,
     fetch: async (url) => {
@@ -282,7 +287,7 @@ test("TC-EXT-06: isBridgeReachable checks daemon status and absorbs failures cle
   assert.equal(up, true, "Returns true when bridge responds ok");
 
   // Subtest 2: Bridge is down (fetch throws TypeError: Failed to fetch)
-  const ctxFailure = vm.createContext({
+  const ctxFailure = createSandbox({
     URL,
     Promise,
     fetch: async () => {
@@ -297,7 +302,7 @@ test("TC-EXT-06: isBridgeReachable checks daemon status and absorbs failures cle
   assert.equal(down, false, "Returns false cleanly without throwing when bridge is offline");
 
   // Subtest 3: Fallback when fetch is not available in environment
-  const ctxNoFetch = vm.createContext({
+  const ctxNoFetch = createSandbox({
     URL,
     Promise,
   });

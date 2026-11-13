@@ -659,6 +659,11 @@ async function main() {
           console.log("Browsers:");
           for (const b of data.browsers) console.log(formatBrowserLine(b));
         }
+        if (data.degraded) {
+          console.log(
+            `Degraded: ${data.degraded.count} uncaught exception(s), last at ${data.degraded.lastAt}: ${data.degraded.lastError}`
+          );
+        }
         if (data.callLog) {
           const mb = (n) => (n / 1024 / 1024).toFixed(1);
           const size = data.callLogBytes != null ? `${mb(data.callLogBytes)}MB` : "?";

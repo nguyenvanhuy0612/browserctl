@@ -1,4 +1,4 @@
-import { truncate } from "./util.js";
+import { truncate, swallow, noteSwallowed } from "./util.js";
 import {
   sendCdpCommand,
   dispatchMouseEvent,
@@ -186,7 +186,9 @@ async function attach(tabId) {
     if (!/another debugger is already attached/i.test(err.message || "")) throw err;
     try {
       await detach(tabId);
-    } catch {}
+    } catch (err) {
+      noteSwallowed("cdp.attach.detach", err);
+    }
     try {
       await attachOnce(tabId);
     } catch {
@@ -203,7 +205,9 @@ async function attach(tabId) {
       deviceScaleFactor: 1,
       mobile: false,
     });
-  } catch {}
+  } catch (err) {
+    noteSwallowed("cdp.attach.Emulation.setDeviceMetricsOverride", err);
+  }
 }
 
 function detach(tabId) {
@@ -243,7 +247,9 @@ async function send(tabId, method, params = {}) {
       try {
         if (s && s.domainsEnabled) await enableDomains(tabId);
         else await sendRaw(tabId, "Page.enable");
-      } catch {}
+      } catch (err) {
+        noteSwallowed("cdp.send.Page.enable", err);
+      }
       return await sendRaw(tabId, method, params);
     }
     throw e;
@@ -252,7 +258,9 @@ async function send(tabId, method, params = {}) {
 
 const ATTACHED_KEY = "bctl_cdp_attached_tabs";
 function persistAttached() {
-  chrome.storage.session.set({ [ATTACHED_KEY]: [...sessions.keys()] }).catch(() => {});
+  chrome.storage.session
+    .set({ [ATTACHED_KEY]: [...sessions.keys()] })
+    .catch(swallow("cdp.persistAttached.chrome.storage.session.set"));
 }
 
 // Page events are on for every session, however it was attached: a JavaScript dialog is only
@@ -307,7 +315,7 @@ export async function ensureAttached(tabId) {
 // held the tab, the debugger is detached again afterwards, so the "being debugged" bar only
 // flashes.
 export async function wakeFrozenTab(tabId) {
-  if (opening.has(tabId)) await opening.get(tabId).catch(() => {});
+  if (opening.has(tabId)) await opening.get(tabId).catch(swallow("cdp.wakeFrozenTab.awaitOpening"));
   const held = sessions.has(tabId);
   if (!held) await attachShared(tabId);
   try {
@@ -316,7 +324,9 @@ export async function wakeFrozenTab(tabId) {
     if (!held && !sessions.has(tabId) && !opening.has(tabId)) {
       try {
         await detach(tabId);
-      } catch {}
+      } catch (err) {
+        noteSwallowed("cdp.wakeFrozenTab.detach", err);
+      }
     }
   }
 }
@@ -362,7 +372,9 @@ async function withFocusEmulation(tabId, fn) {
     if (st.captures === 1) {
       try {
         await send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
-      } catch {}
+      } catch (err) {
+        noteSwallowed("cdp.withFocusEmulation.Emulation.setFocusEmulationEnabled", err);
+      }
     }
     return await fn();
   } finally {
@@ -372,7 +384,9 @@ async function withFocusEmulation(tabId, fn) {
       if (focusEmulation.get(tabId) === st) focusEmulation.delete(tabId);
       try {
         await send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: false });
-      } catch {}
+      } catch (err) {
+        noteSwallowed("cdp.withFocusEmulation.Emulation.setFocusEmulationEnabled2", err);
+      }
     }
   }
 }
@@ -412,7 +426,9 @@ export async function captureViewport(
         const y = Math.round(vp.pageY || 0);
         clip = { x, y, width: w, height: h, scale };
       }
-    } catch {}
+    } catch (err) {
+      noteSwallowed("cdp.captureViewport.layoutMetrics", err);
+    }
     lastCapture[tabId] = { scale: (clip ? clip.scale : 1) * dpr };
     const shoot = (q) =>
       send(tabId, "Page.captureScreenshot", {
@@ -584,7 +600,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
             };
             d.open = null;
           })
-          .catch(() => {});
+          .catch(swallow("cdp.onEvent.dialogAutoAnswer"));
       } else {
         for (const waiter of dialogWaiters.get(source.tabId) || []) waiter(open);
       }
@@ -676,7 +692,9 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
         return urlMatchesPattern(req.url, r.match?.url);
       });
       if (!matched) {
-        sendRaw(source.tabId, "Fetch.continueRequest", { requestId }).catch(() => {});
+        sendRaw(source.tabId, "Fetch.continueRequest", { requestId }).catch(
+          swallow("cdp.onEvent.fetchContinueUnmatched")
+        );
         break;
       }
       const eff = matched.effect || {};
@@ -684,7 +702,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
         sendRaw(source.tabId, "Fetch.failRequest", {
           requestId,
           errorReason: "BlockedByClient",
-        }).catch(() => {});
+        }).catch(swallow("cdp.onEvent.fetchFail"));
         break;
       }
       if (eff.type === "mock") {
@@ -710,10 +728,12 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
           responseCode,
           responseHeaders,
           body: bodyBase64,
-        }).catch(() => {});
+        }).catch(swallow("cdp.onEvent.fetchFulfill"));
         break;
       }
-      sendRaw(source.tabId, "Fetch.continueRequest", { requestId }).catch(() => {});
+      sendRaw(source.tabId, "Fetch.continueRequest", { requestId }).catch(
+        swallow("cdp.onEvent.fetchContinueFallback")
+      );
       break;
     }
   }
@@ -786,7 +806,9 @@ async function runtimeEval(tabId, expression) {
   } finally {
     try {
       await send(tabId, "Runtime.releaseObject", { objectId: r.objectId });
-    } catch {}
+    } catch (err) {
+      noteSwallowed("cdp.runtimeEval.Runtime.releaseObject", err);
+    }
   }
 }
 
@@ -918,7 +940,9 @@ async function handleMonitorRequests(tabId, params = {}) {
       const res = await send(tabId, "Network.getResponseBody", { requestId: params.requestId });
       bodyText = res.body;
       base64Encoded = res.base64Encoded;
-    } catch {}
+    } catch (err) {
+      noteSwallowed("cdp.handleMonitorRequests.Network.getResponseBody", err);
+    }
 
     let parsedJson = null;
     let pointerValue = undefined;
@@ -928,7 +952,9 @@ async function handleMonitorRequests(tabId, params = {}) {
         if (params.pointer && parsedJson) {
           pointerValue = resolveJsonPointer(parsedJson, params.pointer);
         }
-      } catch {}
+      } catch {
+        // A body that is not JSON, or a pointer that does not resolve, leaves the value unset.
+      }
     }
 
     const curl = generateCurlCommand({
@@ -1039,8 +1065,12 @@ async function handleMonitorRequests(tabId, params = {}) {
           item.base64Encoded = res.base64Encoded;
           try {
             item.json = JSON.parse(res.body);
-          } catch {}
-        } catch {}
+          } catch {
+            // A body that is not JSON leaves item.json unset.
+          }
+        } catch (err) {
+          noteSwallowed("cdp.handleMonitorRequests.includeBody", err);
+        }
       })
     );
   }
@@ -1068,7 +1098,9 @@ export async function handleCdp(action, params, tabId) {
       if (sessions.has(tabId)) {
         try {
           await detach(tabId);
-        } catch {}
+        } catch (err) {
+          noteSwallowed("cdp.cdp_detach.detach", err);
+        }
         sessions.delete(tabId);
         focusEmulation.delete(tabId);
         persistAttached();
@@ -1110,7 +1142,9 @@ export async function handleCdp(action, params, tabId) {
             try {
               const res = await send(tabId, "Network.getResponseBody", { requestId: e.requestId });
               bodies.set(e.requestId, { text: res.body, base64Encoded: res.base64Encoded });
-            } catch {}
+            } catch (err) {
+              noteSwallowed("cdp.export_har.Network.getResponseBody", err);
+            }
           })
       );
       return { ok: true, result: buildHar(entries, bodies) };
@@ -1189,7 +1223,10 @@ export async function handleCdp(action, params, tabId) {
               },
             };
           }
-        } catch {}
+        } catch {
+          // A missing body, a body that is not JSON, or an unresolved pointer falls through to
+          // the whole-request result below.
+        }
       }
       if (part === "headers") {
         return {
@@ -1275,7 +1312,9 @@ export async function handleCdp(action, params, tabId) {
         const devVp = m.visualViewport || {};
         const w = Math.round(vp.clientWidth || 0);
         if (w && devVp.clientWidth) dpr = Math.max(1, devVp.clientWidth / w);
-      } catch {}
+      } catch (err) {
+        noteSwallowed("cdp.capture_screenshot.Page.getLayoutMetrics", err);
+      }
       lastCapture[tabId] = { scale: dpr };
       const shoot = (q) =>
         send(tabId, "Page.captureScreenshot", {
@@ -1302,7 +1341,9 @@ export async function handleCdp(action, params, tabId) {
       if (params.restore) {
         try {
           await send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: false });
-        } catch {}
+        } catch (err) {
+          noteSwallowed("cdp.spoof_visibility.Emulation.setFocusEmulationEnabled", err);
+        }
         noteCallerFocusEmulation(tabId, "Emulation.setFocusEmulationEnabled", { enabled: false });
         const undo = `(() => {
           const saved = window.__bctlVisibility;
@@ -1321,7 +1362,9 @@ export async function handleCdp(action, params, tabId) {
       }
       try {
         await send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
-      } catch {}
+      } catch (err) {
+        noteSwallowed("cdp.spoof_visibility.Emulation.setFocusEmulationEnabled2", err);
+      }
       noteCallerFocusEmulation(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
       const patch = `(() => {
         const patched = { visibilityState: false, hidden: false };
@@ -1560,7 +1603,9 @@ export async function handleCdp(action, params, tabId) {
       const max = params.max ?? 200;
       try {
         await send(tabId, "Accessibility.enable");
-      } catch {}
+      } catch (err) {
+        noteSwallowed("cdp.a11y_snapshot.Accessibility.enable", err);
+      }
       const { nodes: axNodes } = await send(tabId, "Accessibility.getFullAXTree");
       const nodes = collectAxNodes(axNodes, max);
       return { ok: true, result: { count: nodes.length, nodes } };
@@ -1596,7 +1641,9 @@ export async function handleCdp(action, params, tabId) {
       try {
         try {
           await send(tabId, "DOM.enable");
-        } catch {}
+        } catch (err) {
+          noteSwallowed("cdp.upload_set.DOM.enable", err);
+        }
         await send(tabId, "DOM.setFileInputFiles", { objectId, files });
         const readBack = await send(tabId, "Runtime.callFunctionOn", {
           objectId,
@@ -1615,10 +1662,14 @@ export async function handleCdp(action, params, tabId) {
             objectId,
             functionDeclaration: "function(){this.removeAttribute('data-bctl-upload')}",
           });
-        } catch {}
+        } catch (err) {
+          noteSwallowed("cdp.upload_set.Runtime.callFunctionOn", err);
+        }
         try {
           await send(tabId, "Runtime.releaseObject", { objectId });
-        } catch {}
+        } catch (err) {
+          noteSwallowed("cdp.upload_set.Runtime.releaseObject", err);
+        }
       }
     }
 
@@ -1634,7 +1685,9 @@ export async function handleCdp(action, params, tabId) {
         const lvp = m.cssLayoutViewport || m.layoutViewport || {};
         scrollX = lvp.pageX || 0;
         scrollY = lvp.pageY || 0;
-      } catch {}
+      } catch (err) {
+        noteSwallowed("cdp.element_screenshot.Page.getLayoutMetrics", err);
+      }
       const capture = () =>
         send(tabId, "Page.captureScreenshot", {
           format,
@@ -1666,7 +1719,9 @@ export async function handleCdp(action, params, tabId) {
         if (needAttach && !sessions.has(tabId) && !opening.has(tabId)) {
           try {
             await detach(tabId);
-          } catch {}
+          } catch (err) {
+            noteSwallowed("cdp.print_pdf.detach", err);
+          }
         }
       }
     }
@@ -1675,7 +1730,9 @@ export async function handleCdp(action, params, tabId) {
       requireSession(tabId);
       try {
         await send(tabId, "Performance.enable");
-      } catch {}
+      } catch (err) {
+        noteSwallowed("cdp.audit.Performance.enable", err);
+      }
       const { metrics } = await send(tabId, "Performance.getMetrics");
       const metricMap = {};
       for (const m of metrics || []) metricMap[m.name] = m.value;
@@ -1698,7 +1755,9 @@ export async function handleCdp(action, params, tabId) {
       try {
         try {
           await send(tabId, "Accessibility.enable");
-        } catch {}
+        } catch (err) {
+          noteSwallowed("cdp.audit.Accessibility.enable", err);
+        }
         const { nodes: axNodes } = await send(tabId, "Accessibility.getFullAXTree");
         const interactiveRoles = new Set([
           "button",
@@ -1720,7 +1779,9 @@ export async function handleCdp(action, params, tabId) {
           const name = (node.name && node.name.value) || "";
           if (interactiveRoles.has(role) && !name) interactiveMissingName++;
         }
-      } catch {}
+      } catch (err) {
+        noteSwallowed("cdp.audit.axTree", err);
+      }
 
       return {
         ok: true,
@@ -1735,7 +1796,9 @@ export async function handleCdp(action, params, tabId) {
       requireSession(tabId);
       try {
         await send(tabId, "Network.enable");
-      } catch {}
+      } catch (err) {
+        noteSwallowed("cdp.get_cookies.Network.enable", err);
+      }
       let raw;
       let scope;
       if (params.allDomains) {
@@ -1786,7 +1849,9 @@ export async function handleCdp(action, params, tabId) {
       requireSession(tabId);
       try {
         await send(tabId, "Network.enable");
-      } catch {}
+      } catch (err) {
+        noteSwallowed("cdp.set_cookie.Network.enable", err);
+      }
       if (!params.url && !params.domain) {
         throw new Error("set_cookie requires 'url' or 'domain'");
       }
@@ -1805,7 +1870,9 @@ export async function handleCdp(action, params, tabId) {
       requireSession(tabId);
       try {
         await send(tabId, "Network.enable");
-      } catch {}
+      } catch (err) {
+        noteSwallowed("cdp.delete_cookies.Network.enable", err);
+      }
       await send(tabId, "Network.deleteCookies", { name: params.name, url: params.url });
       return { ok: true, result: { deleted: params.name } };
     }
@@ -1839,7 +1906,9 @@ export async function handleCdp(action, params, tabId) {
         await send(tabId, "Emulation.setEmulatedMedia", { media: "" });
         try {
           await send(tabId, "Emulation.clearGeolocationOverride");
-        } catch {}
+        } catch (err) {
+          noteSwallowed("cdp.emulate.Emulation.clearGeolocationOverride", err);
+        }
         await send(tabId, "Network.emulateNetworkConditions", {
           offline: false,
           latency: 0,
@@ -1941,7 +2010,9 @@ export async function handleCdp(action, params, tabId) {
       if (s.fetchRules.length === 0) {
         try {
           await send(tabId, "Fetch.disable");
-        } catch {}
+        } catch (err) {
+          noteSwallowed("cdp.network_rule_remove.Fetch.disable", err);
+        }
       }
       return { ok: true, result: { removed: params.ruleId, remaining: s.fetchRules.length } };
     }
@@ -1956,7 +2027,9 @@ export async function handleCdp(action, params, tabId) {
       s.fetchRules = [];
       try {
         await send(tabId, "Fetch.disable");
-      } catch {}
+      } catch (err) {
+        noteSwallowed("cdp.network_rule_clear.Fetch.disable", err);
+      }
       return { ok: true, result: { cleared: true } };
     }
 

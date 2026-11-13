@@ -123,7 +123,7 @@ async function main() {
   };
   const censusOf = async () => {
     const { census } = await cmd("snapshot", { compact: true });
-    const lines = census.split("\n").filter((l) => /\[@/.test(l));
+    const lines = census.split("\n").filter((l) => /^\s*@e\d+\b/.test(l));
     return { census, lines, has: (re) => lines.some((l) => re.test(l)) };
   };
 
@@ -486,20 +486,26 @@ async function main() {
     await test("census: names, state, and each control listed once", () =>
       withPage("/search-form", async () => {
         const { census, lines, has } = await censusOf();
-        const refs = lines.map((l) => l.match(/\[@([^\]]+)\]/)[1]);
-        assert(refs.length === new Set(refs).size, `a ref is listed twice:\n${census}`);
-        assert(has(/<a> "Home logo"/), `icon link not named by aria-label:\n${census}`);
+        const refs = lines.map((l) => l.match(/^\s*@(e\d+)\b/)[1]);
+        assert(
+          refs.length > 0 && refs.length === new Set(refs).size,
+          `a ref is listed twice:\n${census}`
+        );
+        assert(has(/link "Home logo"/), `icon link not named by aria-label:\n${census}`);
         assert(has(/"Work email"/), `field not named by its label:\n${census}`);
-        assert(has(/<select> "Fruit"/), `select named with its options:\n${census}`);
+        assert(has(/combobox "Fruit/), `select named with its options:\n${census}`);
         await cmd("select_option", { target: "Fruit", option: "Pear" });
         const fruit = await cmd("get_property", { target: "css=#fruit", property: "value" });
         assert(fruit.value === "Pear", `the census name did not reach the select: ${fruit.value}`);
-        assert(has(/\[unchecked\] "I agree"/), `an unticked box must say so:\n${census}`);
+        assert(has(/checkbox "I agree" \[unchecked\]/), `an unticked box must say so:\n${census}`);
         assert(!/value: "on"/.test(census), `a checkbox's default value is noise:\n${census}`);
-        assert(has(/\[disabled\] "Pay now"/), `a disabled button must say so:\n${census}`);
+        assert(has(/button "Pay now" \[disabled\]/), `a disabled button must say so:\n${census}`);
         await cmd("check", { target: "css=#agree" });
         const after = await censusOf();
-        assert(after.has(/\[checked\] "I agree"/), `a ticked box must say so:\n${after.census}`);
+        assert(
+          after.has(/checkbox "I agree" \[checked\]/),
+          `a ticked box must say so:\n${after.census}`
+        );
       }));
 
     await test("find ranks the exact name first; press_key carries code and keyCode", () =>
@@ -513,7 +519,7 @@ async function main() {
       }));
 
     // The suite's tab is in the background, which is where a page would miss the scroll event.
-    await test("background tab: scroll reaches the page's listener, hover reaches pointerenter, folded links resolve", () =>
+    await test("background tab: scroll reaches the page's listener, hover reaches pointerenter, deep links resolve", () =>
       withPage("/tall", async () => {
         await cmd("scroll", { direction: "down", amount: 800 });
         const heard = await cmd("eval_js", { expression: "window.__scrolls" });
@@ -522,13 +528,13 @@ async function main() {
         const open = await cmd("get_property", { target: "css=#opened", property: "text" });
         assert(open.value === "open", `pointerenter did not fire: ${open.value}`);
         const snap = await cmd("snapshot", { compact: true, scope: "all" });
-        const last = (snap.folded || []).find((f) => f.text === "Story 39");
+        const last = (snap.elements || []).find((f) => f.text === "Story 39");
         assert(
-          last && last.href === "/story/39",
-          `a folded link is missing: ${JSON.stringify(snap.folded)}`
+          last && last.href && last.href.endsWith("/story/39"),
+          `deep link Story 39 is missing: ${JSON.stringify(snap.elements?.slice(-5))}`
         );
         const got = await cmd("get_property", { target: "@" + last.ref, property: "text" });
-        assert(got.value === "Story 39", `the folded ref resolved to ${got.value}`);
+        assert(got.value === "Story 39", `the deep link ref resolved to ${got.value}`);
       }));
 
     await test("navigate: a page that cannot load is an error, and the tab still works", async () => {

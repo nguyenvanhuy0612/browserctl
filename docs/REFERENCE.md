@@ -1,6 +1,6 @@
 # browserctl Core Tool Reference — v0.9.8
 
-browserctl provides 20 core tools (79 tools across all profiles) for web automation and agent inspection.
+browserctl provides core tools and on-demand profiles for web automation and agent inspection.
 
 ## Targeting an element
 
@@ -123,19 +123,23 @@ reconnects), `UNKNOWN_BROWSER` (a
 
 - url: Destination URL to navigate to.
 - reload: Boolean flag to reload the current page.
+- history: History direction ('back', 'forward').
 - format: Output format ('json', 'pretty', 'smart', 'raw').
 
 ### browser_tabs
 
-- action: Tab operation ('list', 'new', 'select', 'close').
+- action: Tab operation ('list', 'new', 'select', 'close', 'release', 'yield', 'current', 'group', 'ungroup').
 - tabId: Which tab — for 'select' (or give `browser`) and required for 'close'.
-- url: URL for new tab when action is 'new'.
+- id: Tab id when grouping or ungrouping (defaults to target tab).
+- url: URL for new tab when opening a tab.
 - browser: Which browser, by alias, label, instanceId or type — for 'list', 'select' and 'new'.
   'new' without `browser` opens in the session's current target browser if one is set, else in
   the sole connected browser.
 - query: For 'list', keep only tabs whose title or URL contains this text (case-insensitive).
 - activate: For 'select' and 'new', make the tab the visible tab of its window (default false).
 - force: For 'select', take a tab another session holds and is not using (after `TAKE_CONFIRM`).
+- title: Group label when grouping (default bctl).
+- color: Group color ('grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange').
 
 In a `list` result, a tab the browser has frozen in the background carries `frozen: true`, and one it
 has discarded to save memory carries `discarded: true`. A command on a frozen tab wakes it first. A
@@ -146,12 +150,12 @@ because a reload loses any unsaved input on that page.
 
 ### browser_snapshot
 
-- scope: 'viewport' (default) or 'all' elements in DOM.
+- scope: 'viewport' (default: elements intersecting the viewport; offscreen interactive controls are counted in `offscreenCount`) or 'all' elements in DOM.
 - target: Scope snapshot to a specific element (@e token or CSS selector).
 - maxDepth: Max DOM tree depth (default: 25).
 - maxText: Maximum characters for text prose (default: 150; pass 0 or -1 for unlimited full text).
-- limit: Maximum number of elements to include in census.
-- cursor: Offset cursor for paged snapshot traversal.
+- limit: Maximum number of interactive refs (@e) to include per page of census output.
+- cursor: Starting interactive ref offset for paged snapshot traversal (returns `next` and `window` when more refs remain).
 
 The result's `folded` lists folded controls one per line as `@e "text" -> href`.
 `hiddenContent` entries have `kind` `load-more`, `collapsed` or `scrollable-region`. On a page with
@@ -182,7 +186,7 @@ iframes, `census` already includes every frame.
 ### browser_get_property
 
 - target: Target element (@e, CSS selector, visible text, or index).
-- property: Property name to read ('text', 'value', 'html', 'box', 'attr', 'count', 'checked'). 'checked' is true or false for a checkbox or radio and an error for any other element; for a custom control, read its aria-checked attribute with 'attr'.
+- property: Property name to read ('text', 'value', 'html', 'box', 'attr', 'count', 'checked'). 'checked' is true or false for a checkbox or radio and an error for any other element; for a custom control, read its aria-checked attribute with 'attr'. 'html' strips internal `data-bctl-*` tracking attributes.
 - attr: HTML attribute name when property is 'attr'.
 - format: Output format.
 
@@ -205,7 +209,7 @@ no parameter to any tool.
 
 Chrome allows one debugger per tab, so answering is refused while DevTools is open on that tab
 (or another automation tool holds it); the error says so and names the fix. The same applies to
-`browser_file_upload`, `browser_cdp_send` and anything else needing the debugger.
+`browser_file_upload`, `browser_cdp` and anything else needing the debugger.
 
 ARIA modals (`role="dialog"`, `<dialog>`) are ordinary DOM and none of this applies: they appear
 in `browser_snapshot` under `pageState.openDialogs` and close with a `browser_click`.
@@ -230,7 +234,8 @@ lists the controls nearest to the text.
 
 - target: Target element.
 - text: Text to type into target.
-- method: Typing method ('type', 'set', 'paste').
+- method: Typing method ('type', 'set', 'paste', 'ime').
+- clearBefore: Clear existing value before entering text (default: true; pass false to append).
 - submit: Press enter to submit after typing.
 - waitFor: CSS selector to wait for after typing.
 - autoSettle: Automatically wait for DOM to settle.
@@ -267,9 +272,15 @@ the value.
 
 ### browser_scroll
 
-- direction: Scroll direction ('down', 'up', 'left', 'right').
-- amount: Pixels to scroll.
+- mode: Scroll mode ('dom', 'wheel').
+- direction: Scroll direction ('down', 'up', 'left', 'right') in dom mode.
+- amount: Pixels to scroll in dom mode.
 - target: Target element or scrollable container.
+- x: X coordinate in pixels in wheel mode.
+- y: Y coordinate in pixels in wheel mode.
+- deltaX: Horizontal wheel delta in wheel mode.
+- deltaY: Vertical wheel delta in wheel mode (positive = scroll down).
+- modifiers: Modifier keys in wheel mode (e.g. Shift, Alt).
 - format: Output format.
 
 ### browser_file_upload
@@ -288,10 +299,12 @@ the value.
 
 ### browser_wait_for
 
-- for: What to wait for ('settle', 'selector', 'text'). Network idle is browser_wait_network_idle, in the network profile.
+- for: What to wait for ('settle', 'selector', 'text', 'network-idle').
 - selector: CSS selector to wait for.
 - text: Text content to wait for.
 - gone: Boolean flag to wait for target to disappear.
+- idleMs: Quiet period in ms with <= maxInFlight requests for 'network-idle' (default 500).
+- maxInFlight: Tolerate up to N background requests for 'network-idle' (default 0).
 - timeoutMs: Maximum milliseconds to wait.
 - format: Output format.
 
@@ -365,6 +378,9 @@ still paints nothing fails the capture after 5 s with a hint to select the tab w
 
 - format: Output format.
 
+Returns `degraded: {count, lastAt, lastError}` only when the bridge has survived an uncaught
+exception; the field is absent otherwise, and `hint` says so.
+
 ### browser_start
 
 - (none)
@@ -372,3 +388,84 @@ still paints nothing fails the capture after 5 s with a hint to select the tab w
 ### browser_stop
 
 - (none)
+
+## Results and errors
+
+Every tool returns a structured JSON envelope. Mutating actions verify their outcome before returning, and read actions return structured page state.
+
+### Result Envelopes
+
+#### Action Success Envelope
+
+Returned by mutating actions (`browser_click`, `browser_type`, `browser_fill_form`, `browser_select_option`):
+
+```json
+{
+  "ok": true,
+  "action": "click",
+  "resolved": {
+    "by": "text-exact",
+    "ref": "@e12",
+    "tag": "button",
+    "label": "Sign in",
+    "matchCount": 1
+  },
+  "effect": {
+    "domChanges": 3,
+    "urlChanged": false,
+    "controlState": { "value": "", "checked": false }
+  }
+}
+```
+
+#### Snapshot Envelope
+
+Returned by `browser_snapshot`:
+
+```json
+{
+  "ok": true,
+  "pageState": {
+    "url": "https://example.com",
+    "title": "Example Domain",
+    "openDialogs": [],
+    "settled": true
+  },
+  "census": "  [@e1] <a href=\"https://www.iana.org/domains/example\"> \"More information...\"",
+  "vom": "- document\n  - main\n    - heading \"Example Domain\" [level=1]\n    - link \"More information...\" [@e1]"
+}
+```
+
+#### Error Envelope
+
+When a tool call fails, MCP surfaces return a formatted error text block with error code, diagnostics, and suggested remedy:
+
+```
+Error [STALE_REF]: element @e12 is stale because the DOM mutated.
+Suggested Remedy: Call browser_snapshot to get updated element references.
+```
+
+### Error Taxonomy and Recovery
+
+| Error Code             | Meaning                                                          | Agent Action                                                                | Retryable            |
+| :--------------------- | :--------------------------------------------------------------- | :-------------------------------------------------------------------------- | :------------------- |
+| `STALE_REF`            | Target element was detached or re-rendered                       | Take a fresh `browser_snapshot` and use the updated ref                     | Safe (with new ref)  |
+| `AMBIGUOUS_TARGET`     | Multiple visible elements match the target                       | Narrow target with exact ref (`@e1`), prefix (`css=`, `text=`), or selector | Safe                 |
+| `ELEMENT_DISABLED`     | Matched control has `disabled` or `aria-disabled="true"`         | Verify form prerequisites or wait for dynamic activation                    | Unsafe               |
+| `ELEMENT_NOT_VISIBLE`  | Control has 0x0 bounds, `display: none`, or `visibility: hidden` | Use `browser_scroll` or verify control is uncollapsed                       | Safe                 |
+| `ELEMENT_NOT_FOUND`    | No matching element was found                                    | Check spelling, CSS selector syntax, or take a fresh snapshot               | Unsafe               |
+| `ELEMENT_NOT_EDITABLE` | Attempted text entry on a non-input element                      | Target the actual `<input>`, `<textarea>`, or `[contenteditable]`           | Unsafe               |
+| `BROWSER_BUSY`         | Another session or process is acting in this browser             | Wait for the lease settle window or use another browser profile             | Safe (after wait)    |
+| `BROWSER_DISCONNECTED` | Browser instance is not connected to bridge                      | Ensure Chrome and extension are active; check `browser_status`              | Unsafe               |
+| `TARGET_CLOSED`        | The targeted tab has been closed                                 | Open a new tab (`browser_tabs({ action: "new" })`) or select an open tab    | Unsafe               |
+| `TARGET_TAKEN`         | Active tab was taken by another session                          | Select another tab or open a new tab                                        | Unsafe               |
+| `NEEDS_TARGET`         | Multiple browsers/tabs are open without an active selection      | Call `browser_tabs({ action: "select", tabId })` to pick a target           | Safe                 |
+| `TAB_OWNED`            | Tab is leased by another active session                          | Select a different tab or pass `force: true` if authorized                  | Unsafe               |
+| `TAB_NOT_FOUND`        | Tab ID does not exist in any connected browser                   | Check open tabs with `browser_tabs({ action: "list" })`                     | Unsafe               |
+| `DIALOG_BLOCKED`       | Native modal dialog (`alert`, `confirm`, `prompt`) blocks input  | Inspect or dismiss with `browser_handle_dialog` before continuing           | Safe (after dismiss) |
+| `NO_DIALOG`            | Attempted to handle a dialog when none was open                  | Continue ordinary interaction                                               | Unsafe               |
+| `CERT_INTERSTITIAL`    | Security warning page displayed                                  | Inform user or select headed mode                                           | Unsafe               |
+| `COMMAND_TIMEOUT_MS`   | Bridge timed out waiting for extension response                  | Check if browser is unresponsive; inspect page state                        | Uncertain            |
+| `TIMEOUT`              | Action or wait condition timed out                               | Increase `timeout_ms` or inspect page state                                 | Safe                 |
+| `INVALID_PARAMS`       | Parameter validation failed                                      | Check required tool parameters against schema                               | Safe                 |
+| `INTERNAL_ERROR`       | Unexpected internal daemon or extension error                    | Check bridge logs (`npm test`, `browser_status`)                            | Safe                 |

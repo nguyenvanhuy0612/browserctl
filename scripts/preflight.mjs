@@ -14,9 +14,9 @@
 // Exit code is non-zero if any gate fails. Every failure prints what to do about it.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, normalize } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -63,9 +63,12 @@ const SURFACE_SOURCE = [
 const SURFACE_DOCS = [
   "README.md",
   "CONTRIBUTING.md",
+  "AGENTS.md",
+  "CONCEPTS.md",
   "docs/REFERENCE.md",
   "docs/INSTALL.md",
   "docs/TOOLS.md",
+  "skills/browserctl/SKILL.md",
   ...(existsSync(join(ROOT, SPEC)) ? [SPEC] : []),
 ];
 const GUARDED_PATHS = [...SURFACE_SOURCE, ...SURFACE_DOCS];
@@ -77,6 +80,72 @@ gate("every guarded path still exists", () => {
       `these gates scan a file that is no longer there, so their coverage silently shrank: ${gone.join(", ")} — delete the entry deliberately, or restore the file`
     );
   return `${GUARDED_PATHS.length} paths`;
+});
+
+gate("every file under extension/ is reachable", () => {
+  const seen = new Set();
+  function walk(f) {
+    const norm = normalize(f);
+    if (seen.has(norm)) return;
+    let full = join(ROOT, norm);
+    if (!existsSync(full) && existsSync(full + ".js")) {
+      full = full + ".js";
+    }
+    if (!existsSync(full)) return;
+    seen.add(norm);
+    const content = read(norm);
+    for (const m of content.matchAll(/(?:from|import)\s*\(?\s*["'](\.[^"']+)["']/g)) {
+      walk(join(dirname(norm), m[1]));
+    }
+  }
+  for (const e of ["background", "content", "popup", "options"]) {
+    walk(`extension/${e}.js`);
+  }
+  const all = [];
+  function discover(dir) {
+    for (const n of readdirSync(join(ROOT, dir))) {
+      const q = join(dir, n);
+      if (statSync(join(ROOT, q)).isDirectory()) discover(q);
+      else if (q.endsWith(".js")) all.push(normalize(q));
+    }
+  }
+  discover("extension");
+  const unreachable = all.filter((f) => !seen.has(f));
+  if (unreachable.length) {
+    throw new Error(
+      `dead code in extension: these files exist but are not imported from any entry point: ${unreachable.join(", ")}`
+    );
+  }
+  return `${seen.size} reachable files`;
+});
+
+gate("every path a shipped doc names exists", () => {
+  const docFiles = ["README.md", "CONTRIBUTING.md", "AGENTS.md", "CLAUDE.md"]
+    .map((f) => join(ROOT, f))
+    .filter(existsSync);
+  const docsDir = join(ROOT, "docs");
+  if (existsSync(docsDir)) {
+    for (const n of readdirSync(docsDir)) {
+      if (n.endsWith(".md")) docFiles.push(join(docsDir, n));
+    }
+  }
+  const missing = [];
+  for (const abs of docFiles) {
+    const rel = normalize(abs).replace(normalize(ROOT) + "/", "");
+    const content = readFileSync(abs, "utf8");
+    for (const m of content.matchAll(/`((?:docs|extension|bridge|mcp|scripts|tests)\/[^`#]+)`/g)) {
+      let target = m[1].trim().replace(/[:.,;]+$/, "");
+      if (target.includes("*")) continue;
+      if (target.startsWith("docs/internal") && !existsSync(join(ROOT, "docs", "internal"))) continue;
+      if (!existsSync(join(ROOT, target))) {
+        missing.push(`${rel}: names '${target}'`);
+      }
+    }
+  }
+  if (missing.length) {
+    throw new Error(`broken paths referenced in documentation: ${missing.join(", ")}`);
+  }
+  return `${docFiles.length} docs checked`;
 });
 
 // ---------------------------------------------------------------- 1. versions
@@ -337,14 +406,21 @@ gate("every copy of the target-resolution rules agrees", () => {
 
 // ---------------------------------------------------------------- 2. unit tests
 gate("unit tests", () => {
-  const out = execFileSync("npm", ["test"], {
+  // test:all runs the tests/unit suite and the colocated *.spec.js files as two node --test
+  // runs, so each run's totals are summed.
+  const out = execFileSync("npm", ["run", "test:all"], {
     cwd: ROOT,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
-  const pass = out.match(/^ℹ pass (\d+)$/m)?.[1];
-  const fail = out.match(/^ℹ fail (\d+)$/m)?.[1];
-  if (fail !== "0") throw new Error(`${fail} failing`);
+  const total = (label) =>
+    [...out.matchAll(new RegExp(`^ℹ ${label} (\\d+)$`, "gm"))].reduce(
+      (n, m) => n + Number(m[1]),
+      0
+    );
+  const pass = total("pass");
+  const fail = total("fail");
+  if (fail !== 0) throw new Error(`${fail} failing`);
   return `${pass}/${pass}`;
 });
 
@@ -647,7 +723,9 @@ gate("every tool call in a string names real parameters", () => {
         const key = s.match(/^\s*['"]?([A-Za-z_$][\w$]*)['"]?\s*(:|$)/);
         if (!key) continue; // a spread, a placeholder, or an ellipsis
         if (!allowed.has(key[1]))
-          bad.push(`${f}:${line} ${name} names '${key[1]}' — ${lines[line - 1].trim().slice(0, 80)}`);
+          bad.push(
+            `${f}:${line} ${name} names '${key[1]}' — ${lines[line - 1].trim().slice(0, 80)}`
+          );
       }
     }
   }
@@ -823,7 +901,9 @@ gate("npm tarball is clean", () => {
   // 41 kB for nobody — all dead on arrival, since npm reads the root package.json.
   const scaffolding = out
     .split("\n")
-    .filter((l) => /^npm notice.*(package-lock\.json|(bridge|mcp|extension)\/package\.json)/.test(l));
+    .filter((l) =>
+      /^npm notice.*(package-lock\.json|(bridge|mcp|extension)\/package\.json)/.test(l)
+    );
   if (scaffolding.length) {
     throw new Error(
       `the tarball would ship development scaffolding: ${scaffolding.map((l) => l.trim().split(/\s+/).pop()).join(", ")}`

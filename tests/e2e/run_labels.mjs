@@ -101,26 +101,24 @@ const main = async () => {
 
   const snap = (await call("snapshot", { scope: "all", compact: true, maxText: 0 })).result || {};
   const cv = snap.census || "";
-  const tree = ((await call("read_page", { mode: "interactive" })).result || {}).tree || "";
 
   console.log(
-    `${"label expected".padEnd(24)} ${"snapshot".padEnd(9)} ${"read_page".padEnd(10)} ${"find".padEnd(6)} click(text)`
+    `${"label expected".padEnd(24)} ${"snapshot".padEnd(9)} ${"find".padEnd(6)} click(text)`
   );
-  console.log("-".repeat(64));
+  console.log("-".repeat(53));
   let fails = 0;
   for (const want of EXPECT) {
     const inSnap = cv.includes(`"${want}`) || cv.includes(want);
-    const inTree = tree.includes(want);
     const f = (await call("find", { query: want, max: 3 })).result || {};
     const findable = f.count > 0;
     const clickable = findable && (f.matches || []).some((m) => m.clickable);
-    const bad = !inSnap || !inTree || !findable || !clickable;
+    const bad = !inSnap || !findable || !clickable;
     if (bad) fails++;
     console.log(
-      `${want.padEnd(24)} ${(inSnap ? "yes" : "NO").padEnd(9)} ${(inTree ? "yes" : "NO").padEnd(10)} ${(findable ? "yes" : "NO").padEnd(6)} ${clickable ? "yes" : "NO"}`
+      `${want.padEnd(24)} ${(inSnap ? "yes" : "NO").padEnd(9)} ${(findable ? "yes" : "NO").padEnd(6)} ${clickable ? "yes" : "NO"}`
     );
   }
-  console.log("-".repeat(64));
+  console.log("-".repeat(53));
   console.log(
     fails === 0
       ? "all label paths agree"

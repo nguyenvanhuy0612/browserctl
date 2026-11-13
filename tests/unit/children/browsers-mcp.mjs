@@ -5,6 +5,8 @@
 // non-zero. HOME/USERPROFILE must already point at a temp directory (the parent sets them).
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { execFile } from "node:child_process";
+import util from "node:util";
 import { WebSocket } from "ws";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -292,6 +294,32 @@ async function targetOf(s) {
 // ---------------------------------------------------------------- the cases
 
 const CASES = {
+  async "uc-degraded-status"() {
+    await browsers({
+      type: "chrome",
+      tabs: [tab(61, "https://a.example/", "A", { active: true })],
+    });
+    const A = await session();
+    const healthy = ok(await A.call("browser_status", {}), "healthy status");
+    assert.equal("degraded" in healthy, false, "a healthy bridge adds no degraded field");
+    assert.equal(healthy.hint, "ready");
+
+    // The bridge's own uncaught-exception handler records the fault and keeps running.
+    process.emit("uncaughtException", new Error("planted fault"));
+
+    const status = ok(await A.call("browser_status", {}), "degraded status");
+    assert.equal(status.degraded.count, 1);
+    assert.equal(status.degraded.lastError, "planted fault");
+    assert.equal(status.ready, true, "the bridge still serves");
+    assert.match(status.hint, /uncaught exception/, "an agent reading only the hint is told");
+
+    const cli = await util.promisify(execFile)(
+      process.execPath,
+      [join(HERE, "..", "..", "..", "cli.js"), "status"],
+      { env: { ...process.env, BROWSERCTL_BRIDGE_URL: BASE, BROWSERCTL_AUTO_START: "manual" } }
+    );
+    assert.match(cli.stdout, /Degraded: 1 uncaught exception\(s\).*planted fault/);
+  },
   async "uc-edge"() {
     const [chrome, edge] = await browsers(
       { type: "chrome", tabs: [tab(11, "https://mail.google.com/", "Gmail")] },
@@ -477,7 +505,11 @@ const CASES = {
     ok(await A.call("browser_tabs", { action: "select", tabId: 68 }), "A select");
     ok(await B.call("browser_tabs", { action: "select", tabId: 69 }), "B select");
     ok(await A.call("browser_click", { target: "x" }), "A click");
-    failed(await B.call("browser_tabs", { action: "select", tabId: 68, force: true }), "TAB_BUSY", "B");
+    failed(
+      await B.call("browser_tabs", { action: "select", tabId: 68, force: true }),
+      "TAB_BUSY",
+      "B"
+    );
     await sleep(350);
     failed(await B.call("browser_tabs", { action: "select", tabId: 68 }), "TAKE_CONFIRM", "B ask");
     const took = ok(

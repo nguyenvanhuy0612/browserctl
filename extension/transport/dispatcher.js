@@ -1,5 +1,4 @@
 // In-flight request tracking and abort dispatcher for browserctl.
-// Adheres strictly to docs/spec/00-architecture-overview.md and docs/spec/01-protocol-and-errors.md.
 
 import { RpcError, RPC_ERRORS } from "./errors.js";
 

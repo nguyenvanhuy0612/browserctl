@@ -1,8 +1,4 @@
-// Acceptance test suite for Milestone 1: Transport & Errors Subsystem.
-//
-// Specifications:
-// - docs/spec/01-protocol-and-errors.md
-// - docs/spec/05-test-and-acceptance-matrix.md (TC-PROTO-01 through TC-PROTO-04)
+// Acceptance test suite for Transport & Errors Subsystem.
 //
 // Verifies:
 // 1. RpcError and RPC_ERRORS code mapping and JSON-RPC 2.0 serialization.
@@ -321,4 +317,31 @@ test("TC-PROTO-06: computeTransportTimeout strictly enforces Hierarchical Timing
   assert.equal(computeTransportTimeout(null), DEFAULT_ACTION_BUDGET_MS);
   assert.equal(computeTransportTimeout({ timeoutMs: -500 }), DEFAULT_ACTION_BUDGET_MS);
   assert.equal(computeTransportTimeout({ timeoutMs: "invalid" }), DEFAULT_ACTION_BUDGET_MS);
+});
+
+test("RpcError: preserves and serializes disposition and recovery payload", () => {
+  const err = new RpcError(-32002, "Element is stale", {
+    reason: "STALE_REF",
+    disposition: "not_delivered",
+    recovery: {
+      strategy: "refresh_snapshot_then_retry_original",
+      retryable: true,
+      requiresFreshSnapshot: true,
+    },
+  });
+
+  assert.equal(err.disposition, "not_delivered");
+  assert.deepEqual(err.recovery, {
+    strategy: "refresh_snapshot_then_retry_original",
+    retryable: true,
+    requiresFreshSnapshot: true,
+  });
+
+  const json = err.toJSON();
+  assert.equal(json.data.disposition, "not_delivered");
+  assert.equal(json.data.recovery.strategy, "refresh_snapshot_then_retry_original");
+
+  const cloned = RpcError.fromError(err);
+  assert.equal(cloned.disposition, "not_delivered");
+  assert.equal(cloned.recovery.strategy, "refresh_snapshot_then_retry_original");
 });

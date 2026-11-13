@@ -1,15 +1,11 @@
-// Acceptance test suite for Milestone 2: CDP Driver Subsystem.
-//
-// Specifications:
-// - docs/spec/02-driver-and-cdp.md
-// - docs/spec/05-test-and-acceptance-matrix.md (TC-CDP-01 through TC-CDP-05)
+// Acceptance test suite for CDP Driver Subsystem.
 //
 // Verifies:
-// 1. TC-CDP-01: Mouse wheel dispatch (browser_wheel) with deltaX/deltaY & modifiers.
-// 2. TC-CDP-02: Native drag-and-drop (coordinate_drag / dispatchDrag) interpolation.
-// 3. TC-CDP-03: Device emulation presets (iphone-14, pixel-7, ipad, desktop), dark/light mode, geolocation, reset.
-// 4. TC-CDP-04: RFC 6901 JSON pointer traversal and token unescaping.
-// 5. TC-CDP-05: Network replay and fetch rule generation.
+// 1. Mouse wheel dispatch (browser_wheel) with deltaX/deltaY & modifiers.
+// 2. Native drag-and-drop (coordinate_drag / dispatchDrag) interpolation.
+// 3. Device emulation presets (iphone-14, pixel-7, ipad, desktop), dark/light mode, geolocation, reset.
+// 4. RFC 6901 JSON pointer traversal and token unescaping.
+// 5. Network replay and fetch rule generation.
 // 6. CDP session lifecycle & command dispatch.
 
 import { test, beforeEach } from "node:test";

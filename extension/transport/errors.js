@@ -1,5 +1,4 @@
 // Standard JSON-RPC 2.0 and application error definitions for browserctl.
-// Adheres strictly to docs/spec/01-protocol-and-errors.md.
 
 /**
  * Standard JSON-RPC 2.0 error codes (-32700 to -32603)
@@ -65,14 +64,34 @@ export class RpcError extends Error {
     super(finalMsg);
     this.name = "RpcError";
     this.code = typeof finalCode === "number" ? finalCode : (RPC_ERRORS[finalCode] ?? -32603);
-    const { reason, retriable, details, ...rest } = data || {};
+    const { reason, retriable, details, disposition, recovery, ...rest } = data || {};
     this.data = {
       reason: reason || (typeof finalCode === "string" ? finalCode : "UNKNOWN_ERROR"),
       retriable: Boolean(retriable),
       details: details !== undefined ? details : null,
+      ...(disposition ? { disposition } : {}),
+      ...(recovery ? { recovery } : {}),
       ...rest,
     };
     this.ok = false;
+  }
+
+  get disposition() {
+    return this.data ? this.data.disposition : undefined;
+  }
+
+  set disposition(val) {
+    if (!this.data) this.data = {};
+    this.data.disposition = val;
+  }
+
+  get recovery() {
+    return this.data ? this.data.recovery : undefined;
+  }
+
+  set recovery(val) {
+    if (!this.data) this.data = {};
+    this.data.recovery = val;
   }
 
   get error() {
@@ -137,10 +156,14 @@ export class RpcError extends Error {
     const reason = err.reason || (typeof err.code === "string" ? err.code : "INTERNAL_ERROR");
     const retriable = Boolean(err.retriable || err.data?.retriable);
     const details = err.data?.details ?? err.details ?? err.diagnostics ?? err.stack ?? null;
+    const disposition = err.disposition ?? err.data?.disposition;
+    const recovery = err.recovery ?? err.data?.recovery;
     return new RpcError(code, message, {
       reason,
       retriable,
       details,
+      ...(disposition ? { disposition } : {}),
+      ...(recovery ? { recovery } : {}),
     });
   }
 }

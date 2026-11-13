@@ -52,7 +52,7 @@ which fails on three things:
 
 1. **Budget.** What a default session is handed has a ceiling (`AGENT_TEXT_BUDGET`): the core
    tools' descriptions, their parameter `describe()`s, and the instructions block. `npm run
-   preflight` prints where it currently sits — a few thousand tokens every session pays
+preflight` prints where it currently sits — a few thousand tokens every session pays
    before it does anything.
    There is no comfortable headroom on purpose: a real addition has to be funded by a real
    deletion, or by raising the ceiling deliberately and saying why in the commit.
@@ -60,6 +60,7 @@ which fails on three things:
    Measure the **registry**, never the source file. The largest duplication this repo ever had
    was invisible in the source: the group note was one constant, and 24 identical copies on the
    wire.
+
 2. **No sentence in two tools.** A sentence of 45 characters or more appearing in two different
    tools' text fails. If a fact genuinely has to travel with two sibling tools, put it in
    `REPEAT_ALLOWED` **with the reason** — an exception that has to be written down is an
@@ -70,7 +71,7 @@ which fails on three things:
 
 **The one allowed exception, and what it costs.** Target resolution is stated three times: in the
 server instructions (the agent, which cannot open a file), in `docs/REFERENCE.md` (the reader, who
-never sees the instructions) and in `docs/internal/tool-surface.md` (the spec). Three audiences,
+never sees the instructions) and in `docs/internal/tool-surface.md` (the spec, if present). Three audiences,
 none able to follow a cross-reference. The price of the exception is a gate —
 `every copy of the target-resolution rules agrees` — which pins the six resolution modes and the four
 prefixes in all three. It caught a real drift the first time it ran: the instructions still
@@ -81,18 +82,18 @@ Duplication you cannot remove has to be duplication you can check.
 second copy "so it is easier to find" is how an agent ends up reading the same thing four times
 and a maintainer ends up fixing three of them.
 
-| The fact | Its one home |
-| :--- | :--- |
-| How to sequence calls — the loop | `INSTRUCTIONS`, once |
-| What a family of tools is for | `GROUP_NOTE`, generated from `TOOL_GROUPS` |
-| What one tool does, and what it refuses | that tool's `description` |
-| What one parameter means | that parameter's `describe()` |
-| What constrains this code, and what it rules out | a comment on it, or a test that fails without it |
-| What changed, and when | `CHANGELOG.md` |
-| How a human installs and runs it | `docs/INSTALL.md` |
-| The full parameter dictionary | `docs/REFERENCE.md` |
-| The tool surface as it actually is | `docs/TOOLS.md`, generated |
-| The tool surface as designed, and why | `docs/internal/tool-surface.md`, internal |
+| The fact                                         | Its one home                                                                       |
+| :----------------------------------------------- | :--------------------------------------------------------------------------------- |
+| How to sequence calls — the loop                 | `INSTRUCTIONS`, once                                                               |
+| What a family of tools is for                    | `GROUP_NOTE`, generated from `TOOL_GROUPS`                                         |
+| What one tool does, and what it refuses          | that tool's `description`                                                          |
+| What one parameter means                         | that parameter's `describe()`                                                      |
+| What constrains this code, and what it rules out | a comment on it, or a test that fails without it                                   |
+| What changed, and when                           | `CHANGELOG.md`                                                                     |
+| How a human installs and runs it                 | `docs/INSTALL.md`                                                                  |
+| The full parameter dictionary                    | `docs/REFERENCE.md`                                                                |
+| The tool surface as it actually is               | `docs/TOOLS.md`, generated                                                         |
+| The tool surface as designed, and why            | `CONCEPTS.md` and `docs/REFERENCE.md` (`docs/internal/tool-surface.md` if present) |
 
 **Why the budget and not just taste.** Description text competes with the page the agent is
 actually reading. Tokens spent restating what another tool already said are tokens not spent on
@@ -122,7 +123,7 @@ The v0.8 break did exactly this. Addressing collapsed into `target`, and six rew
 `CLI_TO_MCP` went on naming the removed `ref` and `selector` parameters afterwards. Every gate
 passed, because the tool still existed and only its parameters had moved.
 
-The gate *every tool call in a string names real parameters* now covers this. It reads every
+The gate _every tool call in a string names real parameters_ now covers this. It reads every
 tool call written out in shipped source or docs and checks its top-level keys against that
 tool's own schema, so the check follows a rename without being edited. If it fires, fix the
 string — never widen the schema to match the string.
@@ -162,6 +163,11 @@ tree and taking it out again, and `git checkout <file>` as the undo destroys eve
 change in that file, not just the injected one. An uncommitted working tree is the only copy
 there is.
 
+**Stranger run verification.** When a change touches tool descriptions, instructions, result fields,
+`AGENTS.md`, `CONCEPTS.md` or `skills/`, execute the stranger run procedure defined in `AGENTS.md`
+before pushing. Install the packed tarball into an isolated test environment, evaluate representative
+intents against live fixtures, and audit the bridge call log.
+
 ## The e2e suite stays basic
 
 One check per core capability, plus the tab lifecycle, target resolution and verified cleanup.
@@ -171,7 +177,7 @@ derived from the registry, and anything excused from it carries its reason in `N
 
 **Every check is self-contained.** A check that inherits page state or navigation from an
 earlier one is not testing what it says it tests — it hides whatever the earlier check happened
-to set up. `browser_go_back` was broken on every tab while a longer suite passed it, because an
+to set up. `go_back` was broken on every tab while a longer suite passed it, because an
 earlier test had left history behind.
 
 **Do not write a test against a version.** Assert the rule, from the source: compare against
@@ -186,5 +192,4 @@ to be rewritten every time the old version recedes further.
 - A new **parameter** → `docs/REFERENCE.md` and the `describe()` on its schema. A parameter
   documented in neither is invisible to both humans and agents, which is what the
   `every core tool parameter is documented` gate exists to catch.
-- A change to the **tool surface** → `docs/internal/tool-surface.md`, which is the design of
-  record and stays internal.
+- A change to the **tool surface** → `docs/REFERENCE.md` and `CONCEPTS.md` (`docs/internal/tool-surface.md` if you have it).
