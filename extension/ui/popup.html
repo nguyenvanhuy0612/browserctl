@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>browserctl</title>
+<style>
+  :root { color-scheme: light dark; --muted: #6b7280; --ok: #15803d; --warn: #b45309; --bad: #b91c1c; }
+  body { font: 13px/1.4 system-ui, sans-serif; margin: 0; padding: 12px 14px; width: 300px; }
+  h1 { font-size: 14px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  h1 img { width: 18px; height: 18px; }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; border-top: 1px solid rgba(127,127,127,.2); }
+  .row span:first-child { color: var(--muted); }
+  .row span:last-child { text-align: right; font-weight: 500; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .note { color: var(--muted); font-size: 12px; margin: 2px 0 6px; }
+  .controls { display: flex; gap: 6px; margin-top: 10px; align-items: center; }
+  input { width: 70px; padding: 3px 5px; }
+  button { padding: 3px 9px; cursor: pointer; }
+</style>
+</head>
+<body>
+  <h1><img src="../icons/icon48.png" alt="">browserctl</h1>
+  <div class="row"><span>Connection</span><span id="connection">…</span></div>
+  <div class="note" id="connection-note"></div>
+  <div class="row"><span>Alias</span><span id="alias">—</span></div>
+  <div class="row"><span>Daemon</span><span id="daemon">—</span></div>
+  <div class="row"><span>Allow User Scripts</span><span id="userscripts">…</span></div>
+  <div class="note" id="userscripts-note"></div>
+  <div class="row"><span>Debugger</span><span id="debugger">…</span></div>
+  <div class="note" id="debugger-note"></div>
+  <div class="row"><span>Extension</span><span id="version">—</span></div>
+  <div class="controls">
+    <button id="reconnect">Reconnect</button>
+    <span style="flex:1"></span>
+    <label for="port">Port</label><input id="port" type="number" min="1" max="65535"><button id="save">Save</button>
+  </div>
+  <script src="popup.js" type="module"></script>
+</body>
+</html>

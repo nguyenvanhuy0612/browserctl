@@ -1,80 +1,34 @@
 {
-  "name": "browserctl-mcp",
-  "version": "0.9.8",
-  "description": "Universal Browser Control Protocol & MCP Server for AI Agents and Developers",
+  "name": "browserctl",
+  "version": "0.0.0-dev",
+  "private": true,
+  "description": "Browser control for AI agents in the user's real Chrome, through an MV3 extension and a local daemon.",
   "type": "module",
-  "main": "cli.js",
-  "bin": {
-    "browserctl-mcp": "mcp/index.js",
-    "browserctl": "cli.js",
-    "bctl": "cli.js"
-  },
-  "files": [
-    "cli.js",
-    "bridge/server.js",
-    "bridge/state.js",
-    "bridge/registry.js",
-    "bridge/leases.js",
-    "bridge/routing.js",
-    "bridge/owners.js",
-    "bridge/crash.js",
-    "mcp/index.js",
-    "mcp/target.js",
-    "extension/",
-    "skills/",
-    "docs/INSTALL.md",
-    "docs/REFERENCE.md",
-    "docs/TOOLS.md",
-    "README.md",
-    "LICENSE"
-  ],
+  "license": "MIT",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
+  },
+  "bin": {
+    "browserctl": "src/cli/main.js",
+    "browserctl-mcp": "src/mcp/main.js"
   },
   "scripts": {
-    "test": "node --test \"tests/unit/**/*.test.mjs\"",
-    "test:colocated": "node --test \"bridge/**/*.spec.js\" \"mcp/**/*.spec.js\"",
-    "test:all": "npm test && npm run test:colocated",
-    "lint": "eslint cli.js \"bridge/**/*.js\" \"mcp/**/*.js\" \"extension/**/*.js\"",
-    "format": "prettier --write cli.js bridge/**/*.js mcp/**/*.js extension/**/*.js",
-    "format:check": "prettier --check cli.js bridge/**/*.js mcp/**/*.js extension/**/*.js",
-    "start": "node bridge/server.js",
-    "mcp": "node mcp/index.js",
-    "preflight": "node scripts/preflight.mjs",
-    "preflight:e2e": "node scripts/preflight.mjs --e2e"
+    "build": "node scripts/build-extension.js",
+    "test": "node --test tests/unit/*.test.js",
+    "test:live": "node --test --test-concurrency=1 tests/live/*.test.js",
+    "typecheck": "tsc -p jsconfig.json",
+    "daemon": "node src/daemon/main.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "execa": "^10.0.1",
-    "ws": "^8.18.0",
-    "zod": "^4.4.3"
-  },
-  "keywords": [
-    "mcp",
-    "mcp-server",
-    "browser",
-    "browser-control",
-    "automation",
-    "ai-agent",
-    "claude",
-    "chrome",
-    "extension"
-  ],
-  "author": "Nguyen Van Huy <nguyenvanhuy0612@gmail.com>",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/nguyenvanhuy0612/browserctl.git"
-  },
-  "homepage": "https://github.com/nguyenvanhuy0612/browserctl#readme",
-  "bugs": {
-    "url": "https://github.com/nguyenvanhuy0612/browserctl/issues"
-  },
-  "license": "MIT",
-  "publishConfig": {
-    "access": "public"
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "ajv": "8.20.0",
+    "playwright-core": "1.65.0",
+    "ws": "8.22.0"
   },
   "devDependencies": {
-    "eslint": "^10.10.0",
-    "prettier": "^3.9.6"
+    "@types/chrome": "0.3.7",
+    "@types/node": "26.6.6",
+    "@types/ws": "8.18.2",
+    "typescript": "5.9.3"
   }
 }

@@ -1,0 +1,6 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Frames</title></head>
+<body><h1>Frames</h1><button>Main button</button>
+<iframe id="same" src="child.html" title="same-origin frame"></iframe>
+<iframe id="cross" title="cross-origin frame"></iframe>
+<script nonce="fixture">document.getElementById('cross').src = 'http://localhost:' + location.port + '/child.html';</script>
+</body></html>

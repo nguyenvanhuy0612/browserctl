@@ -1,0 +1,7 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Delayed</title></head>
+<body><button id="later">Show later</button><button id="ticker">Ticker</button><div id="out"></div>
+<script nonce="fixture">
+document.getElementById('later').addEventListener('click', () => setTimeout(() => { document.getElementById('out').textContent = 'Appeared'; }, 1000));
+setTimeout(() => { const p = document.createElement('p'); p.textContent = 'Loaded late'; document.body.appendChild(p); }, 2000);
+document.getElementById('ticker').addEventListener('click', () => { let n = 0; const tick = () => { document.getElementById('out').textContent = 'tick ' + (n++); queueMicrotask(() => setTimeout(tick, 50)); }; tick(); });
+</script></body></html>

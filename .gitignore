@@ -29,3 +29,6 @@ docs/history/case-study-gmail-*.md
 
 # design spec and backlog: private, kept on this machine only (not tracked); backup in ~/Backups
 docs/internal/
+
+# Built from playwright-core by `npm run build`
+extension/generated/
