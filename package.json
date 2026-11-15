@@ -2,6 +2,23 @@
   "name": "browserctl-mcp",
   "version": "1.0.0",
   "description": "Browser control for AI agents in the user's real Chrome, through an MV3 extension and a local daemon.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "browser",
+    "chrome",
+    "automation",
+    "playwright",
+    "ai-agent"
+  ],
+  "homepage": "https://github.com/nguyenvanhuy0612/browserctl#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nguyenvanhuy0612/browserctl.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nguyenvanhuy0612/browserctl/issues"
+  },
   "type": "module",
   "license": "MIT",
   "engines": {
