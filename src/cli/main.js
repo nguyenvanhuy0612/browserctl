@@ -13,7 +13,7 @@ const USAGE = `usage:
   browserctl <tool> [--param value ...] [--session name] [--pretty]
   browserctl tools                    list tools and their parameters
   browserctl daemon start|stop|status
-  browserctl extension path           folder to load unpacked in chrome://extensions
+  browserctl extension path           copy the extension to ~/.browserctl/extension and print it
 
 examples:
   browserctl navigate --url example.com
@@ -97,6 +97,23 @@ async function daemonCommand(/** @type {string | undefined} */ action) {
   return 2;
 }
 
+/**
+ * Copies the extension of this install into BROWSERCTL_HOME/extension, a fixed folder to load
+ * unpacked, and prints it (specs/interface.md).
+ */
+function extensionPath() {
+  const source = path.join(root, "extension");
+  if (!fs.existsSync(path.join(source, "generated/pw-injected.js"))) {
+    console.error("extension/generated is missing: run npm run build");
+    return 1;
+  }
+  const target = path.join(home, "extension");
+  fs.rmSync(target, { recursive: true, force: true });
+  fs.cpSync(source, target, { recursive: true });
+  console.log(target);
+  return 0;
+}
+
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
   if (!command || command === "help" || command === "--help") {
@@ -104,14 +121,7 @@ async function main() {
     return 0;
   }
   if (command === "daemon") return daemonCommand(rest[0]);
-  if (command === "extension" && rest[0] === "path") {
-    if (!fs.existsSync(path.join(root, "extension/generated/pw-injected.js"))) {
-      console.error("extension/generated is missing: run npm run build");
-      return 1;
-    }
-    console.log(path.join(root, "extension"));
-    return 0;
-  }
+  if (command === "extension" && rest[0] === "path") return extensionPath();
   const tools = await listTools();
   if (command === "tools") {
     for (const t of tools) {

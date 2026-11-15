@@ -7,7 +7,7 @@ export const HINTS = {
   INVALID_PARAMS: "Check the parameter names and types in the tool's schema.",
   NO_BROWSER: "No browser is connected. Load the browserctl extension (browserctl extension path) and check status.",
   AMBIGUOUS_BROWSER: "Several browsers are connected. Pick one: tabs({action: \"new\", browser: \"<alias>\"}).",
-  EXTENSION_OUTDATED: "Reload the browserctl extension in chrome://extensions so it matches the daemon.",
+  EXTENSION_OUTDATED: "Run browserctl extension path, then Reload the browserctl extension in chrome://extensions so it matches the daemon.",
   NO_TAB: "Open or select a tab first: tabs({action: \"new\"}).",
   TAB_NOT_OWNED: "Use a tab from tabs({action: \"list\"}) marked as yours, or adopt it.",
   TAB_CLOSED: "The tab is gone. Check tabs({action: \"list\"}).",

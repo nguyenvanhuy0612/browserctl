@@ -38,7 +38,7 @@ Python and other scripts use this API directly; no client library is required.
 | Variable | Read by | Default | Meaning |
 | --- | --- | --- | --- |
 | `BROWSERCTL_PORT` | daemon, clients | `8765` | daemon port (the extension's storage key `daemonPort` must match) |
-| `BROWSERCTL_HOME` | daemon, clients | `~/.browserctl` | sessions, aliases, call log, screenshots, daemon log |
+| `BROWSERCTL_HOME` | daemon, clients | `~/.browserctl` | sessions, aliases, call log, screenshots, daemon log, the extension copy (`extension path`) |
 | `BROWSERCTL_DETACH_IDLE` | daemon | `30` | seconds without a CDP-lane call before the debugger detaches (`sessions.md`) |
 | `BROWSERCTL_AUTO_START` | clients | | `manual`: clients never start the daemon |
 | `BROWSERCTL_CLOSE_TABS` | clients | | `1`: send `X-Browserctl-Close-Tabs: 1`, so the session's tabs close when it ends |
@@ -61,8 +61,12 @@ Python and other scripts use this API directly; no client library is required.
 
 - `browserctl <tool> [--param value ...]`, flags generated from the registry (`--target e5`,
   `--fields '[...]'` as JSON). Output is the JSON result; `--pretty` indents it.
-- `browserctl daemon start|stop|status`, `browserctl extension path` (prints the folder to load
-  unpacked).
+- `browserctl daemon start|stop|status`.
+- `browserctl extension path` copies the extension that ships with this install into
+  `$BROWSERCTL_HOME/extension` (default `~/.browserctl/extension`), replacing what is there, and
+  prints that folder. The user loads it unpacked from that one fixed place, which does not move
+  with the npm install location or the Node version; after an upgrade the same command refreshes
+  the copy, and **Reload** in `chrome://extensions` picks it up.
 - Session `--session <name>`, default `cli`.
 
 ## Extension wire protocol
@@ -124,6 +128,7 @@ agents use the tools (`architecture.md` reuse policy, and the probe runs).
 | API-U02 | unit | unknown parameter `selector` on `click` | `INVALID_PARAMS` listing the valid ones |
 | API-U03 | unit | protocol mismatch in hello | `EXTENSION_OUTDATED` |
 | API-U04 | unit | call log line for `evaluate` | full code recorded, with session and browser alias |
+| API-U06 | unit | `extension path` twice, with a stray file in the folder before the second run | prints `$BROWSERCTL_HOME/extension`, which holds `manifest.json` and `generated/pw-injected.js`; the second run leaves no stray file |
 | API-U05 | unit | CLI: `--doubleClick` with a bad `--button`, `--session other` without a tab, `daemon status` | `INVALID_PARAMS` exit 1, `NO_TAB` exit 1, exit 0 |
 | API-E01 | live | daemon stopped, extension running 60 s, daemon started | extension connects within 35 s; Errors page empty |
 | API-E02 | live | MCP server start with no daemon | daemon started, tools registered; the instructions name the locator forms (`label=`), `timeout`, `scroll`, `wait` and `get` |

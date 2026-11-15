@@ -46,11 +46,12 @@ npm install -g browserctl-mcp
 **2. Load the extension**
 
 ```bash
-browserctl extension path     # prints the folder to load
+browserctl extension path     # copies the extension to ~/.browserctl/extension and prints the folder
 ```
 
 1. Open `chrome://extensions` and turn on **Developer mode**.
-2. Click **Load unpacked** and choose the folder printed above.
+2. Click **Load unpacked** and choose the folder printed above (`~/.browserctl/extension`, or
+   `%USERPROFILE%\.browserctl\extension` on Windows).
 3. Open the extension's **Details** and turn on **Allow User Scripts**. This lets `evaluate` run
    on any page, including pages with a strict Content Security Policy, without the debugging bar.
 
@@ -71,6 +72,9 @@ Any other MCP client (Claude Desktop, Cursor, and others):
   }
 }
 ```
+
+After upgrading browserctl, run `browserctl extension path` again and click **Reload** on the
+extension in `chrome://extensions`.
 
 The MCP server starts the daemon on `127.0.0.1:8765` when it is not running. Ask the agent to call
 `status` to confirm the browser is connected; it lists anything left to set up.
@@ -172,7 +176,7 @@ hint names the next call to make.
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `BROWSERCTL_PORT` | `8765` | Daemon port. When changed, set the extension's storage key `daemonPort` to match. |
-| `BROWSERCTL_HOME` | `~/.browserctl` | Sessions, browser aliases, the call log and screenshots. |
+| `BROWSERCTL_HOME` | `~/.browserctl` | Sessions, browser aliases, the call log, screenshots, and the extension copy to load. |
 | `BROWSERCTL_DETACH_IDLE` | `30` | Seconds without a CDP-lane call before the debugger detaches. |
 | `BROWSERCTL_AUTO_START` | | `manual`: clients never start the daemon themselves. |
 | `BROWSERCTL_CLOSE_TABS` | | `1`: tabs the session opened are closed when it ends (for example when the MCP server exits). |
@@ -192,7 +196,7 @@ hint names the next call to make.
 | --- | --- |
 | `NO_BROWSER` | The extension is not connected: check that it is loaded and enabled, then call `status`. |
 | `USER_SCRIPTS_OFF` | Turn on **Allow User Scripts** in the extension's details, or pass `trusted: true`. |
-| `EXTENSION_OUTDATED` | Reload the extension in `chrome://extensions` after upgrading. |
+| `EXTENSION_OUTDATED` | Run `browserctl extension path`, then click **Reload** on the extension in `chrome://extensions`. |
 | `DEBUGGER_CANCELED` | Someone pressed Cancel on the debugging bar. Calls without `trusted` still work; `status({allowDebugger: true})` re-enables the debugger. |
 
 ## Development
@@ -204,7 +208,8 @@ npm install
 npm run build          # extracts Playwright's page script and key table into extension/generated/
 ```
 
-Load `extension/` unpacked, and register the MCP server from the checkout:
+Load the checkout's `extension/` folder unpacked (so a rebuild and **Reload** pick up your
+changes), and register the MCP server from the checkout:
 
 ```bash
 # macOS / Linux

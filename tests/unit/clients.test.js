@@ -123,3 +123,16 @@ test("API-U05 CLI: typed flags, sessions and exit codes", async () => {
   assert.match(noTab.out, /NO_TAB/);
   assert.equal((await cli("daemon", "status")).code, 0);
 });
+
+test("API-U06 extension path copies the extension into BROWSERCTL_HOME/extension and refreshes it", async () => {
+  const first = await cli("extension", "path");
+  assert.equal(first.code, 0, first.out);
+  const folder = first.out.trim();
+  assert.equal(folder, path.join(home, "extension"));
+  assert.ok(fs.existsSync(path.join(folder, "manifest.json")));
+  assert.ok(fs.existsSync(path.join(folder, "generated", "pw-injected.js")));
+  fs.writeFileSync(path.join(folder, "stray.js"), "");
+  const second = await cli("extension", "path");
+  assert.equal(second.out.trim(), folder);
+  assert.ok(!fs.existsSync(path.join(folder, "stray.js")));
+});
