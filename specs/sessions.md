@@ -1,6 +1,6 @@
 # Sessions, browsers, tabs and the debugger lifecycle
 
-Status: implemented
+Status: verified
 Depends on: `architecture.md`
 
 ## Browsers

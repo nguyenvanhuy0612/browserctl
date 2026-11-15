@@ -1,6 +1,6 @@
 # Extension UI: toolbar popup
 
-Status: implemented
+Status: verified
 Depends on: `interface.md`, `sessions.md`, `architecture.md` (extension error handling)
 
 ## Purpose
