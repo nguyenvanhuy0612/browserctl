@@ -10,6 +10,20 @@ const AsyncFunction = /** @type {FunctionConstructor} */ (Object.getPrototypeOf(
 const state = {};
 const connection = chromium.connectOverCDP(endpoint, { noDefaults: true });
 
+// Errors thrown by listeners and route handlers that code registered fail the running call, or
+// go to the next call's console; they never stop the worker (specs/tools/run.md).
+/** @type {((error: unknown) => void) | null} */
+let failRunning = null;
+/** @type {string[]} */
+const between = [];
+/** @param {unknown} error */
+function onUncaught(error) {
+  if (failRunning) failRunning(error);
+  else between.push(`uncaught: ${error}`);
+}
+process.on("uncaughtException", onUncaught);
+process.on("unhandledRejection", onUncaught);
+
 /** @param {unknown} v @param {Set<unknown>} seen @param {number} depth @returns {unknown} */
 function plain(v, seen = new Set(), depth = 0) {
   if (v === undefined) return null;
@@ -27,8 +41,7 @@ function plain(v, seen = new Set(), depth = 0) {
 }
 
 process.on("message", async (/** @type {any} */ message) => {
-  /** @type {string[]} */
-  const lines = [];
+  const lines = between.splice(0);
   const capture = { log: (/** @type {unknown[]} */ ...a) => lines.length < 200 && lines.push(a.map(String).join(" ")) };
   try {
     const browser = await connection;
@@ -41,11 +54,18 @@ process.on("message", async (/** @type {any} */ message) => {
     if (!page) throw new Error("the tab did not come up in the worker");
     page.setDefaultTimeout(10_000);
     const fn = new AsyncFunction("page", "context", "state", "console", message.code);
-    const value = await fn(page, context, state, { ...capture, info: capture.log, warn: capture.log, error: capture.log });
+    const work = fn(page, context, state, { ...capture, info: capture.log, warn: capture.log, error: capture.log });
+    work.catch(() => {}); // an abandoned call's late rejection is not news
+    const uncaught = new Promise((_, reject) => {
+      failRunning = (error) => reject(new Error(`uncaught in a listener or route handler: ${error}`));
+    });
+    const value = await Promise.race([work, uncaught]);
     process.send?.({ id: message.id, ok: true, value: plain(value), console: lines });
   } catch (error) {
     const e = /** @type {any} */ (error);
     const where = /<anonymous>:(\d+)/.exec(String(e?.stack ?? ""));
     process.send?.({ id: message.id, ok: false, error: `${e?.message ?? e}${where ? ` (line ${Number(where[1]) - 2} of code)` : ""}`, console: lines });
+  } finally {
+    failRunning = null;
   }
 });

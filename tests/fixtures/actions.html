@@ -1,0 +1,10 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Actions</title></head>
+<body>
+<button id="show" onclick="setTimeout(() => { const p = document.createElement('p'); p.textContent = 'Shown later'; document.body.appendChild(p); }, 1000)">Show</button>
+<button id="spawn" onclick="setTimeout(() => { const b = document.createElement('button'); b.id = 'late'; b.textContent = 'Late button'; b.onclick = () => __log.push('late'); document.body.prepend(b); }, 3000)">Spawn</button>
+<div style="position:relative;width:200px;height:40px"><button id="covered" onclick="__log.push('covered')">Covered</button><div style="position:absolute;inset:0;background:#eee">cover</div></div>
+<button id="nochooser">Upload</button>
+<div style="height:3000px"></div>
+<button id="far" onclick="__log.push('far')">Far away</button>
+<script nonce="fixture">window.__log = [];</script>
+</body></html>

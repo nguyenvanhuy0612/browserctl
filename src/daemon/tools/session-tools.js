@@ -2,7 +2,8 @@
 // status, tabs, navigate (specs/tools/status.md, tabs.md, navigate.md).
 import { BctlError } from "../errors.js";
 import { tabKey } from "../sessions.js";
-import { tab } from "./common.js";
+import { checkWait, tab, waitCondition } from "./common.js";
+import { afterWait } from "./read-tools.js";
 
 const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -17,7 +18,7 @@ export const status = {
   },
   async handler({ allowDebugger }, { daemon, session }) {
     if (allowDebugger) for (const b of daemon.browsers.connected()) b.debuggerCanceled = false;
-    const cdp = /** @type {any} */ (daemon).cdp;
+    const cdp = daemon.cdp;
     const browsers = [];
     /** @type {string[]} */
     const setup = [];
@@ -90,7 +91,6 @@ async function openTab(daemon, session, url, alias) {
   const ref = { instanceId: browser.instanceId, tabId: created.tabId };
   daemon.sessions.own(session, browser.instanceId, created.tabId, "owned");
   daemon.sessions.setCurrent(session, ref);
-  await daemon.groupTab(session, ref).catch(() => {});
   let settled = true;
   if (url) {
     const observer = daemon.observe(ref);
@@ -134,7 +134,7 @@ async function pageMeta(daemon, ref) {
 export const tabs = {
   name: "tabs",
   description:
-    "Manage tabs. action: list | new | select | close | adopt | release. New tabs open in the background, in your tab group, and become your current tab. adopt takes an existing tab (e.g. one the user opened) so you can act on it. select with focus: true shows the tab to the user.",
+    "Manage tabs. action: list | new | select | close | adopt | release. New tabs open in the background and become your current tab. adopt takes an existing tab (e.g. one the user opened) so you can act on it. select with focus: true shows the tab to the user.",
   inputSchema: {
     type: "object",
     properties: {
@@ -194,7 +194,6 @@ export const tabs = {
       }
       daemon.sessions.own(session, ref.instanceId, ref.tabId, owner?.sessionId === session.id ? owner.kind : "adopted");
       daemon.sessions.setCurrent(session, ref);
-      await daemon.groupTab(session, ref).catch(() => {});
       await daemon.armDialogs(ref).catch(() => {});
       return { tab: await describeTab(daemon, ref), current: current() };
     }
@@ -208,16 +207,15 @@ export const tabs = {
     }
     if (p.action === "close") {
       const described = await describeTab(daemon, ref).catch(() => ({ tab: ref.tabId }));
-      await /** @type {any} */ (daemon).cdp?.detach(ref).catch(() => {});
+      await daemon.cdp?.detach(ref).catch(() => {});
       daemon.sessions.release(ref.instanceId, ref.tabId);
       await link.request("tabs.close", { tabId: ref.tabId });
       return { tab: described, current: current() };
     }
     // release
     const described = await describeTab(daemon, ref);
-    await /** @type {any} */ (daemon).cdp?.detach(ref).catch(() => {});
+    await daemon.cdp?.detach(ref).catch(() => {});
     daemon.sessions.release(ref.instanceId, ref.tabId);
-    await link.request("tabs.ungroup", { tabIds: [ref.tabId] }).catch(() => {});
     await daemon.linkOf(ref).request("dom.call", { tabId: ref.tabId, allFrames: true, op: "armDialogs", args: [null] }).catch(() => {});
     return { tab: described, current: current() };
   },
@@ -233,10 +231,12 @@ export const navigate = {
     properties: {
       url: { type: "string", minLength: 1, description: "Absolute URL, or a host (https:// is added)." },
       action: { type: "string", enum: ["back", "forward", "reload"] },
+      wait: waitCondition,
       tab,
     },
   },
   async handler(p, { daemon, session }) {
+    checkWait(p.wait);
     if ((p.url === undefined) === (p.action === undefined)) {
       throw new BctlError("INVALID_PARAMS", "navigate takes exactly one of url and action", { hint: "Pass url: \"https://...\" or action: \"back\" | \"forward\" | \"reload\"." });
     }
@@ -270,8 +270,9 @@ export const navigate = {
       throw error;
     }
     const settled = moved ? await waitForLoad(observer, 30_000, p.url !== undefined && normalizeUrl(p.url) === "about:blank") : (observer.stop(), true);
+    const w = await afterWait(daemon, ref, p.wait);
     const after = await pageMeta(daemon, ref);
-    return { lane: "dom", tab: ref.tabId, url: after.url, title: after.title, urlChanged: after.url !== before.url, settled };
+    return { lane: "dom", tab: ref.tabId, url: after.url, title: after.title, urlChanged: after.url !== before.url, settled, waited: w.waited, hint: w.hint };
   },
 };
 

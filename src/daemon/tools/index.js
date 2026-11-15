@@ -2,7 +2,7 @@
 // Every tool, in the order agents see them (specs/interface.md).
 import { click, file_upload, fill_form, handle_dialog, hover, press_key, scroll, type } from "./act-tools.js";
 import { evaluate, network_requests, run, take_screenshot } from "./other-tools.js";
-import { read, snapshot, wait_for } from "./read-tools.js";
+import { get, read, snapshot, wait_for } from "./read-tools.js";
 import { navigate, status, tabs } from "./session-tools.js";
 
 export const tools = [
@@ -11,6 +11,7 @@ export const tools = [
   navigate,
   snapshot,
   read,
+  get,
   click,
   hover,
   type,

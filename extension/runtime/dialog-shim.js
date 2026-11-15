@@ -49,4 +49,52 @@
     once(p);
     return answer;
   };
+
+  // beforeunload never asks in an armed document: Chrome holds a background tab's "Leave site?"
+  // until the user activates the tab, and the page answers nothing meanwhile. The page's handlers
+  // still run (specs/dom-lane.md).
+  const preventDefault = Event.prototype.preventDefault;
+  Object.defineProperty(BeforeUnloadEvent.prototype, "preventDefault", {
+    configurable: true,
+    writable: true,
+    value: function preventDefault_() {
+      if (!policy()) preventDefault.call(this);
+    },
+  });
+  const returnValue = Object.getOwnPropertyDescriptor(BeforeUnloadEvent.prototype, "returnValue");
+  if (returnValue?.set) {
+    Object.defineProperty(BeforeUnloadEvent.prototype, "returnValue", {
+      ...returnValue,
+      set(value) {
+        if (!policy()) returnValue.set.call(this, value);
+      },
+    });
+  }
+  const owner = Object.getOwnPropertyDescriptor(window, "onbeforeunload") ? window : Window.prototype;
+  const handler = Object.getOwnPropertyDescriptor(owner, "onbeforeunload");
+  if (handler?.set && handler.get) {
+    let assigned = null;
+    let installed = null;
+    const assign = (fn) => {
+      assigned = typeof fn === "function" ? fn : null;
+      installed =
+        assigned &&
+        function onbeforeunload(event) {
+          const value = assigned.call(this, event);
+          return policy() ? undefined : value;
+        };
+      handler.set.call(window, installed);
+    };
+    Object.defineProperty(owner, "onbeforeunload", { ...handler, get: () => assigned, set: assign });
+    // document.body.onbeforeunload and <frameset> forward to the window's handler
+    for (const proto of [HTMLBodyElement.prototype, HTMLFrameSetElement.prototype]) {
+      const own = Object.getOwnPropertyDescriptor(proto, "onbeforeunload");
+      if (own) Object.defineProperty(proto, "onbeforeunload", { ...own, get: () => assigned, set: assign });
+    }
+    // <body onbeforeunload="..."> compiles into the window's handler without a setter call
+    document.addEventListener("DOMContentLoaded", () => {
+      const current = handler.get.call(window);
+      if (current && current !== installed) assign(current);
+    });
+  }
 })();

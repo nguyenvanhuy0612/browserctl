@@ -1,6 +1,6 @@
 # `evaluate`
 
-Status: approved
+Status: verified
 Depends on: `dom-lane.md`, `targets.md`, `relay.md`, `errors.md`
 
 ## Purpose
@@ -24,7 +24,10 @@ The parameter is named `function`, as in playwright-mcp, which agents already kn
 1. Resolve the tab. If `target` is given, resolve it and mark the element (`targets.md`).
 2. DOM lane: `chrome.userScripts.execute` in the MAIN world, in the frame of `target` (its frame
    id) or the main frame. `function` is placed into the script's source text (no `eval` or
-   `new Function` at run time, which page CSP would block). The wrapper finds the marked element
+   `new Function` at run time, which page CSP would block). `function` is compiled outside the
+   wrapper's own scope, so it sees the page's globals even when they share a name with the
+   wrapper's variables (`result`, `value`, `element`); names starting with `__bctl` are
+   reserved. The wrapper finds the marked element
    (searching open shadow roots), removes the mark, calls `function` with it if it is a function,
    and awaits a returned promise (at most 30 s).
 3. CDP lane (`trusted: true`, or userScripts off and the caller passed `trusted: true` after the
@@ -69,8 +72,13 @@ Run JavaScript in the page (page globals available). function: "() => document.t
 | EVAL-E05 | live | page with `script-src 'nonce-...'` (no `unsafe-eval`) | works through userScripts |
 | EVAL-E06 | live | userScripts off | `USER_SCRIPTS_OFF`; with `trusted: true` works |
 | EVAL-E07 | live | reads a page global (`window.__app`) | value (MAIN world) |
+| EVAL-E08 | live | `trusted: true`: `() => document.title`, and `(el) => el.id` with a selector | same values through Playwright |
+| EVAL-E09 | live | page globals named `result`, `value`, `element`, `mark` | each read back as the page set it |
 | EVAL-S01 | site | Facebook and GitHub, `document.title` | value, no debugging bar |
-| playwright-mcp `evaluate.spec.ts` | live | adopted cases | same values |
+| EVAL-E10 | live | playwright-mcp `evaluate.spec.ts`: `document.title`, an element's style by locator, an object, a cyclic object, the expression `(1+1)`, a thrown error | the values (the cycle as `"[circular]"`); `EVAL_ERROR` with the message |
+
+Not adopted from `evaluate.spec.ts`: the sandboxed page (served with a CSP `sandbox` header the
+fixture server does not send) and the count of evaluations (no per-call page instrumentation).
 
 ## Deferred option: `chrome.scripting` fallback
 

@@ -1,6 +1,6 @@
 # `status`
 
-Status: approved
+Status: verified
 Depends on: `sessions.md`, `interface.md`
 
 ## Purpose
@@ -54,4 +54,5 @@ Call it first when a tool reports NO_BROWSER, USER_SCRIPTS_OFF or DEBUGGER_CANCE
 | STAT-U01 | unit | no browser | `browsers: []`, `setup` names loading the extension |
 | STAT-U02 | unit | userScripts off | `userScripts: false`, `setup` names the toggle |
 | STAT-U03 | unit | `allowDebugger` after a cancel | flag cleared |
+| STAT-S01 | site | after the site run | informational: attachments and setup lines |
 | STAT-E01 | live | one CDP-lane attachment pinned by network capture | listed with pin `network` |

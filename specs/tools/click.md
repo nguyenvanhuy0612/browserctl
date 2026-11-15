@@ -1,7 +1,7 @@
 # `click`
 
-Status: approved
-Depends on: `architecture.md` (lanes), `targets.md`, `settle.md`, `sessions.md`, `errors.md`
+Status: verified (2026-11-14: common parameters from `actions.md`)
+Depends on: `actions.md`, `architecture.md` (lanes), `targets.md`, `settle.md`, `sessions.md`, `errors.md`
 (the parts this spec relies on are stated inline until those exist)
 
 ## Purpose
@@ -18,9 +18,12 @@ background tabs. Runs without the debugging bar unless `trusted: true`.
 | `doubleClick` | boolean | no | `false` | | double click |
 | `modifiers` | string[] | no | `[]` | each of `"Alt"`, `"Control"`, `"Meta"`, `"Shift"`, no duplicates | keys held |
 | `trusted` | boolean | no | `false` | | run in the CDP lane with real input (shows the debugging bar) |
+| `timeout` | number | no | 5 | 0 to 60 seconds | wait for the target to be actionable (`actions.md`) |
+| `scroll` | string | no | `"auto"` | `"auto"`, `"center"`, `"none"` | scrolling before the action (`actions.md`) |
+| `wait` | object | no | none | one `wait_for` condition plus `timeout` | wait for it after the action settles (`actions.md`) |
 | `tab` | integer | no | session's current tab | a tab this session owns | which tab |
 
-Six parameters. Unknown parameters are refused with `INVALID_PARAMS`, naming the valid ones.
+Unknown parameters are refused with `INVALID_PARAMS`, naming the valid ones.
 
 ## Behaviour
 
@@ -30,10 +33,23 @@ Six parameters. Unknown parameters are refused with `INVALID_PARAMS`, naming the
    current document (otherwise `REF_NOT_FOUND`); anything else is a Playwright selector. More than one match →
    `AMBIGUOUS_TARGET`.
 3. **DOM lane** (`trusted: false`), Playwright's injected script in the extension:
-   1. Actionability, polled by the daemon every 100 ms for up to 5 s (page timers are throttled
+   1. Retarget as Playwright does for clicks: an element that is not itself a control (for
+      example the text inside a button, or a node with `pointer-events: none`) acts through the
+      closest enclosing `button`, link, `[role=button]` or `[role=link]` (`retarget(…,
+      "button-link")`).
+   2. Actionability, polled by the daemon every 100 ms for up to `timeout` (5 s) (page timers are throttled
       in background tabs, so the page does not poll): attached, visible, enabled, non-inert;
-      scroll into view if outside the viewport; hit test at the centre (`expectHitTarget`).
-   2. Dispatch, in order: `pointerover`, `pointerenter`, `mouseover`, `mouseenter`, `pointermove`,
+      scroll into view if outside the viewport; hit test (`expectHitTarget`) at the click point:
+      the centre of the element's first box (`getClientRects()`, so a link that wraps is hit on
+      its first line), or, for an element without boxes of its own (`display: contents`), of its
+      contents' first box.
+   3. Each poll after a failed check scrolls the element again with the next alignment (`end`,
+      `center`, `start`, as Playwright does), so an element under a sticky or absolute header
+      comes out from under it; a cover that stays fails with `TARGET_COVERED` naming it when
+      `timeout` runs out.
+   4. The events go to the deepest element under the click point inside the element of step 1
+      (the target a real pointer would hit, through open shadow roots), else to that element.
+      Dispatch, in order: `pointerover`, `pointerenter`, `mouseover`, `mouseenter`, `pointermove`,
       `mousemove`, `pointerdown`, `mousedown`, focus if focusable, `pointerup`, `mouseup`, then
       `click` (left), `auxclick` (middle) or `contextmenu` (right). `doubleClick` repeats
       down/up/click with `detail: 2` and adds `dblclick`. Modifiers set `altKey`, `ctrlKey`,
@@ -64,7 +80,8 @@ Six parameters. Unknown parameters are refused with `INVALID_PARAMS`, naming the
 | `outcome.dialogs` | `{type, message, answer}[]` | yes | dialogs the click opened, each with the answer the tab's policy gave |
 | `outcome.domChanged` | boolean | yes | any DOM mutation between click and settle |
 | `outcome.settled` | boolean | yes | false when the 3 s cap was hit |
-| `hint` | string \| null | yes | set when the DOM-lane click had no visible effect |
+| `hint` | string \| null | yes | set when the DOM-lane click had no visible effect, or when `wait` timed out |
+| `waited` | object \| null | yes | the `wait` result (`actions.md`) |
 
 ```json
 {
@@ -92,7 +109,8 @@ Six parameters. Unknown parameters are refused with `INVALID_PARAMS`, naming the
 | `DEBUGGER_BUSY` | `trusted: true` while DevTools or another debugger holds the tab | `Another debugger is attached to this tab. Close DevTools there, or retry without trusted.` |
 | `INVALID_TARGET` | the selector does not parse | `Selector syntax error at <pos>. Use a ref from snapshot.` |
 | `PAGE_UNSCRIPTABLE` | `chrome://`, Web Store, PDF viewer, error page | `Extensions cannot act on this page. Navigate elsewhere.` |
-| `INVALID_PARAMS` | unknown or invalid parameter | `Valid parameters: target, button, doubleClick, modifiers, trusted, tab.` |
+| `TARGET_OUTSIDE_VIEWPORT` | `scroll: "none"` and the target's centre is outside the viewport | `The element is outside the viewport. Use scroll: "auto" or scroll it into view.` |
+| `INVALID_PARAMS` | unknown or invalid parameter | `Valid parameters: target, button, doubleClick, modifiers, timeout, scroll, wait, trusted, tab.` |
 
 ## Tool description (what the agent reads)
 
@@ -112,16 +130,15 @@ the lane column says otherwise. Fixture pages come from Playwright's `tests/asse
 | ID | Kind | Lane | Case | Asserts |
 | --- | --- | --- | --- | --- |
 | CLICK-U01 | unit | | `"e5"`, `"f1e7"` read as refs; `"#save"`, `"text=Save"` as selectors | parsing |
-| CLICK-U02 | unit | | unknown ref | `REF_NOT_FOUND` with hint |
-| CLICK-U03 | unit | | `doubleClick`, `modifiers`, `button: "right"` | event plan (DOM) and Playwright options (CDP) |
 | CLICK-U04 | unit | | duplicate modifier, `button: "back"`, unknown param `selector` | `INVALID_PARAMS` naming valid params |
 | CLICK-U05 | unit | | tab owned by another session | `TAB_NOT_OWNED`, extension never called |
-| CLICK-U06 | unit | | Playwright errors (strict mode, intercepts pointer events, not enabled, not visible) | mapped codes |
+| CLICK-U06 | unit | | Playwright errors (strict mode, intercepts pointer events, not enabled, inert, not visible, not editable, closed, timeout) | `AMBIGUOUS_TARGET`, `TARGET_COVERED`, `TARGET_DISABLED`, `TARGET_HIDDEN`, `TARGET_NOT_EDITABLE`, `TAB_CLOSED`, `TIMEOUT` |
 | CLICK-E01 | live | both | background tab, native button | handler fires; user's active tab unchanged; DOM lane shows no bar |
 | CLICK-E02 | live | both | `cursor:pointer` div with a document-level delegated handler | handler fires |
 | CLICK-E03 | live | both | link to another page | `urlChanged`, new title, `settled` |
-| CLICK-E04 | live | both | `target=_blank` link | `newTabs` has one tab owned by the session |
+| CLICK-E04 | live | both | `target=_blank` link, also while another session's tab is the window's active tab | `newTabs` has one tab owned by the clicking session; the active tab is the one that was active before |
 | CLICK-E05 | live | both | button calling `confirm()`; button calling `alert` then `confirm` | one, then two entries in `outcome.dialogs`; `confirm` answered false by default |
+| CLICK-E11 | live | dom | covered, disabled, ambiguous, unknown ref, malformed selector | `TARGET_COVERED` naming the cover, `TARGET_DISABLED`, `AMBIGUOUS_TARGET` with candidates, `REF_NOT_FOUND`, `INVALID_TARGET` |
 | CLICK-E10 | live | both | button calling `window.open` | DOM lane: no new tab, result hint names `trusted: true`; CDP lane: `newTabs` has the popup |
 | CLICK-E06 | live | cdp | idle detach, then a ref from before it | re-attaches once, click lands |
 | CLICK-E07 | live | both | ref from before a navigation | `REF_NOT_FOUND` |
@@ -144,14 +161,18 @@ the lane column says otherwise. Fixture pages come from Playwright's `tests/asse
 | CL-106 | live | both | click opens `alert` | reported, not a hang |
 | CL-107, CL-108 | live | both | element changes or is recycled on hover | no retarget |
 | LO-055, LO-056 | live | both | target removed in pointerdown / pointerup | no error |
-| MCP click (double, right, modifiers, test id, aria-ref-like text) | live | both | playwright-mcp `click.spec.ts` | same assertions on our result shape |
+| CLICK-E12 | live | both | playwright-mcp `click.spec.ts`: click, double, right, modifiers `Control`, `Shift`, `Shift`+`Alt`, a `testid=` locator, an id that looks like a ref (`#z2l9e43l3`) | the page sees each click and its modifier flags (in the CDP lane on macOS a real Control+click is a context click, as macOS makes it, so Control is checked there in the DOM lane only); the id resolves as a selector |
 | CLICK-S01 | site | dom | Facebook: Marketplace nav link by ref | `urlChanged`; snapshot shows Marketplace |
+
+`doubleClick`, `modifiers` and `button: "right"` are covered in both lanes by CL-028, CL-031,
+CL-057, CL-083 and CL-084, which assert the events the page receives.
 
 Not adopted: CL-002 frameset and CL-003 parallel popups (later, with frames and tabs specs);
 CL-019, CL-045..047, CL-059, CL-063, CL-079, CL-098, CL-118 (`force` and `trial` are not
-parameters); CL-101..105 (`scroll: "none"` is not a parameter); CL-090..093 (abort signals);
-CL-042, CL-060..062, CL-116, CL-120 (stable-position and animation checks need rendering frames:
-CDP lane only, adopted there); CL-085, CL-086, CL-089 (pressure and tweened movement: CDP lane
+parameters); CL-101..105 now map to `scroll: "none"` (`actions.md`, ACT-E04); CL-090..093 (abort signals);
+CL-042, CL-060..062, CL-116, CL-120 (stable-position and animation checks need rendering frames,
+which background tabs do not have, so the DOM lane has no stable check; in the CDP lane they would
+test Playwright's own `locator.click`, which runs unchanged); CL-085, CL-086, CL-089 (pressure and tweened movement: CDP lane
 only); CL-064, CL-081 (microtask ordering of real input: CDP lane only); CL-067..069, CL-076
 (navigation and frame detach races: in `settle.md`); CL-078, CL-082 (permission popup and open
 select: browser UI, CDP lane only); CL-121, CL-122 (timeout retry: covered by the 5 s rule).

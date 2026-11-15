@@ -1,0 +1,15 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Context</title></head>
+<body>
+<shadow-head data-title="Shadow title one"></shadow-head>
+<h2>Section A</h2>
+<div><button>Edit</button></div>
+<shadow-head data-title="Shadow title two"></shadow-head>
+<h2>Section B</h2>
+<div><button>Edit</button></div>
+<shadow-head data-title="Shadow title three"></shadow-head>
+<script nonce="fixture">
+customElements.define("shadow-head", class extends HTMLElement {
+  connectedCallback() { this.attachShadow({ mode: "open" }).innerHTML = `<h3>${this.dataset.title}</h3>`; }
+});
+</script>
+</body></html>

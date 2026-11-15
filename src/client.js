@@ -62,7 +62,12 @@ export async function callTool(tool, params, who) {
   const send = () =>
     fetch(`${base}/v1/tools/${tool}`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-browserctl-session": who.session, "x-browserctl-client": who.client },
+      headers: {
+        "content-type": "application/json",
+        "x-browserctl-session": who.session,
+        "x-browserctl-client": who.client,
+        ...(process.env.BROWSERCTL_CLOSE_TABS === "1" && { "x-browserctl-close-tabs": "1" }),
+      },
       body: JSON.stringify(params ?? {}),
     }).then((r) => r.json());
   try {

@@ -1,0 +1,8 @@
+<!doctype html>
+<title>Canvas</title>
+<style>body { margin: 0 } canvas { position: absolute; left: 50px; top: 40px }</style>
+<canvas id="c" width="200" height="100"></canvas>
+<script>
+  window.__log = [];
+  document.querySelector("#c").addEventListener("click", (e) => window.__log.push(`canvas ${e.offsetX},${e.offsetY} trusted=${e.isTrusted}`));
+</script>

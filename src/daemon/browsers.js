@@ -79,7 +79,6 @@ export class Browsers extends EventEmitter {
     }
     const previous = this.#byId.get(instanceId);
     if (previous?.link && previous.link !== link) previous.link.close();
-    const restarted = previous && previous.hello?.browserStartedAt !== hello.browserStartedAt;
     /** @type {Browser} */
     const browser = {
       instanceId,
@@ -100,7 +99,7 @@ export class Browsers extends EventEmitter {
     for (const name of ["tabs.created", "tabs.removed", "tabs.updated", "nav.beforeNavigate", "nav.committed", "nav.domContentLoaded", "nav.historyStateUpdated", "nav.completed", "nav.createdTarget", "nav.error", "net.request", "debugger.event", "debugger.detached", "diag"]) {
       link.on(name, forward(name));
     }
-    this.emit("connected", browser, { restarted: Boolean(restarted), previous });
+    this.emit("connected", browser);
   }
 
   /** @returns {Browser[]} */

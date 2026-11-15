@@ -13,6 +13,7 @@ function scriptingError(error) {
   let code = "SCRIPTING_ERROR";
   if (/no tab with/i.test(message)) code = "TAB_CLOSED";
   else if (/no frame with/i.test(message)) code = "FRAME_GONE";
+  else if (/frame with id \d+ was removed/i.test(message)) code = "DOCUMENT_REPLACED";
   else if (/cannot access|cannot be scripted|chrome:\/\/|error page|extensions gallery|devtools:/i.test(message)) code = "PAGE_UNSCRIPTABLE";
   return Object.assign(new Error(message), { code });
 }
@@ -129,9 +130,10 @@ async function toBase64(blob) {
  * @param {{windowId: number, format?: "png" | "jpeg", quality?: number, crop?: {x: number, y: number, width: number, height: number, scale: number}}} params
  */
 export async function capture({ windowId, format = "jpeg", quality = 80, crop }) {
-  const wait = lastCapture + CAPTURE_SPACING_MS - Date.now();
-  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-  lastCapture = Date.now();
+  // Reserve the next slot before waiting, so calls that arrive together are spaced too.
+  const slot = Math.max(Date.now(), lastCapture + CAPTURE_SPACING_MS);
+  lastCapture = slot;
+  if (slot > Date.now()) await new Promise((r) => setTimeout(r, slot - Date.now()));
   const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format, quality });
   const image = await createImageBitmap(await (await fetch(dataUrl)).blob());
   const box = crop

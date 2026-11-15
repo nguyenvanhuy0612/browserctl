@@ -1,7 +1,6 @@
 {
-  "name": "browserctl",
-  "version": "0.0.0-dev",
-  "private": true,
+  "name": "browserctl-mcp",
+  "version": "1.0.0",
   "description": "Browser control for AI agents in the user's real Chrome, through an MV3 extension and a local daemon.",
   "type": "module",
   "license": "MIT",
@@ -12,11 +11,20 @@
     "browserctl": "src/cli/main.js",
     "browserctl-mcp": "src/mcp/main.js"
   },
+  "files": [
+    "src/",
+    "extension/",
+    "docs/TOOLS.md",
+    "CHANGELOG.md"
+  ],
   "scripts": {
     "build": "node scripts/build-extension.js",
+    "prepack": "npm run build",
     "test": "node --test tests/unit/*.test.js",
     "test:live": "node --test --test-concurrency=1 tests/live/*.test.js",
     "typecheck": "tsc -p jsconfig.json",
+    "docs": "node scripts/tools-doc.js",
+    "preflight": "node scripts/preflight.js",
     "daemon": "node src/daemon/main.js"
   },
   "dependencies": {

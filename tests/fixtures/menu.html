@@ -1,0 +1,7 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Menu</title>
+<style>.closed a { display: inline-block; width: 0; height: 0; overflow: hidden; }</style></head>
+<body>
+<button id="open" aria-expanded="false" onclick="document.getElementById('m').className='';this.setAttribute('aria-expanded','true')">Menu</button>
+<div id="m" class="closed"><a href="#edit" onclick="window.__log.push('edit')">Edit</a></div>
+<script nonce="fixture">window.__log = [];</script>
+</body></html>

@@ -1,6 +1,6 @@
 # Extension UI: toolbar popup
 
-Status: approved
+Status: implemented
 Depends on: `interface.md`, `sessions.md`, `architecture.md` (extension error handling)
 
 ## Purpose
@@ -39,6 +39,6 @@ extension (`interface.md`).
 | ID | Kind | Case | Asserts |
 | --- | --- | --- | --- |
 | UI-E01 | live | popup page with the daemon running | shows `Connected`, the alias, user scripts `On` |
-| UI-E02 | live | after a trusted click, popup | `Attached to 1 tab` |
+| UI-E02 | live | after earlier attachments idle out, a trusted click, popup | `Attached to 1 tab` |
 | UI-E03 | live | Errors page after opening the popup | empty |
-| UI-S01 | site | owner opens the popup on Chrome | connection and alias visible |
+| UI-S01 | manual | owner opens the popup on Chrome | connection and alias visible |

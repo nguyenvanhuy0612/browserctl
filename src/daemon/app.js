@@ -3,6 +3,7 @@
 import { Browsers } from "./browsers.js";
 import { CallLog } from "./calllog.js";
 import { BctlError, toBctlError } from "./errors.js";
+import { toSelector } from "./targets.js";
 import { Registry } from "./registry.js";
 import { DEFAULT_DIALOG_POLICY, Sessions, tabKey } from "./sessions.js";
 
@@ -17,6 +18,15 @@ const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms)
 /** @typedef {{name: string, data: any, at: number}} TabEvent */
 
 export class Daemon {
+  /**
+   * The CDP lane, set by whoever starts the daemon (main.js, the live harness); unit tests without
+   * a browser leave it null.
+   * @type {import("./cdp/lane.js").CdpLane | null}
+   */
+  cdp = null;
+  /** The HTTP port, set once the server listens (a run worker connects back to it). */
+  port = 0;
+
   /** @param {{home: string, version: string, tools: any[], sessionIdleMs?: number}} options */
   constructor({ home, version, tools, sessionIdleMs }) {
     this.home = home;
@@ -32,16 +42,19 @@ export class Daemon {
     this.requests = new Map();
     /** @type {Map<string, number>} */
     this.requestSeq = new Map();
-    this.browsers.on("connected", (browser, info) => this.#onConnected(browser, info));
+    this.browsers.on("connected", (browser) => this.#onConnected(browser));
     this.browsers.on("event", (browser, name, data) => this.#onEvent(browser, name, data));
-    this.sweeper = setInterval(() => {
-      for (const id of this.sessions.expired()) this.endSession(id).catch(() => {});
-    }, 60_000);
+    this.sweeper = setInterval(() => this.sweep(), 60_000);
     this.sweeper.unref();
   }
 
-  /** @param {Browser} browser @param {{restarted: boolean}} info */
-  async #onConnected(browser, info) {
+  /** Ends the sessions idle past the limit (specs/sessions.md). */
+  async sweep() {
+    for (const id of this.sessions.expired()) await this.endSession(id).catch(() => {});
+  }
+
+  /** @param {Browser} browser */
+  async #onConnected(browser) {
     const link = browser.link;
     if (!link) return;
     link.notify("welcome", { alias: browser.alias, version: this.version });
@@ -58,7 +71,6 @@ export class Daemon {
     } catch {
       // the next call reconciles
     }
-    void info;
     // Nothing tracks an attachment across a daemon restart: drop every one (specs/sessions.md).
     try {
       const { tabIds } = await link.request("debugger.list");
@@ -80,18 +92,16 @@ export class Daemon {
     const ref = { instanceId: browser.instanceId, tabId };
     const key = tabKey(browser.instanceId, tabId);
 
-    // A tab opened by an owned tab joins its session (specs/sessions.md). onCreatedNavigationTarget
-    // names the source even for noopener links; openerTabId covers the rest.
-    const source = name === "nav.createdTarget" ? data.sourceTabId : name === "tabs.created" ? data.openerTabId : undefined;
-    if (typeof source === "number" && !this.sessions.ownerOf(browser.instanceId, tabId)) {
-      const opener = this.sessions.ownerOf(browser.instanceId, source);
-      if (opener) {
-        const session = this.sessions.sessions.get(opener.sessionId);
-        if (session) {
-          this.sessions.own(session, browser.instanceId, tabId, "owned");
-          this.groupTab(session, ref).catch(() => {});
-        }
-        this.#notify(tabKey(browser.instanceId, source), { name: "newTab", data: { tab: tabId, url: data.url }, at: Date.now() });
+    // A tab a page in an owned tab opens joins that tab's session (specs/sessions.md). Only
+    // onCreatedNavigationTarget names the source; tabs.onCreated's openerTabId is the window's
+    // active tab.
+    if (name === "nav.createdTarget" && !this.sessions.ownerOf(browser.instanceId, tabId)) {
+      const opener = this.sessions.ownerOf(browser.instanceId, data.sourceTabId);
+      const session = opener && this.sessions.sessions.get(opener.sessionId);
+      if (session) {
+        this.sessions.own(session, browser.instanceId, tabId, "owned");
+        this.#notify(tabKey(browser.instanceId, data.sourceTabId), { name: "newTab", data: { tab: tabId, url: data.url }, at: Date.now() });
+        this.#keepUserView(browser, tabId).catch(() => {});
       }
     }
     if (name === "tabs.removed") {
@@ -103,6 +113,17 @@ export class Daemon {
     if (name === "net.request") this.#recordRequest(key, data);
     if (name === "nav.domContentLoaded") this.armDialogs(ref, owner.dialogPolicy, data.frameId).catch(() => {});
     this.#notify(key, { name, data, at: Date.now() });
+  }
+
+  /**
+   * A tab a page opened must not take the user's view: if Chrome made it active, activate again the
+   * tab that was active before, which Chrome gives as its openerTabId (specs/sessions.md).
+   * @param {Browser} browser @param {number} tabId
+   */
+  async #keepUserView(browser, tabId) {
+    const link = Browsers.usable(browser);
+    const tab = await link.request("tabs.get", { tabId });
+    if (tab.active && typeof tab.openerTabId === "number" && tab.openerTabId !== tabId) await link.request("tabs.activate", { tabId: tab.openerTabId });
   }
 
   /** @param {string} key @param {any} data */
@@ -167,9 +188,36 @@ export class Daemon {
    * @param {{frameId?: number, timeoutMs?: number}} [options]
    */
   async dom(ref, op, args = {}, { frameId = 0, timeoutMs = 10_000 } = {}) {
-    const result = await this.linkOf(ref).request("dom.call", { tabId: ref.tabId, frameId, op, args: [args] }, timeoutMs);
-    if (!result?.ok) throw toBctlError(result ?? { code: "INTERNAL_ERROR", message: "empty answer" });
+    // locator forms Playwright has no engine for are rewritten here, for both lanes (specs/targets.md)
+    const original = /** @type {any} */ (args).target;
+    const selector = typeof original === "string" ? toSelector(original) : original;
+    const sent = selector === original ? args : { ...args, target: selector };
+    const result = await this.#domCall(ref, { tabId: ref.tabId, frameId, op, args: [sent] }, timeoutMs);
+    if (!result?.ok) {
+      const failure = result ?? { code: "INTERNAL_ERROR", message: "empty answer" };
+      if (selector !== original && typeof failure.message === "string") failure.message = failure.message.split(selector).join(original);
+      throw toBctlError(failure);
+    }
     return result;
+  }
+
+  /**
+   * One dom.call. A main-frame document being replaced (a navigation) is waited out, repeating the
+   * call on the new document every 100 ms for at most 2 s (specs/dom-lane.md).
+   * @param {TabRef} ref @param {object} params @param {number} timeoutMs
+   */
+  async #domCall(ref, params, timeoutMs) {
+    const deadline = Date.now() + 2000;
+    for (;;) {
+      try {
+        return await this.linkOf(ref).request("dom.call", params, timeoutMs);
+      } catch (error) {
+        const e = toBctlError(error);
+        if (e.cause !== "DOCUMENT_REPLACED" || /** @type {any} */ (params).frameId !== 0) throw e;
+        if (Date.now() >= deadline) throw new BctlError("TIMEOUT", "the page kept replacing its document for 2 s");
+        await sleep(100);
+      }
+    }
   }
 
   /** @param {TabRef} ref @param {string} op @param {object} [args] */
@@ -185,20 +233,26 @@ export class Daemon {
   }
 
   /**
-   * Polls an operation while it fails with a code that can change by itself (actionability).
+   * Polls an operation while it fails with a code that can change by itself (actionability). The
+   * attempt number lets the runtime scroll differently on a retry (specs/tools/click.md).
    * @template T
-   * @param {() => Promise<T>} fn
+   * @param {(attempt: number) => Promise<T>} fn
    * @param {number} [timeoutMs]
    * @returns {Promise<T>}
    */
   async retrying(fn, timeoutMs = 5000) {
     const deadline = Date.now() + timeoutMs;
-    for (;;) {
+    for (let attempt = 1; ; attempt++) {
       try {
-        return await fn();
+        return await fn(attempt);
       } catch (error) {
         const e = toBctlError(error);
-        if (!RETRIABLE.has(e.code) || Date.now() >= deadline) throw e;
+        if (!RETRIABLE.has(e.code)) throw e;
+        if (Date.now() >= deadline) {
+          // name the timeout when the daemon really waited (specs/actions.md)
+          if (attempt > 1) e.message = `${e.message} (gave up after ${timeoutMs / 1000} s; raise timeout to wait longer)`;
+          throw e;
+        }
         await sleep(100);
       }
     }
@@ -208,24 +262,6 @@ export class Daemon {
   async armDialogs(ref, policy = DEFAULT_DIALOG_POLICY, frameId) {
     if (frameId === undefined) await this.domAll(ref, "armDialogs", policy);
     else await this.dom(ref, "armDialogs", policy, { frameId });
-  }
-
-  /** @param {Session} session @param {TabRef} ref */
-  async groupTab(session, ref) {
-    const link = this.linkOf(ref);
-    const existing = session.groups[ref.instanceId];
-    try {
-      const { groupId } = await link.request("tabs.group", {
-        tabIds: [ref.tabId],
-        ...(existing !== undefined ? { groupId: existing } : { title: `agent ${session.client}`, color: session.color }),
-      });
-      session.groups[ref.instanceId] = groupId;
-    } catch {
-      // the group was closed by the user: start a new one
-      const { groupId } = await link.request("tabs.group", { tabIds: [ref.tabId], title: `agent ${session.client}`, color: session.color });
-      session.groups[ref.instanceId] = groupId;
-    }
-    this.sessions.persist();
   }
 
   // ---------- settle (specs/settle.md) ----------
@@ -325,7 +361,7 @@ export class Daemon {
   /** @param {string} sessionId */
   async endSession(sessionId) {
     const { tabs, session } = this.sessions.end(sessionId);
-    const cdp = /** @type {any} */ (this).cdp;
+    const cdp = this.cdp;
     cdp?.endSession(sessionId);
     for (const t of tabs) {
       const browser = this.browsers.byId(t.instanceId);
@@ -341,13 +377,15 @@ export class Daemon {
    * Validates and runs one tool call (specs/interface.md).
    * @param {string} name
    * @param {unknown} params
-   * @param {{sessionId: string, client: string}} who
+   * @param {{sessionId: string, client: string, closeTabsOnEnd?: boolean}} who
    */
   async call(name, params, who) {
     const started = Date.now();
-    const session = this.sessions.touch(who.sessionId, who.client);
+    const session = this.sessions.touch(who.sessionId, who.client, { closeTabsOnEnd: who.closeTabsOnEnd });
     let response;
     try {
+      const tool = this.registry.get(name);
+      const valid = this.registry.validate(name, params ?? {});
       // Right after the daemon starts, extensions are still reconnecting (they retry every 2 s).
       if (this.browsers.connected().length === 0 && Date.now() - this.startedAt < 40_000 && name !== "status") {
         await new Promise((resolve) => {
@@ -358,14 +396,13 @@ export class Daemon {
           });
         });
       }
-      const tool = this.registry.get(name);
-      const valid = this.registry.validate(name, params ?? {});
       const result = await tool.handler(valid, { daemon: this, session });
       response = { ok: true, ...result };
     } catch (error) {
       response = { ok: false, error: toBctlError(error).toJSON() };
     }
-    this.callLog.write({ who, session, name, params, response, ms: Date.now() - started });
+    const browser = session.current ? (this.browsers.byId(session.current.instanceId)?.alias ?? null) : null;
+    this.callLog.write({ who, session, browser, name, params, response, ms: Date.now() - started });
     return response;
   }
 

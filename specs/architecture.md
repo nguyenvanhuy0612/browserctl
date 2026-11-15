@@ -1,6 +1,6 @@
 # Architecture
 
-Status: approved
+Status: verified
 Depends on: none
 
 ## Goal
@@ -42,8 +42,7 @@ Lane choice rules:
 1. A tool runs in the DOM lane unless its spec says otherwise.
 2. An action takes `trusted: true` to run in the CDP lane: sites that check `isTrusted`, menus
    opened by CSS `:hover`, popups opened with `window.open` (blocked without a user gesture;
-   `target=_blank` links do open, spike), clipboard, fullscreen, file pickers, `beforeunload`
-   (Chrome shows it only after a real gesture).
+   `target=_blank` links do open, spike), clipboard, fullscreen, file pickers.
 3. Every result says which lane ran (`lane: "dom" | "cdp"`), so a banner always has a visible cause.
 4. The daemon never escalates silently. A DOM-lane failure that the CDP lane could fix returns an
    error whose `hint` names `trusted: true` or the CDP-lane tool.

@@ -11,6 +11,9 @@ const JOURNALED =
  * @typedef {{tabId: number, primary: ClientSession, sessions: Map<string, ClientSession>, children: Set<string>, journal: {method: string, params: any, clientIdentifier?: string, currentIdentifier?: string}[]}} Target
  */
 
+// Domains whose events arrive without the client asking for them.
+const UNSOLICITED = new Set(["Target", "Inspector"]);
+
 let relayCounter = 0;
 
 export class CdpRelay {
@@ -21,6 +24,8 @@ export class CdpRelay {
   #sessions = new Map();
   /** @type {Map<string, Target>} */
   #childSessions = new Map();
+  /** Domains this relay's client used on each child frame's session. @type {Map<string, Set<string>>} */
+  #childDomains = new Map();
   #browserSessions = new Set();
   #autoAttach = false;
   #nextSession = 1;
@@ -82,6 +87,16 @@ export class CdpRelay {
     this.#sink(message);
   }
 
+  /**
+   * Whether this relay's client uses a domain on the tab's session, or on a child frame's session.
+   * @param {number} tabId @param {string} domain @param {string} [cdpSessionId]
+   */
+  uses(tabId, domain, cdpSessionId) {
+    if (cdpSessionId) return Boolean(this.#childSessions.get(cdpSessionId)?.tabId === tabId && this.#childDomains.get(cdpSessionId)?.has(domain));
+    const target = this.#targets.get(tabId);
+    return Boolean(target && [...target.sessions.values()].some((s) => s.domains.has(domain)));
+  }
+
   /** @param {number} tabId */
   claimed(tabId) {
     return this.#targets.has(tabId);
@@ -122,7 +137,10 @@ export class CdpRelay {
     if (!target) return;
     for (const session of target.sessions.values()) this.#toClient({ sessionId: session.id, method: "Runtime.executionContextsCleared", params: {} });
     for (const entry of target.journal) {
-      const result = await this.#attachments.send(tabId, undefined, entry.method, entry.params).catch(() => null);
+      // a replayed Runtime.enable marks the session, so a client that connects later gets the
+      // contexts; this client receives them live (specs/relay.md)
+      const replay = entry.method === "Runtime.enable" ? this.#attachments.enableRuntime(tabId, undefined, entry.params).then((r) => r.result) : this.#attachments.send(tabId, undefined, entry.method, entry.params);
+      const result = await replay.catch(() => null);
       if (entry.clientIdentifier !== undefined && result) entry.currentIdentifier = result.identifier;
     }
   }
@@ -132,7 +150,10 @@ export class CdpRelay {
     const target = this.#targets.get(tabId);
     if (!target) return;
     this.#targets.delete(tabId);
-    for (const child of target.children) this.#childSessions.delete(child);
+    for (const child of target.children) {
+      this.#childSessions.delete(child);
+      this.#childDomains.delete(child);
+    }
     for (const session of [...target.sessions.values()].reverse()) {
       this.#sessions.delete(session.id);
       if (this.#autoAttach) {
@@ -151,16 +172,18 @@ export class CdpRelay {
     }
     if (!sessionId && method === "Target.detachedFromTarget") {
       this.#childSessions.delete(params.sessionId);
+      this.#childDomains.delete(params.sessionId);
       target.children.delete(params.sessionId);
     }
     if (!this.#autoAttach) return;
+    // A domain's events go to the sessions that used it; one that only another relay on the shared
+    // attachment used is not this client's (specs/relay.md).
+    const domain = method.slice(0, method.indexOf("."));
     if (sessionId) {
-      if (this.#childSessions.has(sessionId)) this.#toClient({ sessionId, method, params });
+      if (this.#childSessions.has(sessionId) && (UNSOLICITED.has(domain) || this.#childDomains.get(sessionId)?.has(domain))) this.#toClient({ sessionId, method, params });
       return;
     }
-    const domain = method.slice(0, method.indexOf("."));
-    const listeners = [...target.sessions.values()].filter((s) => s.domains.has(domain));
-    const recipients = domain === "Target" || listeners.length === 0 ? [target.primary] : listeners;
+    const recipients = UNSOLICITED.has(domain) ? [target.primary] : [...target.sessions.values()].filter((s) => s.domains.has(domain));
     for (const session of recipients) this.#toClient({ sessionId: session.id, method, params });
   }
 
@@ -251,15 +274,26 @@ export class CdpRelay {
     if (!session) {
       const target = this.#childSessions.get(sessionId);
       if (!target) throw new Error(`Session with given id not found: ${sessionId}`);
+      const [childDomain, childVerb] = method.split(".");
+      let domains = this.#childDomains.get(sessionId);
+      if (!domains) this.#childDomains.set(sessionId, (domains = new Set()));
+      if (childVerb !== "disable") domains.add(childDomain);
+      else {
+        domains.delete(childDomain);
+        if (this.#attachments.domainInUse(target.tabId, childDomain, sessionId)) return {};
+      }
+      if (method === "Runtime.enable") return this.#enableRuntime(target.tabId, sessionId, sessionId, params);
       return this.#attachments.send(target.tabId, sessionId, method, params);
     }
     const target = /** @type {Target} */ (this.#targets.get(session.tabId));
     const [domain, verb] = method.split(".");
-    if (verb === "enable") session.domains.add(domain);
-    if (verb === "disable") {
+    if (verb !== "disable") session.domains.add(domain);
+    else {
       session.domains.delete(domain);
-      if ([...target.sessions.values()].some((s) => s.domains.has(domain))) return {};
+      if (this.uses(target.tabId, domain)) return {};
       target.journal = target.journal.filter((e) => e.method !== `${domain}.enable`);
+      // the attachment is shared: another relay may still need the domain
+      if (this.#attachments.domainInUse(target.tabId, domain)) return {};
     }
     if (method === "Target.getTargetInfo" && !params.targetId) return { targetInfo: this.#info(target) };
     if (method === "Page.removeScriptToEvaluateOnNewDocument") {
@@ -270,13 +304,23 @@ export class CdpRelay {
     // Chrome reports existing contexts on Runtime.enable; Playwright drops contexts of frames it has
     // not seen yet, so Runtime.enable waits for a Page.getFrameTree in flight on the same session.
     if (method === "Runtime.enable" && session.frameTree) await session.frameTree.catch(() => {});
-    const pending = this.#attachments.send(target.tabId, undefined, method, params);
+    const pending = method === "Runtime.enable" ? this.#enableRuntime(target.tabId, undefined, session.id, params) : this.#attachments.send(target.tabId, undefined, method, params);
     if (method === "Page.getFrameTree") session.frameTree = pending;
     const result = await pending;
     if (JOURNALED.test(method)) {
       const entry = { method, params, ...(method === "Page.addScriptToEvaluateOnNewDocument" && { clientIdentifier: result.identifier, currentIdentifier: result.identifier }) };
       target.journal.push(entry);
     }
+    return result;
+  }
+
+  /**
+   * Runtime.enable, then the contexts Chrome reported only to an earlier client (specs/relay.md).
+   * @param {number} tabId @param {string | undefined} cdpSessionId @param {string} clientSessionId @param {object} params
+   */
+  async #enableRuntime(tabId, cdpSessionId, clientSessionId, params) {
+    const { result, contexts } = await this.#attachments.enableRuntime(tabId, cdpSessionId, params);
+    for (const context of contexts) this.#toClient({ sessionId: clientSessionId, method: "Runtime.executionContextCreated", params: { context } });
     return result;
   }
 

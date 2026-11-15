@@ -19,9 +19,9 @@ export const HINTS = {
   TARGET_HIDDEN: "The element is not visible. Open its menu or section first.",
   TARGET_DISABLED: "The element is disabled. Fill the required fields or wait.",
   TARGET_COVERED: "Another element is on top. Close or click it first.",
+  TARGET_OUTSIDE_VIEWPORT: "The element is outside the viewport. Use scroll: \"auto\" or scroll it into view.",
   TARGET_NOT_EDITABLE: "This element does not take text. Target the input itself.",
   OPTION_NOT_FOUND: "Read the select's options with snapshot and pass an option value or label.",
-  DIALOG_OPEN: "A native dialog blocks the page: handle_dialog({accept: true or false, trusted: true}).",
   NAVIGATION_FAILED: "The page did not load. Check the URL or the network.",
   FILE_NOT_FOUND: "Pass absolute paths of existing files on this machine.",
   BODY_UNAVAILABLE: "Turn on network_requests({captureBodies: true}) and repeat the action.",
@@ -32,6 +32,10 @@ export const HINTS = {
   TIMEOUT: "The call took too long. Check the page with snapshot.",
   INTERNAL_ERROR: "A fault in browserctl. Retry once; if it repeats, report it with the call log.",
 };
+
+/** The hint of a DOM-lane TIMEOUT: the page itself did not answer (specs/errors.md). */
+export const PAGE_BLOCKED_HINT =
+  "The page did not answer: a dialog only the user can answer (an alert the page opened while loading in the focused tab), or a script that never yields. Tell the user, or close the tab.";
 
 export class BctlError extends Error {
   /**
@@ -59,6 +63,7 @@ export class BctlError extends Error {
 // Codes the extension or the page runtime use internally, mapped to public ones.
 const INTERNAL_CODES = /** @type {Record<string, string>} */ ({
   FRAME_GONE: "REF_NOT_FOUND",
+  DOCUMENT_REPLACED: "REF_NOT_FOUND",
   UNKNOWN_METHOD: "EXTENSION_OUTDATED",
   UNKNOWN_OP: "EXTENSION_OUTDATED",
   NOT_ATTACHED: "INTERNAL_ERROR",
@@ -79,5 +84,7 @@ export function toBctlError(error) {
   const raw = typeof e?.code === "string" ? e.code : "INTERNAL_ERROR";
   const code = INTERNAL_CODES[raw] ?? raw;
   const { code: _c, message: _m, ok: _o, ...extra } = typeof e === "object" && e !== null && !(e instanceof Error) ? e : {};
-  return new BctlError(code in HINTS ? code : "INTERNAL_ERROR", String(e?.message ?? e), extra);
+  const mapped = new BctlError(code in HINTS ? code : "INTERNAL_ERROR", String(e?.message ?? e), extra);
+  mapped.cause = raw; // the extension's own code, for the daemon's retry decisions
+  return mapped;
 }

@@ -1,6 +1,6 @@
 # `network_requests`
 
-Status: approved
+Status: verified
 Depends on: `sessions.md`, `relay.md`, `errors.md`
 
 ## Purpose
@@ -62,5 +62,9 @@ To call an API with the page's cookies, use evaluate with fetch.
 | NET-E01 | live | page making 3 fetches | listed with status, no debugger |
 | NET-E02 | live | `filter`, `types`, `since` | correct subset |
 | NET-E03 | live | body without capture | `BODY_UNAVAILABLE` |
+| NET-S01 | site | Facebook after load, `limit: 5` | requests listed |
 | NET-E04 | live | capture on, fetch JSON, read body | body equals the response; bar shown; capture off detaches after idle |
-| playwright-mcp `network.spec.ts` | live | adopted list and detail cases | same results |
+| NET-E05 | live | playwright-mcp `network.spec.ts`: a click's fetch (200) and a missing image (404), a substring `filter`, an invalid `/regex/` filter, ids that stay with their request, details of one request with its headers, a failed request | listed with status; filtered; `INVALID_PARAMS`; the same id finds the same request; `requestHeaders` and `status`; the failure with its error, listed once |
+
+Not adopted from `network.spec.ts`: the `static` option (`types` selects instead), the list's text
+numbering (ids are fields), saving a response body to a file (bodies come back in the result).

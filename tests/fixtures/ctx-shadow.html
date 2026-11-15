@@ -1,0 +1,12 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Context in a component</title></head>
+<body>
+<h1>Page title</h1>
+<edit-list></edit-list>
+<script nonce="fixture">
+customElements.define("edit-list", class extends HTMLElement {
+  connectedCallback() {
+    this.attachShadow({ mode: "open" }).innerHTML = `<h2>Shadow A</h2><div><button>Edit</button></div><h2>Shadow B</h2><div><button>Edit</button></div>`;
+  }
+});
+</script>
+</body></html>

@@ -1,0 +1,11 @@
+<!doctype html>
+<title>Leave guard (attr)</title>
+<body onbeforeunload="ran('attribute'); return 'unsaved'">
+<button id="touch">Touch</button>
+<script>
+  window.__log = [];
+  document.querySelector("#touch").addEventListener("click", (e) => window.__log.push(`touch trusted=${e.isTrusted}`));
+  function ran(name) { sessionStorage.setItem("unloadHandlers", (sessionStorage.getItem("unloadHandlers") ?? "") + name + " "); }
+  
+</script>
+</body>

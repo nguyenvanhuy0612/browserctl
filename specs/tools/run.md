@@ -1,6 +1,6 @@
 # `run`
 
-Status: approved
+Status: verified
 Depends on: `relay.md`, `sessions.md`, `errors.md`
 
 ## Purpose
@@ -31,8 +31,13 @@ The value `code` returns is the result.
    the next call starts a new worker.
 3. Capture `console.log` output (at most 200 lines).
 4. Serialize the return value as `evaluate` does.
-5. New tabs that `code` opens with `context.newPage()` join the session (inactive, grouped).
-6. `page.close()` closes the tab and drops it from the session. `browser.close()` is not
+5. New tabs that `code` opens with `context.newPage()` join the session (inactive, not grouped).
+6. An error thrown outside the call's own promise chain, by a listener or a route handler that
+   `code` registered (an uncaught exception or unhandled rejection in the worker), does not stop
+   the worker: while a call runs it fails that call with `EVAL_ERROR`
+   (`uncaught in a listener or route handler: <error>`); between calls it is added to the next
+   call's `console` as `uncaught: <error>`. `state` is kept either way.
+7. `page.close()` closes the tab and drops it from the session. `browser.close()` is not
    reachable: `browser` is not in scope and the relay refuses `Browser.close`.
 
 ## Result
@@ -66,5 +71,13 @@ return a value. Shows Chrome's debugging bar while running.
 | RUN-E03 | live | `page.mouse.click(x, y)` on a canvas | handler fires |
 | RUN-E04 | live | throws on line 3 | `EVAL_ERROR` naming line 3 |
 | RUN-E05 | live | synchronous `while(true)` with `timeout: 2` | `TIMEOUT` at 2 s, daemon answers other calls meanwhile, next `run` works with empty `state` |
-| RUN-E06 | live | `context.newPage()` | new tab owned, inactive, grouped |
-| playwright-mcp `run-code.spec.ts` | live | adopted | same results |
+| RUN-E06 | live | `context.newPage()` | new tab owned, inactive, not grouped |
+| RUN-E07 | live | playwright-mcp `run-code.spec.ts` "return value": role click, then return an object | the object; the page's click handler ran |
+| RUN-E08 | live | "no-require": `require('fs')` | `EVAL_ERROR` with `require is not defined` |
+| RUN-E09 | live | "exposes benign globals" | `setTimeout`, `URL`, `fetch`, `Buffer`, `AbortController`, `TextEncoder` are functions, `crypto` an object, `require` undefined |
+| RUN-E10 | live | "delayed route with setTimeout" | `{path: "/api/slow"}` |
+| RUN-E11 | live | "route handler exception keeps server alive"; a `requestfinished` listener that throws during a later call; one that throws between calls | `EVAL_ERROR` naming each error raised during a call, the one between calls in the next `console`; `state` kept; `tabs` answers |
+
+Not adopted from `run-code.spec.ts`: page console messages in the result (the result's `console`
+is the code's own output); `filename` cases (no file parameter); `process` being undefined (the
+worker is the user's own Node process, `process` stays reachable).

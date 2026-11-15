@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Targets</title></head>
+<body>
+<section id="part" aria-label="Part"><h2>Part</h2><button onclick="__log.push('inside')">Inside button</button></section>
+<button>Same</button><button>Same</button><button>Same</button>
+<div id="box"><button id="rep" onclick="__log.push('replaced one')">Replace me</button></div>
+<button id="replace" onclick="document.getElementById('box').innerHTML = '<button id=rep>Replace me</button>'">Replace</button>
+<shadow-card></shadow-card>
+<label>Phone <input id="phone"></label>
+<label>Size <select id="size"><option>Small</option><option>Large</option></select></label>
+<div role="switch" id="dark" aria-checked="false" tabindex="0" onclick="this.setAttribute('aria-checked', String(this.getAttribute('aria-checked') !== 'true'))">Dark mode</div>
+<script nonce="fixture">
+window.__log = [];
+customElements.define("shadow-card", class extends HTMLElement {
+  connectedCallback() {
+    const root = this.attachShadow({ mode: "open" });
+    root.innerHTML = '<p>Shadow text</p><button>Shadow button</button>';
+    root.querySelector("button").addEventListener("click", () => window.__log.push("shadow"));
+  }
+});
+// a mask like a phone widget: digits become (123) 456-7890
+const phone = document.getElementById("phone");
+phone.addEventListener("input", () => {
+  const d = phone.value.replace(/\D/g, "").slice(0, 10);
+  phone.value = d.length > 6 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : d;
+});
+</script>
+</body></html>

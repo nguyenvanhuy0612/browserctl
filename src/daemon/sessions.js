@@ -6,7 +6,6 @@ import path from "node:path";
 import { BctlError } from "./errors.js";
 
 export const DEFAULT_DIALOG_POLICY = Object.freeze({ alert: "accept", confirm: "dismiss", prompt: "dismiss", scope: "always" });
-const GROUP_COLORS = ["blue", "cyan", "green", "purple", "pink", "orange", "yellow", "red", "grey"];
 
 /** @typedef {{instanceId: string, tabId: number}} TabRef */
 /**
@@ -16,8 +15,6 @@ const GROUP_COLORS = ["blue", "cyan", "green", "purple", "pink", "orange", "yell
  *   createdAt: number,
  *   lastSeen: number,
  *   current: TabRef | null,
- *   color: string,
- *   groups: Record<string, number>,
  *   closeTabsOnEnd: boolean,
  * }} Session
  */
@@ -35,7 +32,6 @@ export class Sessions {
   closed = new Map();
   #file;
   #idleMs;
-  #colorIndex = 0;
 
   /** @param {{home: string, idleMs?: number}} options */
   constructor({ home, idleMs = 30 * 60_000 }) {
@@ -64,8 +60,11 @@ export class Sessions {
     }
   }
 
-  /** @param {string} id @param {string} client */
-  touch(id, client) {
+  /**
+   * The session, created on its first call (specs/sessions.md).
+   * @param {string} id @param {string} client @param {{closeTabsOnEnd?: boolean}} [created] read only when the session is created
+   */
+  touch(id, client, { closeTabsOnEnd = false } = {}) {
     let session = this.sessions.get(id);
     if (!session) {
       session = {
@@ -74,9 +73,7 @@ export class Sessions {
         createdAt: Date.now(),
         lastSeen: Date.now(),
         current: null,
-        color: GROUP_COLORS[this.#colorIndex++ % GROUP_COLORS.length],
-        groups: {},
-        closeTabsOnEnd: false,
+        closeTabsOnEnd,
       };
       this.sessions.set(id, session);
       this.persist();
@@ -138,13 +135,6 @@ export class Sessions {
     const owner = this.release(instanceId, tabId);
     if (owner) this.closed.set(tabKey(instanceId, tabId), Date.now());
     return owner;
-  }
-
-  /** A browser restarted: its tab ids mean nothing any more. @param {string} instanceId */
-  browserRestarted(instanceId) {
-    for (const key of [...this.owners.keys()]) if (key.startsWith(`${instanceId}:`)) this.owners.delete(key);
-    for (const session of this.sessions.values()) if (session.current?.instanceId === instanceId) session.current = null;
-    this.persist();
   }
 
   /** @param {Session} session @param {TabRef | null} tab */

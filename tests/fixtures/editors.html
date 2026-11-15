@@ -1,0 +1,19 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Editors</title></head>
+<body>
+<div id="lex" contenteditable="true" role="textbox" aria-label="Async editor" style="min-height:40px;border:1px solid #999"><p><br></p></div>
+<form id="f"><input id="q" aria-label="Query"></form>
+<script nonce="fixture">
+window.__log = [];
+// Like Lexical: the editor owns its model. It takes what the browser inserted, empties the DOM at once,
+// and renders the model a microtask later, so a read right after the input event sees no text.
+const lex = document.getElementById('lex');
+let model = '';
+lex.addEventListener('input', () => {
+  model = lex.innerText.replace(/\n+$/, '');
+  lex.innerHTML = '<p><br></p>';
+  queueMicrotask(() => { const p = document.createElement('p'); p.textContent = model; lex.replaceChildren(p); });
+});
+const q = document.getElementById('q');
+document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault(); __log.push('submitted ' + q.value); q.value = ''; });
+</script>
+</body></html>

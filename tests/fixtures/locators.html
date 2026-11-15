@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Locators</title></head>
+<body>
+<button id="save" onclick="__log.push('save')">Save</button>
+<label for="em">Email</label><input id="em" name="email" value="a@b.c">
+<input id="q" placeholder="Search here">
+<button data-testid="submit-btn" onclick="__log.push('submit')">Submit</button>
+<img alt="Company logo" width="20" height="20" onclick="__log.push('logo')" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
+<span title="Close dialog" role="button" tabindex="0" onclick="__log.push('close')">x</span>
+<a id="doc" href="/docs/page" data-id="42">Docs</a>
+<select id="one"><option value="r">Red</option><option value="g" selected>Green</option></select>
+<select id="many" multiple><option value="a" selected>A</option><option value="b">B</option><option value="c" selected>C</option></select>
+<input type="checkbox" id="agree" checked>
+<div role="switch" aria-checked="true" id="sw" tabindex="0">Wifi</div>
+<input type="email" id="bad" value="nope" required>
+<div id="hidden" style="display:none">Secret text</div>
+<div id="note" contenteditable="true" aria-label="Note">BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB</div>
+<button id="off" disabled>Disabled</button>
+<ul id="items">
+  <li>one</li><li>two</li><li>three</li><li>four</li><li>five</li><li>six</li>
+  <li>seven</li><li>eight</li><li>nine</li><li>ten</li><li>eleven</li><li>twelve</li>
+</ul>
+<div id="long">Long text start. AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA</div>
+<iframe src="child.html" style="width:300px;height:80px"></iframe>
+<div style="height:3000px"></div>
+<button id="far">Far away</button>
+<script nonce="fixture">window.__log = [];</script>
+</body></html>

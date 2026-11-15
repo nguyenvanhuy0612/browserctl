@@ -1,0 +1,12 @@
+<!doctype html>
+<title>Hostile page</title>
+<button id="go">Go</button>
+<label>Field <input id="field"></label>
+<script>
+  window.__log = [];
+  document.querySelector("#go").addEventListener("click", () => window.__log.push("go"));
+  document.querySelector("#field").addEventListener("input", (e) => window.__log.push(`field ${e.target.value}`));
+  // what some pages do to globals: the DOM lane's isolated world must not care
+  delete window.Node;
+  EventTarget.prototype.addEventListener = function () { throw new Error("no listeners today"); };
+</script>

@@ -5,18 +5,20 @@ import path from "node:path";
 import { Daemon } from "../app.js";
 import { BctlError } from "../errors.js";
 import { tabKey } from "../sessions.js";
-import { cdp, tab, target, trusted } from "./common.js";
+import { cdp, tab, target, trusted, urlMatcher } from "./common.js";
 
 const RESULT_LIMIT = 50 * 1024;
 
 /**
  * Builds the MAIN-world script for evaluate: the agent's code is part of the source text, so no
- * eval or new Function runs in the page (page CSP would block them).
+ * eval or new Function runs in the page (page CSP would block them). The code is compiled as an
+ * argument at the script's top level, where only the page's globals are in scope, not the
+ * wrapper's variables (specs/tools/evaluate.md).
  * @param {string} fn
  * @param {string | null} nonce
  */
 export function evaluateSource(fn, nonce) {
-  return `(async () => {
+  return `(async (input) => {
   const mark = ${JSON.stringify(nonce)};
   const find = (root) => {
     const hit = root.querySelector('[data-bctl-target="' + mark + '"]');
@@ -49,15 +51,15 @@ export function evaluateSource(fn, nonce) {
     return out;
   };
   try {
-    const value = (
-${fn}
-    );
+    const value = input();
     const result = typeof value === "function" ? await value(element) : await value;
     return { ok: true, type: result === null ? "null" : (typeof Node !== "undefined" && result instanceof Node ? "node" : typeof result), value: describe(result, new Set(), 0) };
   } catch (error) {
     return { ok: false, message: String(error && error.message || error), stack: String(error && error.stack || "").split("\\n")[1] || "" };
   }
-})()`;
+})(() => (
+${fn}
+))`;
 }
 
 /** @param {any} value */
@@ -95,6 +97,18 @@ export const evaluate = {
   },
 };
 
+const EXTENSION_FORMATS = /** @type {Record<string, "png" | "jpeg">} */ ({ ".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg" });
+
+/**
+ * The image format: given, else from the path's extension, else jpeg (specs/tools/take_screenshot.md).
+ * @param {"png" | "jpeg" | undefined} format @param {string | undefined} file
+ */
+function screenshotFormat(format, file) {
+  const fromPath = file ? EXTENSION_FORMATS[path.extname(file).toLowerCase()] : undefined;
+  if (format && fromPath && format !== fromPath) throw new BctlError("INVALID_PARAMS", `format ${format} does not match the extension of ${file}`);
+  return format ?? fromPath ?? "jpeg";
+}
+
 /** @type {import("../registry.js").Tool} */
 export const take_screenshot = {
   name: "take_screenshot",
@@ -105,7 +119,7 @@ export const take_screenshot = {
     properties: {
       target,
       fullPage: { type: "boolean", default: false },
-      format: { type: "string", enum: ["jpeg", "png"], default: "jpeg" },
+      format: { type: "string", enum: ["jpeg", "png"], description: "Default: from path's extension, else jpeg." },
       path: { type: "string", minLength: 1, description: "Absolute path to save to." },
       tab,
     },
@@ -113,6 +127,7 @@ export const take_screenshot = {
   async handler(p, { daemon, session }) {
     if (p.fullPage && p.target) throw new BctlError("INVALID_PARAMS", "fullPage and target cannot be combined");
     if (p.path && !path.isAbsolute(p.path)) throw new BctlError("INVALID_PARAMS", "path must be absolute");
+    const format = screenshotFormat(p.format, p.path);
     const ref = await daemon.tab(session, p.tab);
     const link = daemon.linkOf(ref);
     const meta = await link.request("tabs.get", { tabId: ref.tabId });
@@ -122,17 +137,17 @@ export const take_screenshot = {
     let lane;
     if (rendered && !p.fullPage) {
       const crop = p.target ? await daemon.dom(ref, "box", { target: p.target }, { frameId: Daemon.frameOf(p.target) }) : undefined;
-      shot = await link.request("dom.capture", { windowId: meta.windowId, format: p.format, quality: 80, crop }, 15_000);
+      shot = await link.request("dom.capture", { windowId: meta.windowId, format, quality: 80, crop }, 15_000);
       lane = "dom";
     } else {
-      shot = await cdp(daemon).screenshot(ref, { fullPage: p.fullPage, target: p.target, format: p.format });
+      shot = await cdp(daemon).screenshot(ref, { fullPage: p.fullPage, target: p.target, format });
       lane = "cdp";
     }
-    const file = p.path ?? path.join(daemon.home, "out", `${ref.tabId}-${Date.now()}.${p.format === "png" ? "png" : "jpg"}`);
+    const file = p.path ?? path.join(daemon.home, "out", `${ref.tabId}-${Date.now()}.${format === "png" ? "png" : "jpg"}`);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const bytes = Buffer.from(shot.base64, "base64");
     fs.writeFileSync(file, bytes);
-    return { lane, path: file, width: shot.width, height: shot.height, bytes: bytes.length, mimeType: p.format === "png" ? "image/png" : "image/jpeg" };
+    return { lane, path: file, width: shot.width, height: shot.height, bytes: bytes.length, mimeType: format === "png" ? "image/png" : "image/jpeg" };
   },
 };
 
@@ -156,7 +171,7 @@ export const network_requests = {
   },
   async handler(p, { daemon, session }) {
     const ref = await daemon.tab(session, p.tab);
-    const lane = /** @type {any} */ (daemon).cdp;
+    const lane = daemon.cdp;
     if (p.captureBodies !== undefined) await cdp(daemon).captureBodies(ref, p.captureBodies);
     const capturing = Boolean(lane?.isCapturing(ref));
     const list = daemon.requests.get(tabKey(ref.instanceId, ref.tabId)) ?? [];
@@ -172,9 +187,9 @@ export const network_requests = {
       }
       return { lane: capturing ? "cdp" : "dom", request, capturingBodies: capturing };
     }
-    const matcher = p.filter && /^\/.*\/[a-z]*$/.test(p.filter) ? new RegExp(p.filter.slice(1, p.filter.lastIndexOf("/")), p.filter.slice(p.filter.lastIndexOf("/") + 1)) : null;
+    const matches = p.filter ? urlMatcher(p.filter, "filter") : () => true;
     const requests = list
-      .filter((r) => (p.since === undefined || r.id > p.since) && (!p.filter || (matcher ? matcher.test(r.url) : r.url.includes(p.filter))) && (!p.types || p.types.includes(kind(r.type))))
+      .filter((r) => (p.since === undefined || r.id > p.since) && matches(r.url) && (!p.types || p.types.includes(kind(r.type))))
       .slice(-p.limit)
       .reverse()
       .map((r) => ({ id: r.id, method: r.method, url: r.url, type: kind(r.type), status: r.status, ms: r.ms }));
@@ -195,7 +210,7 @@ export const run = {
   async handler(p, { daemon, session }) {
     const ref = await daemon.tab(session, p.tab);
     const r = await cdp(daemon).run(session, ref, p.code, p.timeout);
-    return { lane: "cdp", ...finish(r.value), console: r.console, stateLost: r.stateLost ?? false };
+    return { lane: "cdp", ...finish(r.value), console: r.console };
   },
 };
 

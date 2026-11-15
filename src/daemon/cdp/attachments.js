@@ -14,8 +14,17 @@ import { BctlError, toBctlError } from "../errors.js";
  *   idleUntil: number,
  *   pins: Set<string>,
  *   relays: Set<import("./relay.js").CdpRelay>,
+ *   contexts: Map<string, Map<number, object>>,
+ *   runtime: Map<string, Promise<unknown>>,
+ *   inputReady: Promise<void> | null,
  * }} TabAttachment
  */
+
+// Chrome drops input to a document with no contentful paint until it is about 500 ms old
+// (specs/relay.md).
+const INPUT_READY_AGE_MS = 550;
+const INPUT_READY_WAIT = `(() => performance.getEntriesByName("first-contentful-paint").length ? 0 : Math.max(0, ${INPUT_READY_AGE_MS} - performance.now()))()`;
+const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
 
 export class Attachments extends EventEmitter {
   /** @type {Map<number, TabAttachment>} */
@@ -50,7 +59,7 @@ export class Attachments extends EventEmitter {
   #entry(tabId) {
     let entry = this.#tabs.get(tabId);
     if (!entry) {
-      entry = { attached: false, attaching: null, ever: false, info: null, idleTimer: null, idleUntil: 0, pins: new Set(), relays: new Set() };
+      entry = { attached: false, attaching: null, ever: false, info: null, idleTimer: null, idleUntil: 0, pins: new Set(), relays: new Set(), contexts: new Map(), runtime: new Map(), inputReady: null };
       this.#tabs.set(tabId, entry);
     }
     return entry;
@@ -64,6 +73,11 @@ export class Attachments extends EventEmitter {
   /** @param {number} tabId @param {import("./relay.js").CdpRelay} relay */
   addRelay(tabId, relay) {
     this.#entry(tabId).relays.add(relay);
+  }
+
+  /** Whether a relay on the tab uses a domain on a CDP session. @param {number} tabId @param {string} domain @param {string} [sessionId] */
+  domainInUse(tabId, domain, sessionId) {
+    return [...(this.#tabs.get(tabId)?.relays ?? [])].some((relay) => relay.uses(tabId, domain, sessionId));
   }
 
   /** @param {number} tabId @param {import("./relay.js").CdpRelay} relay */
@@ -90,6 +104,9 @@ export class Attachments extends EventEmitter {
         const { targetInfo } = await this.#attachFresh(tabId);
         entry.info = targetInfo;
         entry.attached = true;
+        entry.contexts.clear();
+        entry.runtime.clear();
+        entry.inputReady = null;
         // Background tabs do not render without it; harmless for a foreground tab.
         await this.#raw(tabId, undefined, "Emulation.setFocusEmulationEnabled", { enabled: true });
         if (entry.ever) for (const relay of entry.relays) await relay.restore(tabId);
@@ -127,6 +144,8 @@ export class Attachments extends EventEmitter {
    */
   async send(tabId, sessionId, method, params) {
     await this.ensure(tabId);
+    if (method.startsWith("Input.")) await this.#untilInputReady(tabId);
+    if (method === "Runtime.disable") this.#forgetRuntime(tabId, sessionId);
     try {
       return await this.#raw(tabId, sessionId, method, params);
     } catch (error) {
@@ -137,6 +156,52 @@ export class Attachments extends EventEmitter {
       await this.ensure(tabId);
       return this.#raw(tabId, sessionId, method, params);
     }
+  }
+
+  /**
+   * Sends Runtime.enable for one client. Chrome reports existing execution contexts only to the
+   * first Runtime.enable on a session, so a later caller gets them back to tell its own client
+   * (specs/relay.md).
+   * @param {number} tabId @param {string | undefined} sessionId @param {object} params
+   * @returns {Promise<{result: any, contexts: object[]}>}
+   */
+  async enableRuntime(tabId, sessionId, params) {
+    await this.ensure(tabId);
+    const entry = this.#entry(tabId);
+    const key = sessionId ?? "";
+    const earlier = entry.runtime.get(key);
+    const sending = this.send(tabId, sessionId, "Runtime.enable", params);
+    if (!earlier) entry.runtime.set(key, sending.catch(() => entry.runtime.delete(key)));
+    const result = await sending;
+    if (!earlier) return { result, contexts: [] };
+    await earlier;
+    return { result, contexts: [...(entry.contexts.get(key)?.values() ?? [])] };
+  }
+
+  /** A Runtime.disable reaches Chrome: the next enable is a first one again. @param {number} tabId @param {string | undefined} sessionId */
+  #forgetRuntime(tabId, sessionId) {
+    const entry = this.#entry(tabId);
+    entry.runtime.delete(sessionId ?? "");
+    entry.contexts.delete(sessionId ?? "");
+  }
+
+  /** @param {TabAttachment} entry @param {{sessionId?: string, method: string, params?: any}} e */
+  #trackContexts(entry, { sessionId, method, params }) {
+    const key = sessionId ?? "";
+    let contexts = entry.contexts.get(key);
+    if (!contexts) entry.contexts.set(key, (contexts = new Map()));
+    if (method === "Runtime.executionContextCreated") contexts.set(params.context.id, params.context);
+    else if (method === "Runtime.executionContextDestroyed") contexts.delete(params.executionContextId);
+    else if (method === "Runtime.executionContextsCleared") contexts.clear();
+  }
+
+  /** Waits once per document until Chrome takes input (specs/relay.md). @param {number} tabId */
+  #untilInputReady(tabId) {
+    const entry = this.#entry(tabId);
+    entry.inputReady ??= this.#raw(tabId, undefined, "Runtime.evaluate", { expression: INPUT_READY_WAIT, returnByValue: true })
+      .then((answer) => sleep(Number(answer?.result?.value) || 0))
+      .catch(() => {});
+    return entry.inputReady;
   }
 
   /** @param {number} tabId */
@@ -193,6 +258,8 @@ export class Attachments extends EventEmitter {
   #onEvent(e) {
     const entry = this.#tabs.get(e.tabId);
     if (!entry) return;
+    if (e.method.startsWith("Runtime.executionContext")) this.#trackContexts(entry, e);
+    if (!e.sessionId && (e.method === "Runtime.executionContextsCleared" || (e.method === "Page.frameNavigated" && !e.params?.frame?.parentId))) entry.inputReady = null;
     for (const relay of entry.relays) relay.onEvent(e.tabId, e.sessionId, e.method, e.params ?? {});
   }
 

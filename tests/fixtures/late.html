@@ -1,0 +1,7 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Late</title></head>
+<body><h1>Shell</h1><div id="feed"></div>
+<script nonce="fixture">
+fetch('/slow/1000/child.html').then((r) => r.text()).then(() => {
+  const b = document.createElement('button'); b.textContent = 'Loaded content'; document.getElementById('feed').appendChild(b);
+});
+</script></body></html>

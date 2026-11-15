@@ -26,7 +26,14 @@ test("KEY-U01 unknown keys and modifiers are INVALID_PARAMS with suggestions", (
   }
 });
 
-test("characters for slow typing keep their text, including ones outside the layout", () => {
+test("KEY-U02 aliases are normalized into chords Playwright knows", () => {
+  assert.equal(parseChord("Ctrl+Esc").chord, "Control+Escape");
+  assert.equal(parseChord("Cmd+Up").chord, "Meta+ArrowUp");
+  assert.equal(parseChord("Space").chord, " ");
+  assert.equal(parseChord("Shift++").chord, "Shift++");
+});
+
+test("TYPE-U01 characters for slow typing keep their text, including ones outside the layout", () => {
   const chars = charsOf("aB é");
   assert.deepEqual(chars.map((c) => c.text), ["a", "B", " ", "é"]);
   assert.equal(chars[1].code, "KeyB");

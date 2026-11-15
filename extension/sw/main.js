@@ -56,8 +56,6 @@ configure(
     "tabs.history": tabs.history,
     "tabs.close": tabs.close,
     "tabs.activate": tabs.activate,
-    "tabs.group": tabs.group,
-    "tabs.ungroup": tabs.ungroup,
     "dom.call": dom.call,
     "dom.frames": dom.frames,
     "dom.capture": dom.capture,

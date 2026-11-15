@@ -18,7 +18,7 @@ export async function main() {
   const home = process.env.BROWSERCTL_HOME ?? path.join(os.homedir(), ".browserctl");
   fs.mkdirSync(home, { recursive: true });
   const daemon = new Daemon({ home, version, tools });
-  /** @type {any} */ (daemon).cdp = new CdpLane(daemon, { idleMs: Number(process.env.BROWSERCTL_DETACH_IDLE ?? 30) * 1000 });
+  daemon.cdp = new CdpLane(daemon, { idleMs: Number(process.env.BROWSERCTL_DETACH_IDLE ?? 30) * 1000 });
   const server = await startServer(daemon, { port });
   fs.writeFileSync(path.join(home, `daemon-${port}.json`), JSON.stringify({ pid: process.pid, port, version, startedAt: Date.now() }));
   const stop = () => {

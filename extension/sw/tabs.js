@@ -10,7 +10,6 @@ function describe(tab, windows) {
     windowId: tab.windowId,
     index: tab.index,
     active: tab.active,
-    groupId: tab.groupId,
     openerTabId: tab.openerTabId,
     url: tab.url ?? tab.pendingUrl ?? "",
     title: tab.title ?? "",
@@ -111,22 +110,3 @@ export async function activate({ tabId, focusWindow }) {
   }
 }
 
-/** @param {{tabIds: number[], groupId?: number, title?: string, color?: `${chrome.tabGroups.Color}`}} params */
-export async function group({ tabIds, groupId, title, color }) {
-  const options = groupId === undefined ? { tabIds } : { tabIds, groupId };
-  const id = await chrome.tabs.group(/** @type {any} */ (options));
-  if (title !== undefined || color !== undefined) {
-    await chrome.tabGroups.update(id, { ...(title !== undefined && { title }), ...(color !== undefined && { color }) });
-  }
-  return { groupId: id };
-}
-
-/** @param {{tabIds: number[]}} params */
-export async function ungroup({ tabIds }) {
-  try {
-    await chrome.tabs.ungroup(/** @type {[number, ...number[]]} */ (tabIds));
-  } catch (error) {
-    if (!/no tab with/i.test(String(/** @type {any} */ (error)?.message))) throw tabError(error);
-  }
-  return {};
-}

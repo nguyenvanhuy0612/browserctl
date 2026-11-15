@@ -14,12 +14,13 @@ export class CallLog {
     this.#file = path.join(home, "calls.jsonl");
   }
 
-  /** @param {{who: {sessionId: string, client: string}, session: any, name: string, params: unknown, response: any, ms: number}} entry */
-  write({ who, session, name, params, response, ms }) {
+  /** @param {{who: {sessionId: string, client: string}, session: any, browser: string | null, name: string, params: unknown, response: any, ms: number}} entry */
+  write({ who, session, browser, name, params, response, ms }) {
     const line = {
       at: new Date().toISOString(),
       session: who.sessionId,
       client: who.client,
+      browser,
       tab: session?.current?.tabId ?? null,
       tool: name,
       params,

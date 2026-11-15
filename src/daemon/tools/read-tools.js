@@ -2,8 +2,9 @@
 // snapshot, read, wait_for (specs/tools/snapshot.md, read.md, wait_for.md).
 import { Daemon } from "../app.js";
 import { BctlError, toBctlError } from "../errors.js";
-import { compact, cut, nestFrames } from "../snapshot-text.js";
-import { tab, target } from "./common.js";
+import { annotate, fit, nestFrames, noticeLines } from "../snapshot-text.js";
+import { tabKey } from "../sessions.js";
+import { by, checkWait, tab, target, timeout, urlMatcher } from "./common.js";
 
 const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -40,18 +41,67 @@ async function collectFrames(daemon, ref, iframeRefs, read) {
   return byRef;
 }
 
+const READY_TYPES = new Set(["main_frame", "sub_frame", "script", "xmlhttprequest"]);
+
+/**
+ * Waits for a young page to be ready (specs/tools/snapshot.md, step 2): document complete, no
+ * element added or removed for 300 ms (1.1 s in a background tab), no recent document/script/XHR
+ * request pending. At most 3 s (5 s in a background tab); pages older than 15 s are not waited for.
+ * @param {Daemon} daemon @param {import("../sessions.js").TabRef} ref
+ */
+export async function waitReady(daemon, ref) {
+  const started = Date.now();
+  const pending = () =>
+    (daemon.requests.get(tabKey(ref.instanceId, ref.tabId)) ?? []).filter(
+      (/** @type {any} */ r) => r.status === null && !r.error && READY_TYPES.has(r.type) && Date.now() - r.startedAt < 5000,
+    ).length;
+  let info = await daemon.dom(ref, "info");
+  if (info.age >= 15_000) {
+    // an old page is not waited for; quiet is not measured
+    return { ready: info.readyState === "complete", readyState: info.readyState, quiet: null, pendingRequests: pending(), waitedMs: 0 };
+  }
+  // background tabs run page timers once a second, so work comes in 1 s bursts: a 300 ms gap proves nothing
+  const background = info.visibility === "hidden";
+  const quietMs = background ? 1100 : 300;
+  const deadline = background ? 5000 : 3000;
+  let last = info.structure;
+  let stableSince = Date.now();
+  for (;;) {
+    const quiet = Date.now() - stableSince >= quietMs;
+    const state = { readyState: info.readyState, quiet, pendingRequests: pending() };
+    const settled = state.readyState === "complete" && quiet;
+    if (settled && state.pendingRequests === 0) return { ready: true, ...state, waitedMs: Date.now() - started };
+    // requests that hang (ads, analytics, long polls) and slow subresources only extend the wait;
+    // at the deadline a quiet DOM after DOMContentLoaded is ready
+    if (Date.now() - started >= deadline) return { ready: quiet && state.readyState !== "loading", ...state, waitedMs: Date.now() - started };
+    await sleep(100);
+    try {
+      info = await daemon.dom(ref, "info");
+    } catch (error) {
+      // the page is navigating or busy: stop waiting and report the last readyState measured
+      if (toBctlError(error).code === "TAB_CLOSED") throw error;
+      return { ready: false, readyState: info.readyState, quiet: false, pendingRequests: pending(), waitedMs: Date.now() - started };
+    }
+    if (info.structure !== last) {
+      last = info.structure;
+      stableSince = Date.now();
+    }
+  }
+}
+
 /** @type {import("../registry.js").Tool} */
 export const snapshot = {
   name: "snapshot",
   description:
-    "Read the page as an accessibility tree; each element you can act on has a ref ([ref=e5]) to pass as target to click, type, fill_form, evaluate. A ref stays valid until its element is removed or the page navigates. Long repeated lists are shortened; the snapshot says how to see all items. target: a ref to read only that part. Works in background tabs without the debugging bar.",
+    "Read the page as an accessibility tree (YAML); each element you can act on has a ref ([ref=e5]) to pass as target to click, type, fill_form, evaluate. A ref stays valid until its element is removed or the page navigates. Extra brackets tell state: [empty], [type=email], [value=42], [near=\"label\"] for unnamed fields, [ctx=\"...\"] to tell identical buttons apart, [modal], [hidden] (no ref: open its menu first). Long lists and long text are folded; each fold line says how to see the rest (read target=eX). target: a ref to read only that part. If the first line says the page is not ready, snapshot again. Works in background tabs without the debugging bar.",
   inputSchema: {
     type: "object",
     properties: {
       target: { ...target, description: "Snapshot only this element's subtree." },
-      depth: { type: "integer", minimum: 1, maximum: 50 },
-      full: { type: "boolean", default: false, description: "Skip compaction." },
-      maxChars: { type: "integer", minimum: 1000, maximum: 200000, default: 20000 },
+      depth: { type: "integer", minimum: 1, maximum: 50, description: "Cut the tree below this depth. Default: no limit." },
+      full: { type: "boolean", default: false, description: "Skip compaction and text folding." },
+      maxChars: { type: "integer", minimum: 1000, maximum: 200000, default: 20000, description: "Size budget; long text is folded harder before anything is cut." },
+      maxText: { type: "integer", minimum: 200, maximum: 200000, default: 2000, description: "Characters of running text kept before it is folded." },
       tab,
     },
   },
@@ -59,18 +109,21 @@ export const snapshot = {
     const ref = await daemon.tab(session, p.tab);
     const frameId = Daemon.frameOf(p.target);
     await daemon.domAll(ref, "info").catch(() => []);
+    const readiness = await waitReady(daemon, ref);
     const main = await daemon.dom(ref, "snapshot", { target: p.target, depth: p.depth }, { frameId });
-    let text = main.snapshot;
+    let text = annotate(main.snapshot, main);
     if (main.iframes.length) {
       const frames = await collectFrames(daemon, ref, main.iframes, async (id) => {
         const part = await daemon.dom(ref, "snapshot", { depth: p.depth }, { frameId: id });
-        return { text: part.snapshot, iframes: part.iframes };
+        return { text: annotate(part.snapshot, part), iframes: part.iframes };
       });
       text = nestFrames(text, frames);
     }
-    let folded = 0;
-    if (!p.full) ({ text, folded } = compact(text));
-    const cutResult = cut(text, p.maxChars);
+    const notices = noticeLines(readiness, main.modal);
+    const maxChars = p.maxChars ?? 20000;
+    // notice lines and their newlines count toward maxChars
+    const noticeChars = notices.reduce((sum, line) => sum + line.length + 1, 0);
+    const fitted = fit(text, { full: p.full, maxChars: maxChars - noticeChars, maxText: p.maxText ?? 2000 });
     const info = await daemon.dom(ref, "info");
     const { dialogs } = await daemon.dom(ref, "dialogLog", { since: 0 });
     return {
@@ -78,9 +131,14 @@ export const snapshot = {
       url: info.url,
       title: info.title,
       background: info.visibility === "hidden",
-      snapshot: cutResult.text,
-      folded,
-      cut: cutResult.cutChars || p.depth ? { depth: p.depth ?? null, chars: cutResult.cutChars } : null,
+      ready: readiness.ready,
+      readiness: { readyState: readiness.readyState, quiet: readiness.quiet, pendingRequests: readiness.pendingRequests, waitedMs: readiness.waitedMs },
+      modal: main.modal ?? null,
+      snapshot: [...notices, fitted.text].join("\n"),
+      folded: fitted.folded,
+      textFolded: fitted.textFolded,
+      collapsed: fitted.collapsed,
+      cut: fitted.cutChars || p.depth ? { depth: p.depth ?? null, chars: fitted.cutChars } : null,
       dialogs: dialogs.slice(-5).map((/** @type {any} */ d) => ({ type: d.type, message: d.message, answer: d.answer })),
     };
   },
@@ -137,6 +195,95 @@ export const read = {
 };
 
 /** @type {import("../registry.js").Tool} */
+export const get = {
+  name: "get",
+  description:
+    "Read one thing about an element: what: text (default) | value | attribute | property | html | state | box; name: the attribute or property (href, dataset.id). target: a ref or a locator. all: true returns every match of a selector. Use it instead of evaluate to read a value.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      target,
+      what: { type: "string", enum: ["text", "value", "attribute", "property", "html", "state", "box"], default: "text" },
+      name: { type: "string", minLength: 1, description: "Attribute name, or property path (dataset.id), for what: attribute | property." },
+      all: { type: "boolean", default: false, description: "Every element the selector matches (at most 100) instead of AMBIGUOUS_TARGET." },
+      maxChars: { type: "integer", minimum: 100, maximum: 200000, default: 5000, description: "Cut text and html values." },
+      timeout: { ...timeout, description: "Seconds to wait for the target to exist (it need not be visible)." },
+      tab,
+    },
+    required: ["target"],
+  },
+  async handler(p, { daemon, session }) {
+    const needsName = p.what === "attribute" || p.what === "property";
+    if (needsName && !p.name) throw new BctlError("INVALID_PARAMS", `get: what: ${p.what} needs name`, { hint: "Pass name, e.g. name: \"href\"." });
+    if (!needsName && p.name) throw new BctlError("INVALID_PARAMS", `get: name is only for what: attribute or property`);
+    const ref = await daemon.tab(session, p.tab);
+    const frameId = Daemon.frameOf(p.target);
+    const args = { target: p.target, what: p.what, name: p.name, all: p.all, maxChars: p.maxChars };
+    const r = await daemon.retrying(() => daemon.dom(ref, "get", args, { frameId }), p.timeout * 1000);
+    if (p.all) return { lane: "dom", count: r.count, items: r.items.map((/** @type {any} */ i) => ({ resolved: { by: by(p.target), ...i.resolved }, value: i.value, cut: i.cut })) };
+    return { lane: "dom", resolved: { by: by(p.target), ...r.resolved }, value: r.value, cut: r.cut };
+  },
+};
+
+/**
+ * Polls one wait_for condition (specs/tools/wait_for.md) until it holds or `timeout` seconds pass.
+ * @param {Daemon} daemon @param {import("../sessions.js").TabRef} ref
+ * @param {{text?: string, textGone?: string, target?: string, state?: string, url?: string, time?: number, timeout?: number}} p
+ * @returns {Promise<{ok: true, waitedMs: number, matched: any} | {ok: false, waitedMs: number, lastSeen: any}>}
+ */
+export async function waitUntil(daemon, ref, p) {
+  const started = Date.now();
+  const timeoutS = p.timeout ?? 10;
+  const state = p.state ?? "visible";
+  if (p.time !== undefined) {
+    await sleep(p.time * 1000);
+    return { ok: true, waitedMs: Date.now() - started, matched: null };
+  }
+  const deadline = started + timeoutS * 1000;
+  const urlMatches = p.url !== undefined ? urlMatcher(p.url, "url") : null;
+  /** @type {any} */
+  let last = null;
+  for (;;) {
+    try {
+      if (p.url !== undefined) {
+        const { url } = await daemon.linkOf(ref).request("tabs.get", { tabId: ref.tabId });
+        last = url;
+        if (/** @type {(url: string) => boolean} */ (urlMatches)(url)) return { ok: true, waitedMs: Date.now() - started, matched: null };
+      } else if (p.target !== undefined) {
+        const r = await daemon.dom(ref, "elementState", { target: p.target }, { frameId: Daemon.frameOf(p.target) });
+        last = r.element ? `${r.state} ${r.element.role} "${r.element.name}"` : r.state;
+        const ok = state === "attached" ? r.state !== "detached" : r.state === state;
+        if (ok) return { ok: true, waitedMs: Date.now() - started, matched: r.element ?? null };
+      } else {
+        const needle = /** @type {string} */ (p.text ?? p.textGone);
+        const frames = await daemon.domAll(ref, "findText", { text: needle });
+        const hit = frames.find((f) => f.result?.ok && f.result.found);
+        last = hit ? "present" : "absent";
+        if (p.text !== undefined && hit) return { ok: true, waitedMs: Date.now() - started, matched: hit.result.element };
+        if (p.textGone !== undefined && !hit) return { ok: true, waitedMs: Date.now() - started, matched: null };
+      }
+    } catch (error) {
+      const e = toBctlError(error);
+      if (["TAB_CLOSED", "NO_BROWSER", "INVALID_TARGET", "AMBIGUOUS_TARGET", "PAGE_UNSCRIPTABLE"].includes(e.code)) throw e;
+      last = e.code;
+    }
+    if (Date.now() >= deadline) return { ok: false, waitedMs: Date.now() - started, lastSeen: last };
+    await sleep(200);
+  }
+}
+
+/**
+ * The `wait` of an action (specs/actions.md): runs after the action; a timeout is reported, not thrown.
+ * @param {Daemon} daemon @param {import("../sessions.js").TabRef} ref @param {any} wait
+ */
+export async function afterWait(daemon, ref, wait) {
+  if (!wait) return { waited: null, hint: null };
+  const waited = await waitUntil(daemon, ref, wait);
+  const hint = waited.ok ? null : `The action ran, but the wait condition did not hold within ${wait.timeout ?? 10} s (last seen: ${waited.lastSeen}). Take a snapshot before acting again.`;
+  return { waited, hint };
+}
+
+/** @type {import("../registry.js").Tool} */
 export const wait_for = {
   name: "wait_for",
   description:
@@ -155,43 +302,14 @@ export const wait_for = {
     },
   },
   async handler(p, { daemon, session }) {
-    const conditions = ["text", "textGone", "target", "url", "time"].filter((k) => p[k] !== undefined);
-    if (conditions.length !== 1) throw new BctlError("INVALID_PARAMS", "pass exactly one of text, textGone, target, url, time");
-    const started = Date.now();
+    checkWait(p);
     if (p.time !== undefined) {
       await sleep(p.time * 1000);
-      return { lane: "dom", waitedMs: Date.now() - started, matched: null };
+      return { lane: "dom", waitedMs: p.time * 1000, matched: null };
     }
     const ref = await daemon.tab(session, p.tab);
-    const deadline = started + p.timeout * 1000;
-    const urlMatcher = p.url && /^\/.*\/[a-z]*$/.test(p.url) ? new RegExp(p.url.slice(1, p.url.lastIndexOf("/")), p.url.slice(p.url.lastIndexOf("/") + 1)) : null;
-    let last = null;
-    for (;;) {
-      try {
-        if (p.url !== undefined) {
-          const { url } = await daemon.linkOf(ref).request("tabs.get", { tabId: ref.tabId });
-          last = url;
-          if (urlMatcher ? urlMatcher.test(url) : url.includes(p.url)) return { lane: "dom", waitedMs: Date.now() - started, matched: null };
-        } else if (p.target !== undefined) {
-          const r = await daemon.dom(ref, "elementState", { target: p.target }, { frameId: Daemon.frameOf(p.target) });
-          last = r.state;
-          const ok = p.state === "attached" ? r.state !== "detached" : r.state === p.state;
-          if (ok) return { lane: "dom", waitedMs: Date.now() - started, matched: r.element ?? null };
-        } else {
-          const needle = p.text ?? p.textGone;
-          const frames = await daemon.domAll(ref, "findText", { text: needle });
-          const hit = frames.find((f) => f.result?.ok && f.result.found);
-          last = hit ? "present" : "absent";
-          if (p.text !== undefined && hit) return { lane: "dom", waitedMs: Date.now() - started, matched: hit.result.element };
-          if (p.textGone !== undefined && !hit) return { lane: "dom", waitedMs: Date.now() - started, matched: null };
-        }
-      } catch (error) {
-        const e = toBctlError(error);
-        if (["TAB_CLOSED", "NO_BROWSER", "INVALID_TARGET", "AMBIGUOUS_TARGET", "PAGE_UNSCRIPTABLE"].includes(e.code)) throw e;
-        last = e.code;
-      }
-      if (Date.now() >= deadline) throw new BctlError("TIMEOUT", `waited ${p.timeout} s; last seen: ${last}`, { lastSeen: last });
-      await sleep(200);
-    }
+    const r = await waitUntil(daemon, ref, p);
+    if (!r.ok) throw new BctlError("TIMEOUT", `waited ${p.timeout} s; last seen: ${r.lastSeen}`, { lastSeen: r.lastSeen });
+    return { lane: "dom", waitedMs: r.waitedMs, matched: r.matched };
   },
 };

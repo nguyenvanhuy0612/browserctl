@@ -6,6 +6,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
+import https from "node:https";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -39,14 +40,30 @@ function extensionCopy(dir, port) {
   return target;
 }
 
-/** Fixture pages from tests/fixtures; /csp/<name> serves the page with a strict CSP; /slow/<ms>/<name> delays. */
-function fixtureServer() {
+const TYPES = /** @type {Record<string, string>} */ ({ ".json": "application/json", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".svg": "image/svg+xml" });
+
+/**
+ * Fixture pages from tests/fixtures. /csp/<name> serves the page with a strict CSP; /slow/<ms>/<name>
+ * delays it; /content/<n> serves HTML given to the harness (Playwright's setContent);
+ * /redirect?to=<url> answers 302.
+ * @param {Map<string, string>} contents
+ * @returns {http.RequestListener}
+ */
+function fixtureHandler(contents) {
   const dir = path.join(root, "tests/fixtures");
-  const server = http.createServer((req, res) => {
+  return (req, res) => {
     const url = new URL(req.url ?? "/", "http://x");
     let name = url.pathname.replace(/^\//, "") || "index.html";
     /** @type {Record<string, string>} */
     const headers = { "content-type": "text/html; charset=utf-8" };
+    if (name.startsWith("content/")) {
+      res.writeHead(contents.has(name) ? 200 : 404, headers).end(contents.get(name) ?? "not found");
+      return;
+    }
+    if (name === "redirect") {
+      res.writeHead(302, { location: url.searchParams.get("to") ?? "/" }).end();
+      return;
+    }
     let delay = 0;
     if (name.startsWith("csp/")) {
       name = name.slice(4);
@@ -63,12 +80,15 @@ function fixtureServer() {
         res.writeHead(404, headers).end("not found");
         return;
       }
-      if (name.endsWith(".json")) headers["content-type"] = "application/json";
+      const type = TYPES[path.extname(name)];
+      if (type) headers["content-type"] = type;
       res.writeHead(200, headers).end(fs.readFileSync(file));
     }, delay);
-  });
-  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
+  };
 }
+
+/** @param {http.Server} server @returns {Promise<http.Server>} */
+const listen = (server) => new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
 
 /** @param {string} url */
 async function cdpClient(url) {
@@ -89,6 +109,19 @@ async function cdpClient(url) {
         ws.on("message", on);
         ws.send(JSON.stringify({ id: my, method, params, sessionId }));
       }),
+    /** @param {string} method @param {string} sessionId @returns {Promise<any>} */
+    nextEvent: (method, sessionId, timeoutMs = 5000) =>
+      new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`no ${method} in ${timeoutMs} ms`)), timeoutMs);
+        const on = (/** @type {any} */ raw) => {
+          const m = JSON.parse(raw);
+          if (m.method !== method || m.sessionId !== sessionId) return;
+          clearTimeout(timer);
+          ws.off("message", on);
+          resolve(m.params);
+        };
+        ws.on("message", on);
+      }),
     close: () => ws.close(),
   };
 }
@@ -98,11 +131,20 @@ export async function startHarness({ userScripts = true } = {}) {
   const home = path.join(dir, "home");
   fs.mkdirSync(home);
   const port = await freePort();
-  const daemon = new Daemon({ home, version: "test", tools });
-  /** @type {any} */ (daemon).cdp = new CdpLane(daemon, { idleMs: 3000 });
-  const server = await startServer(daemon, { port });
-  const fixtures = /** @type {http.Server} */ (await fixtureServer());
+  const startDaemon = async () => {
+    const created = new Daemon({ home, version: "test", tools });
+    created.cdp = new CdpLane(created, { idleMs: 3000 });
+    return { daemon: created, server: await startServer(created, { port }) };
+  };
+  let { daemon, server } = await startDaemon();
+  /** @type {Map<string, string>} */
+  const contents = new Map();
+  const fixtures = await listen(http.createServer(fixtureHandler(contents)));
   const base = `http://127.0.0.1:${/** @type {net.AddressInfo} */ (fixtures.address()).port}`;
+  // the same pages over HTTPS with Playwright's self-signed test certificate (bad TLS for Chrome)
+  const tls = { cert: fs.readFileSync(path.join(root, "tests/fixtures/pw/cert.pem")), key: fs.readFileSync(path.join(root, "tests/fixtures/pw/key.pem")) };
+  const secureFixtures = await listen(https.createServer(tls, fixtureHandler(contents)));
+  const secureBase = `https://127.0.0.1:${/** @type {net.AddressInfo} */ (secureFixtures.address()).port}`;
   const extension = extensionCopy(dir, port);
   const profile = path.join(dir, "profile");
   const proc = spawn(
@@ -133,29 +175,48 @@ export async function startHarness({ userScripts = true } = {}) {
 
   let sessionCounter = 0;
   const harness = {
-    daemon,
+    side,
+    get daemon() {
+      return daemon;
+    },
     base,
+    secureBase,
     extensionId,
     /**
      * Calls a tool over HTTP as a session.
-     * @param {string} tool @param {object} [params] @param {string} [session]
+     * @param {string} tool @param {object} [params] @param {string} [session] @param {Record<string, string>} [headers]
      * @returns {Promise<any>}
      */
-    async call(tool, params = {}, session = "test") {
+    async call(tool, params = {}, session = "test", headers = {}) {
       const res = await fetch(`http://127.0.0.1:${port}/v1/tools/${tool}`, {
         method: "POST",
-        headers: { "content-type": "application/json", "x-browserctl-session": session, "x-browserctl-client": "live-test" },
+        headers: { "content-type": "application/json", "x-browserctl-session": session, "x-browserctl-client": "live-test", ...headers },
         body: JSON.stringify(params),
       });
       return res.json();
     },
-    /** Calls and fails the test on ok: false. @param {string} tool @param {object} [params] @param {string} [session] */
-    async ok(tool, params = {}, session = "test") {
-      const r = await harness.call(tool, params, session);
+    /** Calls and fails the test on ok: false. @param {string} tool @param {object} [params] @param {string} [session] @param {Record<string, string>} [headers] */
+    async ok(tool, params = {}, session = "test", headers = {}) {
+      const r = await harness.call(tool, params, session, headers);
       if (!r.ok) throw new Error(`${tool} failed: ${JSON.stringify(r.error)}`);
       return r;
     },
     newSession: () => `s${++sessionCounter}`,
+    /** Serves `html` as a page and returns its URL (Playwright's setContent). @param {string} html */
+    content(html) {
+      const name = `content/${contents.size + 1}`;
+      contents.set(name, html);
+      return `${base}/${name}`;
+    },
+    /** The fixture server under another origin (Playwright's CROSS_PROCESS_PREFIX). */
+    get crossOrigin() {
+      return base.replace("127.0.0.1", "localhost");
+    },
+    port,
+    /** @param {string} session */
+    async endSession(session) {
+      return (await fetch(`http://127.0.0.1:${port}/v1/sessions/${encodeURIComponent(session)}`, { method: "DELETE" })).json();
+    },
     /** The browser's active tab in its window (the user's view). */
     async activeTab() {
       const link = /** @type {any} */ (daemon.browsers.connected()[0].link);
@@ -184,17 +245,75 @@ export async function startHarness({ userScripts = true } = {}) {
       await sleep(500);
       for (let i = 0; i < 300 && daemon.browsers.connected().length === 0; i++) await sleep(100);
     },
+    /** Stops the daemon as a crash would (its attachments stay in Chrome) and starts a new one on the same port. */
+    async restartDaemon() {
+      for (const b of daemon.browsers.connected()) b.link?.close();
+      server.closeAllConnections();
+      server.close();
+      daemon.close();
+      ({ daemon, server } = await startDaemon());
+      for (let i = 0; i < 300 && daemon.browsers.connected().length === 0; i++) await sleep(100);
+      if (!daemon.browsers.connected().length) throw new Error("extension did not reconnect");
+    },
+    /** Stops the extension's service worker, as Chrome does when it is idle. */
+    async stopServiceWorker() {
+      const { targetInfos } = await side.send("Target.getTargets");
+      const worker = targetInfos.find((/** @type {any} */ t) => t.type === "service_worker" && t.url.includes(extensionId));
+      await side.send("Target.closeTarget", { targetId: worker.targetId });
+    },
+    /**
+     * A tab the user opened: no session owns it and the daemon never armed it.
+     * @param {string} url
+     */
+    async userTab(url) {
+      const { targetId } = await side.send("Target.createTarget", { url, background: true });
+      await sleep(800);
+      const { sessionId: s } = await side.send("Target.attachToTarget", { targetId, flatten: true });
+      await side.send("Page.enable", {}, s);
+      return {
+        /** @param {string} expression */
+        evaluate: async (expression) => (await side.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, s)).result.value,
+        /** Runs `expression` later and answers the native dialog it opens; resolves with the dialog. @param {string} expression */
+        async dialogFrom(expression) {
+          const opening = side.nextEvent("Page.javascriptDialogOpening", s);
+          await side.send("Runtime.evaluate", { expression: `setTimeout(() => { ${expression} }, 0)` }, s);
+          const dialog = await opening;
+          await side.send("Page.handleJavaScriptDialog", { accept: false }, s);
+          return dialog;
+        },
+        close: () => side.send("Target.closeTarget", { targetId }),
+      };
+    },
     async close() {
       side.close();
-      /** @type {any} */ (daemon).cdp?.close();
+      daemon.cdp?.close();
       proc.kill();
       server.closeAllConnections();
       server.close();
       fixtures.close();
+      secureFixtures.close();
       daemon.close();
       await sleep(500);
       fs.rmSync(dir, { recursive: true, force: true });
     },
   };
   return harness;
+}
+
+/** @typedef {Awaited<ReturnType<typeof startHarness>>} Harness */
+
+/** Opens a fixture page in a new tab of the session; returns the tab id. @param {Harness} h @param {string} session */
+export async function freshPage(h, session, page = "page.html") {
+  return (await h.ok("tabs", { action: "new", url: `${h.base}/${page}` }, session)).tab.tab;
+}
+
+/** The ref on the first snapshot line that matches. @param {string} snapshot @param {RegExp | string} line */
+export function refIn(snapshot, line) {
+  const found = snapshot.split("\n").find((l) => (typeof line === "string" ? l.includes(line) : line.test(l)));
+  return /\[ref=((?:f\d+)?e\d+)\]/.exec(found ?? "")?.[1];
+}
+
+/** The fixture page's `window.__log`. @param {Harness} h @param {string} session */
+export async function pageLog(h, session) {
+  return (await h.ok("evaluate", { function: "() => window.__log" }, session)).value;
 }

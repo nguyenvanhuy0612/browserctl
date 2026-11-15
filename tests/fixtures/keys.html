@@ -1,0 +1,24 @@
+<!doctype html>
+<title>Keys</title>
+<div id="modal" role="dialog" aria-label="Modal">Modal content</div>
+<form id="form"><label>Guarded <input id="guarded"></label><button>Send</button></form>
+<ul id="listbox" role="listbox" tabindex="0" aria-label="Fruits">
+  <li role="option" aria-selected="true">Apple</li>
+  <li role="option" aria-selected="false">Banana</li>
+  <li role="option" aria-selected="false">Cherry</li>
+</ul>
+<script>
+  window.__log = [];
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") document.querySelector("#modal")?.remove(); });
+  document.querySelector("#guarded").addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
+  document.querySelector("#form").addEventListener("submit", (e) => { e.preventDefault(); window.__log.push("submitted"); });
+  const box = document.querySelector("#listbox");
+  box.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowDown") return;
+    e.preventDefault();
+    const options = [...box.querySelectorAll("[role=option]")];
+    const at = options.findIndex((o) => o.getAttribute("aria-selected") === "true");
+    options[at].setAttribute("aria-selected", "false");
+    options[Math.min(at + 1, options.length - 1)].setAttribute("aria-selected", "true");
+  });
+</script>

@@ -1,0 +1,14 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Facts</title></head>
+<body>
+<form>
+  <input aria-label="First name" id="first">
+  <input aria-label="Last name" id="last" value="Doe">
+  <input type="email" aria-label="Email" id="email">
+  <div class="row"><label>State and City</label><div><input id="state" role="combobox" autocomplete="off"></div></div>
+  <progress aria-label="Upload" value="30" max="100"></progress>
+  <div role="slider" aria-label="Volume" aria-valuenow="40" tabindex="0" style="width:100px;height:10px;background:#ccc"></div>
+</form>
+<article><h3>First post title</h3><p>Some words here.</p><button onclick="window.__log.push('reply first')">Reply</button></article>
+<article><h3>Second post title</h3><p>Other words.</p><button onclick="window.__log.push('reply second')">Reply</button></article>
+<script nonce="fixture">window.__log = [];</script>
+</body></html>

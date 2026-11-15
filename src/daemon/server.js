@@ -42,7 +42,8 @@ export function startServer(daemon, { port, host = "127.0.0.1" }) {
         }
         const sessionId = header(req, "x-browserctl-session") ?? "http";
         const client = header(req, "x-browserctl-client") ?? "http";
-        send(200, await daemon.call(tool[1], params, { sessionId, client }));
+        const closeTabsOnEnd = header(req, "x-browserctl-close-tabs") === "1";
+        send(200, await daemon.call(tool[1], params, { sessionId, client, closeTabsOnEnd }));
         return;
       }
       const session = /^\/v1\/sessions\/([^/]+)$/.exec(url.pathname);
@@ -63,9 +64,11 @@ export function startServer(daemon, { port, host = "127.0.0.1" }) {
       return;
     }
     // A run worker's own Playwright connection (specs/tools/run.md).
-    const cdp = /** @type {any} */ (daemon).cdp;
-    if (url.pathname === "/cdp" && cdp && url.searchParams.get("browser") && url.searchParams.get("tab")) {
-      wss.handleUpgrade(req, socket, head, (ws) => cdp.serveWorker(url.searchParams.get("browser"), Number(url.searchParams.get("tab")), ws));
+    const cdp = daemon.cdp;
+    const browser = url.searchParams.get("browser");
+    const tab = Number(url.searchParams.get("tab"));
+    if (url.pathname === "/cdp" && cdp && browser && tab) {
+      wss.handleUpgrade(req, socket, head, (ws) => cdp.serveWorker(browser, tab, ws));
       return;
     }
     socket.destroy();
@@ -74,7 +77,7 @@ export function startServer(daemon, { port, host = "127.0.0.1" }) {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, host, () => {
-      /** @type {any} */ (daemon).port = /** @type {import("node:net").AddressInfo} */ (server.address()).port;
+      daemon.port = /** @type {import("node:net").AddressInfo} */ (server.address()).port;
       resolve(server);
     });
   });

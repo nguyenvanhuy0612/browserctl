@@ -1,7 +1,7 @@
 # `file_upload`
 
-Status: approved
-Depends on: `dom-lane.md`, `relay.md`, `targets.md`, `errors.md`
+Status: verified (2026-11-14: common parameters from `actions.md`)
+Depends on: `actions.md`, `dom-lane.md`, `relay.md`, `targets.md`, `errors.md`
 
 ## Purpose
 
@@ -13,6 +13,8 @@ Attach local files to a file input, or to whatever file chooser a button opens.
 | --- | --- | --- | --- | --- | --- |
 | `target` | string | yes | | ref or selector: an `input[type=file]`, its label, or a control that opens a file chooser | where to attach |
 | `paths` | string[] | yes | | absolute paths on the daemon's host; empty list clears the input | files |
+| `timeout` | number | no | 5 | 0 to 60 seconds | wait for the target to be actionable (`actions.md`) |
+| `wait` | object | no | none | one `wait_for` condition plus `timeout` | wait for it after the action settles (`actions.md`) |
 | `tab` | integer | no | current tab | owned tab | which tab |
 
 ## Behaviour
@@ -36,6 +38,8 @@ Attach local files to a file input, or to whatever file chooser a button opens.
 | `lane` | `"dom"` \| `"cdp"` | yes | |
 | `files` | `{name, size, mimeType}[]` | yes | as the page sees them (`input.files`) |
 | `outcome` | as in `click` | yes | |
+| `waited` | object \| null | yes | the `wait` result, null without `wait` (`actions.md`) |
+| `hint` | string \| null | yes | set when `wait` timed out (`actions.md`) |
 
 ## Errors
 
@@ -58,7 +62,13 @@ chooser. paths: [] clears it. Returns the files as the page sees them.
 | UP-E02 | live | custom button opening a chooser | CDP lane, files attached |
 | UP-E03 | live | 40 MB file | CDP lane |
 | UP-E04 | live | missing path | `FILE_NOT_FOUND`, input untouched |
-| IF-001, IF-009, IF-010, IF-012, IF-013, IF-014, IF-015, IF-016, IF-018..IF-022 | live | Playwright upload cases | DOM lane, and CDP lane for IF-009 |
-| playwright-mcp `files.spec.ts` | live | adopted | same results |
+| IF-001, IF-010, IF-012, IF-013, IF-015, IF-018, IF-020..IF-022 | live | Playwright upload cases | DOM lane |
+| IF-009 | live | 200 MB file | CDP lane; `input` then `change`; the page sees name and size (Playwright also posts the form to its test server, which the fixture server has no route for) |
+| IF-016 | live | a text file and a PNG into two inputs | the page sees `text/plain` and `image/png` (Playwright reads them back from its server) |
+| IF-019 | live | `input` event composed across a shadow root, from a file on disk | as Playwright, which sets the file from memory |
+| UP-E05 | live | playwright-mcp `files.spec.ts` "browser_file_upload" and "keeps chooser when setFiles fails": the input by its snapshot ref (`button "Choose File"`), a missing path, then a real one | `FILE_NOT_FOUND`, then attached |
 
-Not adopted: IF-002..IF-007 (directory uploads: later, through the CDP lane only).
+Not adopted: IF-002..IF-007 (directory uploads: later, through the CDP lane only); IF-014 (files
+from memory: `paths` only); playwright-mcp `files.spec.ts` file chooser modal state (`file_upload`
+names its target instead), downloads (no download tool), workspace roots (paths are the daemon
+host's own files, no root list), `browser_drop` (no drag and drop of files).

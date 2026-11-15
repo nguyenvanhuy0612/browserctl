@@ -1,6 +1,6 @@
 # `tabs`
 
-Status: approved
+Status: verified
 Depends on: `sessions.md`, `errors.md`
 
 ## Purpose
@@ -25,11 +25,11 @@ this tool is their only surface.
 | Action | Effect |
 | --- | --- |
 | `list` | this session's tabs (marked `mine`, `current`), plus each window's active tab; with `all`, every tab, each with its holder |
-| `new` | open an inactive tab in the last focused normal window, in the session's group; it becomes current; with `url`, wait for `DOMContentLoaded` (at most 10 s) |
+| `new` | open an inactive tab in the last focused normal window (no tab group); it becomes current; with `url`, wait for `DOMContentLoaded` (at most 10 s) |
 | `select` | make an owned tab current; with `focus`, activate it and focus its window |
 | `close` | close an owned tab; if it was current, the session has no current tab |
-| `adopt` | take a free tab (or, with `force`, another session's) into this session, add it to the group, make it current |
-| `release` | give an owned or adopted tab up, leave it open, remove it from the group, detach the debugger |
+| `adopt` | take a free tab (or, with `force`, another session's) into this session, make it current |
+| `release` | give an owned or adopted tab up, leave it open, detach the debugger |
 
 ## Result
 
@@ -47,7 +47,7 @@ this tool is their only surface.
 
 ```text
 Manage tabs. action: list | new | select | close | adopt | release. New tabs open in the
-background, in your tab group, and become your current tab. adopt takes an existing tab (e.g.
+background and become your current tab. adopt takes an existing tab (e.g.
 one the user opened) so you can act on it. select with focus: true shows the tab to the user.
 ```
 
@@ -57,9 +57,9 @@ one the user opened) so you can act on it. select with focus: true shows the tab
 | --- | --- | --- | --- |
 | TABS-U01 | unit | `close` without `tab` | `INVALID_PARAMS` |
 | TABS-U02 | unit | `list` for two sessions | each sees its own tabs as `mine` |
-| TABS-E01 | live | `new` with `url` | inactive, grouped, current, loaded; user's tab unchanged |
+| TABS-E01 | live | `new` with `url` | inactive, not grouped, current, loaded; user's tab unchanged |
 | TABS-E02 | live | `select` with `focus` | tab active, window focused |
-| TABS-E03 | live | `adopt` a user tab, `release` it | grouped then ungrouped, still open |
+| TABS-E03 | live | `adopt` a user tab, `release` it | owned then free, still open, never grouped |
 | TABS-E04 | live | `adopt` another session's tab without and with `force` | `TAB_NOT_OWNED`, then taken |
 | TABS-E05 | live | `close` the current tab | `current: null`; next `click` → `NO_TAB` |
-| TABS-E06 | live | two browsers connected, `new` without `browser` | `AMBIGUOUS_BROWSER` |
+| TABS-U03 | unit | two browsers connected, `new` without `browser` | `AMBIGUOUS_BROWSER` listing both aliases |

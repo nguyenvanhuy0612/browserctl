@@ -1,0 +1,30 @@
+<!doctype html>
+<title>Reactions</title>
+<button id="micro">micro</button>
+<button id="t0">t0</button>
+<button id="t100">t100</button>
+<button id="t700">t700</button>
+<button id="fetch">fetch</button>
+<button id="raf">raf</button>
+<button id="chain">chain</button>
+<button id="nothing">nothing</button>
+<button id="push">push</button>
+<button id="ticker">ticker</button>
+<a id="slowlink" href="/slow/2000/other.html">slow page</a>
+<div id="out"></div>
+<script>
+  const render = (name) => { const p = document.createElement("p"); p.className = "done"; p.textContent = `done ${name}`; document.querySelector("#out").append(p); };
+  const on = (id, fn) => document.getElementById(id).addEventListener("click", fn);
+  on("micro", () => Promise.resolve().then(() => render("micro")));
+  on("t0", () => setTimeout(() => render("t0"), 0));
+  on("t100", () => setTimeout(() => render("t100"), 100));
+  on("t700", () => setTimeout(() => render("t700"), 700));
+  on("fetch", () => fetch("other.html").then((r) => r.text()).then(() => render("fetch")));
+  on("raf", () => requestAnimationFrame(() => render("raf")));
+  on("nothing", () => {});
+  on("push", () => { history.pushState({}, "", "#pushed"); render("push"); });
+  // network callbacks are not throttled in background tabs, timers are (one wake-up per second)
+  on("ticker", () => { let n = 0; const tick = () => { document.querySelector("#out").dataset.n = String(n++); fetch("/slow/50/other.html").then(tick); }; tick(); });
+  // a spinner first, the content one timer later: the quiet window must not end in between
+  on("chain", () => { render("spinner"); setTimeout(() => setTimeout(() => render("chain"), 0), 0); });
+</script>

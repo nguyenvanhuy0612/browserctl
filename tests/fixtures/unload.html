@@ -1,0 +1,11 @@
+<!doctype html>
+<title>Leave guard</title>
+<button id="touch">Touch</button>
+<a id="away" href="other.html">Away</a>
+<script>
+  window.__log = [];
+  document.querySelector("#touch").addEventListener("click", (e) => window.__log.push(`touch trusted=${e.isTrusted}`));
+  const ran = (name) => sessionStorage.setItem("unloadHandlers", (sessionStorage.getItem("unloadHandlers") ?? "") + name + " ");
+  addEventListener("beforeunload", (e) => { ran("listener"); e.preventDefault(); e.returnValue = ""; });
+  window.onbeforeunload = () => { ran("property"); return "unsaved changes"; };
+</script>

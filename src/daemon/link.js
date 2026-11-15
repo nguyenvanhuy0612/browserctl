@@ -1,7 +1,10 @@
 // @ts-check
 // One extension connection: request/response with timeouts, and events (specs/interface.md).
 import { EventEmitter } from "node:events";
-import { BctlError, toBctlError } from "./errors.js";
+import { BctlError, PAGE_BLOCKED_HINT, toBctlError } from "./errors.js";
+
+// Requests the page itself answers: a timeout means the page is blocked (specs/interface.md).
+const PAGE_METHODS = new Set(["dom.call", "eval.user"]);
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const KEEPALIVE_MS = 20_000;
@@ -48,7 +51,8 @@ export class ExtensionLink extends EventEmitter {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(id);
-        reject(Object.assign(new Error(`${method} got no answer in ${timeoutMs} ms`), { code: "TIMEOUT", method }));
+        const message = `${method} got no answer in ${timeoutMs} ms`;
+        reject(PAGE_METHODS.has(method) ? new BctlError("TIMEOUT", message, { hint: PAGE_BLOCKED_HINT }) : Object.assign(new Error(message), { code: "TIMEOUT", method }));
       }, timeoutMs);
       this.#pending.set(id, { resolve, reject, timer });
       this.#send({ id, method, params });

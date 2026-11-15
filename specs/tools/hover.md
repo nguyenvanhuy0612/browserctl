@@ -1,7 +1,7 @@
 # `hover`
 
-Status: approved
-Depends on: `dom-lane.md`, `targets.md`, `settle.md`, `errors.md`
+Status: verified (2026-11-14: common parameters from `actions.md`)
+Depends on: `actions.md`, `dom-lane.md`, `targets.md`, `settle.md`, `errors.md`
 
 ## Purpose
 
@@ -13,6 +13,9 @@ Move the pointer over an element to open a menu or show a tooltip.
 | --- | --- | --- | --- | --- | --- |
 | `target` | string | yes | | ref or selector | the element |
 | `trusted` | boolean | no | `false` | | real pointer movement through the CDP lane |
+| `timeout` | number | no | 5 | 0 to 60 seconds | wait for the target to be actionable (`actions.md`) |
+| `scroll` | string | no | `"auto"` | `"auto"`, `"center"`, `"none"` | scrolling before the action (`actions.md`) |
+| `wait` | object | no | none | one `wait_for` condition plus `timeout` | wait for it after the action settles (`actions.md`) |
 | `tab` | integer | no | current tab | owned tab | which tab |
 
 ## Behaviour
@@ -35,6 +38,7 @@ Move the pointer over an element to open a menu or show a tooltip.
 | `resolved` | as in `click` | yes | |
 | `outcome` | as in `click` | yes | |
 | `hint` | string \| null | yes | the CSS `:hover` note |
+| `waited` | object \| null | yes | the `wait` result, null without `wait` (`actions.md`) |
 
 ## Errors
 

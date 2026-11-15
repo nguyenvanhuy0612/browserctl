@@ -1,0 +1,14 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Shadow frame</title></head>
+<body><h1>Shadow frame</h1><button>Main button</button><demo-embed></demo-embed>
+<script nonce="fixture">
+customElements.define('demo-embed', class extends HTMLElement {
+  connectedCallback() {
+    const root = this.attachShadow({ mode: 'open' });
+    const frame = document.createElement('iframe');
+    frame.title = 'frame in shadow root';
+    frame.src = 'child.html';
+    root.append(frame);
+  }
+});
+</script>
+</body></html>

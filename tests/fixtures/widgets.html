@@ -1,0 +1,21 @@
+<!doctype html>
+<title>Widgets</title>
+<style>
+  #box { height: 120px; overflow: auto; border: 1px solid #999 } #box p { height: 60px; margin: 0 }
+  #tip { display: none } #tip.shown { display: block }
+</style>
+<button id="save" disabled>Save</button><div id="tip" role="tooltip">Fill the form first</div>
+<div id="box" aria-label="Scroll box"></div>
+<button id="pick">Choose file</button><input type="file" id="hidden-file" style="display:none">
+<button id="ask">Ask name</button><button id="sure">Are you sure</button>
+<div id="out"></div>
+<script>
+  window.__log = [];
+  for (let i = 1; i <= 20; i++) { const p = document.createElement("p"); p.textContent = `row ${i}`; document.querySelector("#box").append(p); }
+  document.querySelector("#save").addEventListener("mouseenter", () => document.querySelector("#tip").classList.add("shown"));
+  const file = document.querySelector("#hidden-file");
+  document.querySelector("#pick").addEventListener("click", () => file.click());
+  file.addEventListener("change", () => window.__log.push(`files ${[...file.files].map((f) => `${f.name}:${f.size}`).join(",")}`));
+  document.querySelector("#ask").addEventListener("click", () => window.__log.push(`name=${prompt("Your name?", "nobody")}`));
+  document.querySelector("#sure").addEventListener("click", () => window.__log.push(`sure=${confirm("Sure?")}`));
+</script>

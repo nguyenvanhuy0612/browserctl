@@ -15,10 +15,12 @@ function layout() {
 }
 
 const MODIFIERS = ["Alt", "Control", "Meta", "Shift"];
-const ALIASES = /** @type {Record<string, string>} */ ({ Ctrl: "Control", Cmd: "Meta", Command: "Meta", Option: "Alt", Esc: "Escape", Return: "Enter", Space: " ", Del: "Delete", Up: "ArrowUp", Down: "ArrowDown", Left: "ArrowLeft", Right: "ArrowRight" });
+// ControlOrMeta is Playwright's: Meta on macOS, Control elsewhere (the browser runs on this host).
+const ALIASES = /** @type {Record<string, string>} */ ({ ControlOrMeta: process.platform === "darwin" ? "Meta" : "Control", Ctrl: "Control", Cmd: "Meta", Command: "Meta", Option: "Alt", Esc: "Escape", Return: "Enter", Space: " ", Del: "Delete", Up: "ArrowUp", Down: "ArrowDown", Left: "ArrowLeft", Right: "ArrowRight" });
 
 /**
- * Parses "Control+Shift+K", "Shift++", "+", "a" into modifiers and one key description.
+ * Parses "Control+Shift+K", "Shift++", "+", "a" into modifiers, one key description, and the
+ * chord with aliases normalized, as Playwright spells it (specs/tools/press_key.md).
  * @param {string} chord
  */
 export function parseChord(chord) {
@@ -43,7 +45,12 @@ export function parseChord(chord) {
     if (!MODIFIERS.includes(m)) throw new BctlError("INVALID_PARAMS", `unknown modifier ${m} in ${chord}`, { hint: `Modifiers: ${MODIFIERS.join(", ")}.` });
     if (!modifiers.includes(m)) modifiers.push(m);
   }
-  return { modifiers, key: describeKey(keyName, modifiers.includes("Shift")) };
+  return {
+    modifiers,
+    modifierKeys: modifiers.map((m) => describeKey(m, false)),
+    key: describeKey(keyName, modifiers.includes("Shift")),
+    chord: [...modifiers, keyName].join("+"),
+  };
 }
 
 /** @param {string} name @param {boolean} shift */

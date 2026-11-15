@@ -1,6 +1,6 @@
 # `read`
 
-Status: approved
+Status: verified
 Depends on: `dom-lane.md`, `targets.md`, `errors.md`
 
 ## Purpose

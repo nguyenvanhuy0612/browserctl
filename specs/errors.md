@@ -1,6 +1,6 @@
 # Errors
 
-Status: approved
+Status: verified
 Depends on: none
 
 Every failed call returns:
@@ -29,8 +29,8 @@ code is added here before any code returns it.
 | `TARGET_HIDDEN` | the element stayed invisible |
 | `TARGET_DISABLED` | the element stayed disabled or inert |
 | `TARGET_COVERED` | another element receives the pointer at the target point |
+| `TARGET_OUTSIDE_VIEWPORT` | `scroll: "none"` and the target is outside the viewport (`actions.md`) |
 | `TARGET_NOT_EDITABLE` | text entry into an element that takes none |
-| `DIALOG_OPEN` | a native dialog not handled by the shim blocks the page |
 | `OPTION_NOT_FOUND` | a `<select>` has no option with that value or label |
 | `NAVIGATION_FAILED` | the page did not load; the message has Chrome's net error |
 | `FILE_NOT_FOUND` | an upload path does not exist or cannot be read |
@@ -39,5 +39,5 @@ code is added here before any code returns it.
 | `USER_SCRIPTS_OFF` | `evaluate` without the debugger needs "Allow User Scripts"; the hint offers `trusted: true` |
 | `DEBUGGER_CANCELED` | the user pressed Cancel on the debugging bar |
 | `DEBUGGER_BUSY` | another debugger (DevTools) holds the tab |
-| `TIMEOUT` | the call's overall time limit passed |
+| `TIMEOUT` | the call's overall time limit passed; when the page itself did not answer a DOM-lane request, the hint says a dialog only the user can answer or a script that never yields blocks it (`dom-lane.md`) |
 | `INTERNAL_ERROR` | a fault in browserctl itself; the message has the cause, the call log has the details |

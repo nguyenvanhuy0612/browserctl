@@ -1,6 +1,6 @@
 # `wait_for`
 
-Status: approved
+Status: verified
 Depends on: `dom-lane.md`, `targets.md`, `errors.md`
 
 ## Purpose
@@ -37,7 +37,8 @@ against the tab's URL from `chrome.tabs`. `time` sleeps in the daemon.
 
 ## Errors
 
-`TIMEOUT` (with what was last seen: the closest text match or the element's state), `NO_TAB`,
+`TIMEOUT` (with what was last seen: whether the text was present, or the element's state with its
+role and name), `NO_TAB`,
 `TAB_NOT_OWNED`, `TAB_CLOSED`, `PAGE_UNSCRIPTABLE`, `INVALID_TARGET`, `AMBIGUOUS_TARGET`,
 `INVALID_PARAMS`.
 
@@ -55,5 +56,14 @@ attached / detached, or for time seconds. timeout defaults to 10 s.
 | WAIT-E01 | live | text appears after 2 s in a background tab | waits about 2 s, not throttled to timer granularity |
 | WAIT-E02 | live | wait across a navigation | matched on the new page |
 | WAIT-E03 | live | never appears | `TIMEOUT` with last seen state |
-| WA-027..WA-043 | live | Playwright wait-for-selector cases that use visible/hidden/attached/detached | same outcomes |
-| playwright-mcp `wait.spec.ts` | live | adopted | same results |
+| WA-027 | live | unknown option `waitFor` | `INVALID_PARAMS` naming `state` among the valid parameters |
+| WA-029..WA-032, WA-034..WA-037, WA-039..WA-041 | live | Playwright wait-for-selector cases (an element's own subtree as a `>>` chain; a timeout as `TIMEOUT`, whose message names the state and the element last seen) | same outcomes |
+| WA-038 | live | `click` on `text=Reset` matching a hidden and a visible button | `AMBIGUOUS_TARGET` listing both (Playwright proceeds with the first and fails on it) |
+| WAIT-E04 | live | playwright-mcp `wait.spec.ts` "text": text that a click changes 1 s later | matched; the snapshot shows the new text |
+| WAIT-E05 | live | "textGone": the same page, the old text | waited until it was gone |
+| WAIT-E06 | live | "time": 1 s; 70 s | `waitedMs` about 1000; `INVALID_PARAMS` (at most 60) |
+
+Not adopted: WA-028 (`waitFor` tolerated as an alias: no aliases); WA-033 (a wait goes on across a
+navigation, WAIT-E02); WA-042, WA-043 (selectors wait in the main frame only, `targets.md`);
+playwright-mcp `wait.spec.ts` combinations of `time` with `text` or `textGone` with `text` (one
+condition per call).

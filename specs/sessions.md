@@ -1,6 +1,6 @@
 # Sessions, browsers, tabs and the debugger lifecycle
 
-Status: approved
+Status: implemented
 Depends on: `architecture.md`
 
 ## Browsers
@@ -34,7 +34,8 @@ Depends on: `architecture.md`
 - A session is created on its first request. It ends on `DELETE /v1/sessions/<id>` (the MCP server
   sends it on exit) or after 30 minutes without a request.
 - Ending a session detaches the debugger from its tabs and releases them. Tabs stay open unless
-  the session was created with `closeTabsOnEnd: true`.
+  the session was created with `closeTabsOnEnd: true` (the `X-Browserctl-Close-Tabs: 1` header
+  on its first call, `interface.md`); then the tabs it owns are closed, adopted tabs stay open.
 - Ownership is persisted in `~/.browserctl/sessions.json` (session id, browser `instanceId`, tab
   id), so a daemon restart keeps it.
 
@@ -51,13 +52,20 @@ Depends on: `architecture.md`
   gets `TAB_NOT_OWNED` naming the new holder.
 - Each session has one current tab; tools default to it. `tabs({action: "new"})` and
   `tabs({action: "select"})` change it.
-- New tabs are created with `active: false` in the browser's last focused normal window and put in
-  a tab group named after the session. If no normal window exists, a minimized, unfocused window is
-  created.
+- New tabs are created with `active: false` in the browser's last focused normal window, next to
+  the user's tabs and not in a tab group (the owner dropped grouping on 2026-11-14: groups moved the
+  user's tabs around and added nothing an agent needs). If no normal window exists, a minimized,
+  unfocused window is created.
 - The user's active tab and focused window change only through `tabs({action: "select",
   focus: true})`.
-- A tab opened by an owned tab (`openerTabId`) joins the opener's session and group and is reported
-  by the action that opened it.
+- A tab that a page in an owned tab opens (a `target=_blank` link, `window.open`) joins that tab's
+  session and is reported by the action that opened it. The source tab comes from
+  `webNavigation.onCreatedNavigationTarget`, which names it even for `noopener` links; measured
+  2026-11-15 (Chrome for Testing 158): `tabs.onCreated` gave the window's active tab as
+  `openerTabId`, not the tab whose link was clicked, so it is not used for ownership.
+- Such a tab must not take the user's view: when Chrome opens it active, the daemon activates
+  again the tab that was active before, which Chrome reports as the new tab's `openerTabId`
+  (same measurement: in three runs it was the previously active tab every time).
 - A closed tab is dropped from its session; the next call on it fails with `TAB_CLOSED`.
 
 ## Debugger lifecycle (CDP lane)
@@ -81,15 +89,16 @@ Depends on: `architecture.md`
 | SES-U02 | unit | reconnect with the same `instanceId` | replaces its own socket, alias kept |
 | SES-U03 | unit | two browsers, call without `browser` | `AMBIGUOUS_BROWSER` listing aliases |
 | SES-U04 | unit | session B acts on session A's tab | `TAB_NOT_OWNED`; after B adopts with `force`, A gets `TAB_NOT_OWNED` naming B |
-| SES-U05 | unit | tab created with `openerTabId` of an owned tab | owned by the same session |
+| SES-U05 | unit | `nav.createdTarget` from an owned tab, after a `tabs.created` whose `openerTabId` is another session's tab | owned by the source tab's session only |
 | SES-U06 | unit | 30 min idle | session ends, attachments detached, tabs kept |
 | SES-U07 | unit | daemon restart with `sessions.json` | ownership restored |
 | SES-U08 | unit | idle timer with a pin | no detach until unpinned |
 | SES-U09 | unit | `canceled_by_user` | browser marked; CDP-lane call → `DEBUGGER_CANCELED`; `allowDebugger` clears it |
-| SES-E01 | live | `tabs new` | tab inactive, in the session group, user's active tab unchanged |
+| SES-E01 | live | `tabs new` | tab inactive, not grouped, user's active tab unchanged |
 | SES-E02 | live | daemon killed with an attached tab, restarted | on reconnect the stale attachment is detached |
 | SES-E03 | live | CDP call, then 30 s idle | detached; bar gone within 6 s more |
-| SES-S01 | site | owner's Chrome: Cancel on the bar | `DEBUGGER_CANCELED` on the next trusted call |
+| SES-E04 | live | session created with `X-Browserctl-Close-Tabs: 1` owns one tab and adopted another, then ends | the owned tab is closed, the adopted one stays open; a session without the header keeps its tab |
+| SES-S01 | manual | owner's Chrome: Cancel on the bar | `DEBUGGER_CANCELED` on the next trusted call |
 
 ## Edge cases left out
 

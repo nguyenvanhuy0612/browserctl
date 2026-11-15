@@ -32,7 +32,7 @@ const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms)
 try {
   let t = Date.now();
   const nav = await call("navigate", { url: "https://www.facebook.com/" });
-  check("NAV facebook", nav.ok && nav.settled, { ms: Date.now() - t, title: nav.title, error: nav.error });
+  check("NAV-S01 Facebook home in a background tab", nav.ok && nav.settled, { ms: Date.now() - t, title: nav.title, error: nav.error });
   await sleep(3000);
 
   t = Date.now();
@@ -61,10 +61,13 @@ try {
   check("EVAL-S01 Facebook evaluate without the bar", title.ok && title.lane === "dom", { value: title.value, error: title.error });
 
   const requests = await call("network_requests", { limit: 5 });
-  check("NET Facebook request log", requests.ok && requests.requests.length > 0, { count: requests.requests?.length, first: requests.requests?.[0]?.url?.slice(0, 80) });
+  check("NET-S01 Facebook request log", requests.ok && requests.requests.length > 0, { count: requests.requests?.length, first: requests.requests?.[0]?.url?.slice(0, 80) });
+
+  const quiet = await call("status", {});
+  check("DOM-S01 snapshot, type, hover, evaluate and the request log on Facebook attached no debugger", quiet.ok && (quiet.browsers?.[0]?.attached ?? []).length === 0, { attached: quiet.browsers?.[0]?.attached });
 
   const domScroll = await call("scroll", { direction: "down", amount: 3000 });
-  check("SCR DOM lane on the feed (background)", domScroll.ok ? null : false, { after: domScroll.after, contentGrew: domScroll.contentGrew, hint: domScroll.hint, error: domScroll.error });
+  check("SCR-S02 DOM lane on the feed (background)", domScroll.ok ? null : false, { after: domScroll.after, contentGrew: domScroll.contentGrew, hint: domScroll.hint, error: domScroll.error });
 
   // Facebook keeps only a window of posts in the DOM and numbers none of them; the page height
   // growing is what shows posts were loaded (measured: 1590 -> 8587 -> 13555 px).
@@ -77,7 +80,7 @@ try {
 
   const shot = await call("take_screenshot", {});
   const shotBytes = shot.ok ? fs.statSync(shot.path).size : 0;
-  check("SHOT background screenshot", shot.ok && shotBytes > 20_000, { lane: shot.lane, width: shot.width, height: shot.height, bytes: shotBytes, error: shot.error });
+  check("SHOT-S01 background screenshot", shot.ok && shotBytes > 20_000, { lane: shot.lane, width: shot.width, height: shot.height, bytes: shotBytes, error: shot.error });
   if (shot.ok) fs.rmSync(shot.path);
 
   await call("navigate", { url: "https://www.facebook.com/" });
@@ -88,7 +91,7 @@ try {
   const click = await call("click", { target: market2 ?? 'role=link[name="Marketplace"]' });
   const clickMs = Date.now() - t;
   const after2 = await call("snapshot", {});
-  check("CLICK-S01 Marketplace by ref, then the snapshot shows it", click.ok && click.outcome.urlChanged && /marketplace/i.test(after2.url ?? ""), {
+  check("CLICK-S01 / SET-S01 Marketplace by ref, then the snapshot shows it", click.ok && click.outcome.urlChanged && /marketplace/i.test(after2.url ?? ""), {
     ms: clickMs,
     lane: click.lane,
     settled: click.outcome?.settled,
@@ -106,9 +109,10 @@ try {
   });
 
   const status = await call("status", {});
-  check("STATUS after the run", status.ok, { attached: status.browsers?.[0]?.attached, setup: status.setup });
+  check("STAT-S01 status after the run", status.ok, { attached: status.browsers?.[0]?.attached, setup: status.setup });
 } catch (error) {
-  check("aborted", false, String(/** @type {any} */ (error)?.message ?? error));
+  results.push({ id: "aborted", pass: false, detail: String(/** @type {any} */ (error)?.message ?? error) });
+  console.log(`FAIL  aborted  ${results.at(-1)?.detail}`);
 } finally {
   const list = await call("tabs", { action: "list" });
   for (const t of list.tabs ?? []) if (t.mine) await call("tabs", { action: "close", tab: t.tab });

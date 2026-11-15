@@ -7,10 +7,27 @@
     "target": "es2023",
     "module": "nodenext",
     "moduleResolution": "nodenext",
-    "lib": ["es2023", "dom", "dom.iterable"],
-    "types": ["node", "chrome"],
+    "lib": [
+      "es2023",
+      "dom",
+      "dom.iterable"
+    ],
+    "types": [
+      "node",
+      "chrome"
+    ],
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*.js", "extension/sw/**/*.js", "extension/runtime/runtime.js", "extension/ui/popup.js", "scripts/**/*.js", "tests/**/*.js"]
+  "include": [
+    "src/**/*.js",
+    "extension/sw/**/*.js",
+    "extension/runtime/runtime.js",
+    "extension/ui/popup.js",
+    "scripts/**/*.js",
+    "tests/**/*.js"
+  ],
+  "exclude": [
+    "tests/fixtures/**"
+  ]
 }
