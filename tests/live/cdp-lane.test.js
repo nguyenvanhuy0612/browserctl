@@ -2,7 +2,7 @@
 // CDP lane: trusted input, background rendering, screenshots, response bodies, run, idle detach.
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { after, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, test } from "node:test";
 import { freshPage, pageLog, sleep, startHarness } from "./harness.js";
 
 /** @type {Awaited<ReturnType<typeof startHarness>>} */
@@ -13,6 +13,8 @@ before(async () => {
 after(async () => {
   await h?.close();
 });
+// each test opens its own tabs: close them so a long file does not pile tabs up
+afterEach(() => h.closeTabs());
 
 const attachedTabs = () => /** @type {import("../../src/daemon/cdp/lane.js").CdpLane} */ (h.daemon.cdp).attachmentsOf(h.daemon.browsers.connected()[0].instanceId);
 

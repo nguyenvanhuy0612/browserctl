@@ -1,9 +1,12 @@
 // @ts-check
 // status, tabs, navigate (specs/tools/status.md, tabs.md, navigate.md).
 import { BctlError } from "../errors.js";
-import { tabKey } from "../sessions.js";
+import { heldByOther, tabKey } from "../sessions.js";
 import { checkWait, tab, waitCondition } from "./common.js";
 import { afterWait } from "./read-tools.js";
+
+/** How long a forced adopt waits for the holder's action in flight (specs/sessions.md). */
+const TAKE_WAIT_MS = 5000;
 
 const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -189,8 +192,10 @@ export const tabs = {
       if (holders.length > 1) throw new BctlError("AMBIGUOUS_BROWSER", `tab ${p.tab} exists in several browsers`, { browsers: holders.map((b) => b.alias) });
       const ref = { instanceId: holders[0].instanceId, tabId: p.tab };
       const owner = daemon.sessions.ownerOf(ref.instanceId, ref.tabId);
-      if (owner && owner.sessionId !== session.id && !p.force) {
-        throw new BctlError("TAB_NOT_OWNED", `tab ${p.tab} belongs to session ${owner.sessionId}`, { hint: "Pass force: true to take it over.", holder: owner.sessionId });
+      if (owner && owner.sessionId !== session.id) {
+        if (!p.force) throw heldByOther(p.tab, owner.sessionId);
+        // a tab is not taken in the middle of an action (specs/sessions.md)
+        await daemon.actionEnded(ref, TAKE_WAIT_MS);
       }
       daemon.sessions.own(session, ref.instanceId, ref.tabId, owner?.sessionId === session.id ? owner.kind : "adopted");
       daemon.sessions.setCurrent(session, ref);

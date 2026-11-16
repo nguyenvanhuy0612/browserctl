@@ -3,7 +3,7 @@
 // DOM lane and with trusted: true unless the spec names one lane. Sources: page-click*.spec.ts and
 // locator-click.spec.ts in Playwright's tests/page.
 import assert from "node:assert/strict";
-import { after, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, test } from "node:test";
 import { refIn, sleep, startHarness } from "./harness.js";
 import { LANES, failsWith, pwPage } from "./pw.js";
 
@@ -15,6 +15,8 @@ before(async () => {
 after(async () => {
   await h?.close();
 });
+// each test opens its own tabs: close them so a long file does not pile tabs up
+afterEach(() => h.closeTabs());
 
 const PREFIX = () => `${h.base}/pw`;
 /** Playwright's giveItAChanceToClick: let a pending click try a few times. */

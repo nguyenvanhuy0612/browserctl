@@ -19,7 +19,7 @@ code is added here before any code returns it.
 | `AMBIGUOUS_BROWSER` | several browsers connected and none named |
 | `EXTENSION_OUTDATED` | the extension's protocol version differs from the daemon's |
 | `NO_TAB` | the session has no current tab |
-| `TAB_NOT_OWNED` | the tab belongs to another session or to none |
+| `TAB_NOT_OWNED` | the tab belongs to another session (the hint names `adopt` with `force: true`, `sessions.md`) or to none |
 | `TAB_CLOSED` | the tab closed before or during the call |
 | `PAGE_UNSCRIPTABLE` | the page cannot be scripted by an extension (`chrome://`, Web Store, the PDF viewer, an error page) |
 | `INVALID_TARGET` | the selector does not parse |

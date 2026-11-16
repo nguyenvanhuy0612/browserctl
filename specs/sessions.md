@@ -1,6 +1,6 @@
 # Sessions, browsers, tabs and the debugger lifecycle
 
-Status: verified
+Status: implemented (2026-11-16: idle limit and heartbeat, take-over hint, one action at a time per tab; not yet run on the owner's Chrome)
 Depends on: `architecture.md`
 
 ## Browsers
@@ -32,7 +32,11 @@ Depends on: `architecture.md`
 | HTTP scripts | `X-Browserctl-Session` header, default `http` |
 
 - A session is created on its first request. It ends on `DELETE /v1/sessions/<id>` (the MCP server
-  sends it on exit) or after 30 minutes without a request.
+  sends it on exit) or after `BROWSERCTL_SESSION_IDLE` seconds (default 300) without a request.
+  A heartbeat (`POST /v1/sessions/<id>/heartbeat`, `interface.md`) counts as a request for a
+  session that exists; it never creates one. The MCP server sends it every 60 s, so its session
+  lives as long as its process and a killed process frees its tabs within the idle limit. A call
+  in flight keeps its session alive however long it runs.
 - Ending a session detaches the debugger from its tabs and releases them. Tabs stay open unless
   the session was created with `closeTabsOnEnd: true` (the `X-Browserctl-Close-Tabs: 1` header
   on its first call, `interface.md`); then the tabs it owns are closed, adopted tabs stay open.
@@ -47,9 +51,16 @@ Depends on: `architecture.md`
 | adopted | an existing tab the session took with `tabs({action: "adopt"})` |
 | free | anything else, including every tab the user opened |
 
-- A session acts only on tabs it owns or adopted. Another session's tab → `TAB_NOT_OWNED`;
+- A session acts only on tabs it owns or adopted. Another session's tab → `TAB_NOT_OWNED`,
+  on every tool and on `adopt` without `force`, with the holder and the hint
+  `Take it only if the user asked for this tab: tabs({action: "adopt", tab: <id>, force: true}). Otherwise open a tab of your own.`
   `tabs({action: "adopt", force: true})` takes it over and the previous holder's next call on it
   gets `TAB_NOT_OWNED` naming the new holder.
+- Actions on one tab run one at a time: an action tool (`click`, `hover`, `type`, `fill_form`,
+  `press_key`, `scroll`, `file_upload`) starts after the previous action on that tab has settled,
+  so each `outcome` describes its own action. Reading tools do not wait. A tab is not taken in the
+  middle of an action: `adopt` with `force` waits for the action in flight to end, at most 5 s,
+  then takes the tab.
 - Each session has one current tab; tools default to it. `tabs({action: "new"})` and
   `tabs({action: "select"})` change it.
 - New tabs are created with `active: false` in the browser's last focused normal window, next to
@@ -90,10 +101,13 @@ Depends on: `architecture.md`
 | SES-U03 | unit | two browsers, call without `browser` | `AMBIGUOUS_BROWSER` listing aliases |
 | SES-U04 | unit | session B acts on session A's tab | `TAB_NOT_OWNED`; after B adopts with `force`, A gets `TAB_NOT_OWNED` naming B |
 | SES-U05 | unit | `nav.createdTarget` from an owned tab, after a `tabs.created` whose `openerTabId` is another session's tab | owned by the source tab's session only |
-| SES-U06 | unit | 30 min idle | session ends, attachments detached, tabs kept |
+| SES-U06 | unit | idle past the limit | session ends, attachments detached, tabs kept |
 | SES-U07 | unit | daemon restart with `sessions.json` | ownership restored |
 | SES-U08 | unit | idle timer with a pin | no detach until unpinned |
 | SES-U09 | unit | `canceled_by_user` | browser marked; CDP-lane call → `DEBUGGER_CANCELED`; `allowDebugger` clears it |
+| SES-U10 | unit | heartbeats past the idle limit, then none; a heartbeat for an unknown session | the session lives while they come and ends after; the unknown one is not created |
+| SES-U11 | unit | session B calls `click` on A's tab, then `adopt` without `force` | both `TAB_NOT_OWNED` with A as `holder` and a hint naming `adopt` with `force: true` |
+| SES-U12 | unit | two `click` calls sent together on one tab; `adopt` with `force` during an action | the second click starts after the first settled; the adopt answers after the action ended |
 | SES-E01 | live | `tabs new` | tab inactive, not grouped, user's active tab unchanged |
 | SES-E02 | live | daemon killed with an attached tab, restarted | on reconnect the stale attachment is detached |
 | SES-E03 | live | CDP call, then 30 s idle | detached; bar gone within 6 s more |

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { after, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, test } from "node:test";
 import { refIn, sleep, startHarness } from "./harness.js";
 import { LANES, failsWith, pwPage } from "./pw.js";
 
@@ -22,6 +22,8 @@ after(async () => {
   await h?.close();
   fs.rmSync(scratch, { recursive: true, force: true });
 });
+// each test opens its own tabs: close them so a long file does not pile tabs up
+afterEach(() => h.closeTabs());
 
 const EMPTY = () => `${h.base}/pw/empty.html`;
 /** @param {"dom" | "cdp"} lane */

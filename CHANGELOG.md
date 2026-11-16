@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.1
+
+- Sessions end after 5 minutes without a request instead of 30 (`BROWSERCTL_SESSION_IDLE`, in
+  seconds). The MCP server sends a heartbeat every minute, so its session lives as long as its
+  process; a call that is still running never lets its session expire.
+- A call on a tab another session holds is refused with `TAB_NOT_OWNED` and a hint naming the way
+  to take it: `tabs({action: "adopt", tab: <id>, force: true})`.
+- Actions on one tab (`click`, `hover`, `type`, `fill_form`, `press_key`, `scroll`,
+  `file_upload`) run one at a time, so each result describes its own action. A forced `adopt`
+  waits for the action in flight (at most 5 s) before it takes the tab.
+- `evaluate` returns results up to 1 MB (was 50 KB).
+- The extension is unchanged apart from its version number.
+
 ## 1.0.0
 
 browserctl is rebuilt from scratch. Install the new extension and register the MCP server again:

@@ -1,7 +1,7 @@
 // @ts-check
 // DOM-lane tools against fixture pages in background tabs; no debugger anywhere.
 import assert from "node:assert/strict";
-import { after, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, test } from "node:test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -19,6 +19,8 @@ before(async () => {
 after(async () => {
   await h?.close();
 });
+// each test opens its own tabs: close them so a long file does not pile tabs up
+afterEach(() => h.closeTabs());
 
 
 

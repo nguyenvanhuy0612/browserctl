@@ -79,6 +79,73 @@ test("SES-U06 an idle session ends: debugger detached, tabs kept", async () => {
   assert.ok(b.tabs.some((t) => t.tabId === tab), "tab kept");
 });
 
+test("SES-U10 heartbeats keep a session past the idle limit; without them it ends; an unknown session is not created", async () => {
+  const d = await daemon({ sessionIdleMs: 150 });
+  const beat = async (/** @type {string} */ id) => (await fetch(`http://127.0.0.1:${d.port}/v1/sessions/${id}/heartbeat`, { method: "POST" })).json();
+  await d.call("status", {}, "hb");
+  for (let i = 0; i < 4; i++) {
+    await new Promise((r) => setTimeout(r, 70));
+    assert.deepEqual(await beat("hb"), { ok: true, known: true });
+    await d.daemon.sweep();
+    assert.equal(d.daemon.sessions.sessions.has("hb"), true);
+  }
+  await new Promise((r) => setTimeout(r, 200));
+  await d.daemon.sweep();
+  assert.equal(d.daemon.sessions.sessions.has("hb"), false);
+  assert.deepEqual(await beat("nobody"), { ok: true, known: false });
+  assert.equal(d.daemon.sessions.sessions.has("nobody"), false);
+});
+
+test("SES-U11 another session's tab is refused with the holder and the take-over hint, on a tool and on adopt", async () => {
+  const d = await daemon();
+  await browser(d.port);
+  await until(() => d.daemon.browsers.connected().length === 1);
+  const tab = (await d.call("tabs", { action: "new" }, "owner")).tab.tab;
+  for (const r of [await d.call("click", { target: "#x", tab }, "other"), await d.call("tabs", { action: "adopt", tab }, "other")]) {
+    assert.equal(r.error.code, "TAB_NOT_OWNED");
+    assert.equal(r.error.holder, "owner");
+    assert.match(r.error.hint, new RegExp(`tabs\\(\\{action: "adopt", tab: ${tab}, force: true\\}\\)`));
+  }
+  assert.equal((await d.call("tabs", { action: "adopt", tab, force: true }, "other")).current, tab);
+});
+
+test("SES-U12 actions on one tab run one at a time; a forced adopt waits for the action in flight", async () => {
+  const d = await daemon();
+  /** @type {{start: number, end: number}[]} */
+  const clicks = [];
+  await browser(d.port, {
+    handlers: {
+      "dom.call": async ({ tabId, op, allFrames }, b) => {
+        if (op === "click") {
+          const span = { start: Date.now(), end: 0 };
+          clicks.push(span);
+          await new Promise((r) => setTimeout(r, 150));
+          span.end = Date.now();
+          return { ok: true, resolved: {} };
+        }
+        const tab = b.tabs.find((t) => t.tabId === tabId);
+        const result = op === "info" ? { ok: true, url: tab?.url, title: tab?.title, mutations: 0 } : op === "dialogLog" ? { ok: true, dialogs: [] } : { ok: true };
+        return allFrames ? { frames: [{ frameId: 0, result }] } : result;
+      },
+    },
+  });
+  await until(() => d.daemon.browsers.connected().length === 1);
+  const tab = (await d.call("tabs", { action: "new" }, "a")).tab.tab;
+  const [one, two] = await Promise.all([d.call("click", { target: "#x" }, "a"), d.call("click", { target: "#y" }, "a")]);
+  assert.equal(one.ok && two.ok, true);
+  assert.equal(clicks.length, 2);
+  // the first click's settle (500 ms navigation watch + 300 ms quiet) ends before the second starts
+  assert.ok(clicks[1].start - clicks[0].end >= 500, `second click started ${clicks[1].start - clicks[0].end} ms after the first ended`);
+
+  /** @type {string[]} */
+  const order = [];
+  const acting = d.call("click", { target: "#x" }, "a").then(() => order.push("click"));
+  await until(() => clicks.length === 3);
+  const taking = d.call("tabs", { action: "adopt", tab, force: true }, "b").then((r) => order.push(r.ok ? "adopt" : "adopt failed"));
+  await Promise.all([acting, taking]);
+  assert.deepEqual(order, ["click", "adopt"]);
+});
+
 test("SES-U07 ownership survives a daemon restart through sessions.json", async () => {
   const first = await startDaemon();
   const b = await connectFakeBrowser(first.port);
@@ -204,7 +271,7 @@ test("READ-U01 slices end at a line boundary and the last one has no nextOffset"
   assert.deepEqual(sliceText(text, text.length, 100), { text: "", nextOffset: null });
 });
 
-test("EVAL-U01 serialization: undefined, a node, a cycle, a 60 KB string", async () => {
+test("EVAL-U01 serialization: undefined, a node, a cycle, a 60 KB string whole, over 1 MB cut", async () => {
   const d = await daemon();
   await browser(d.port, { handlers: { "eval.user": async ({ code }) => ({ ok: true, value: await (0, eval)(code) }) } });
   await until(() => d.daemon.browsers.connected().length === 1);
@@ -226,9 +293,12 @@ test("EVAL-U01 serialization: undefined, a node, a cycle, a 60 KB string", async
   }
   const cycle = await d.call("evaluate", { function: "() => { const a = { name: 'a' }; a.self = a; return a; }" });
   assert.deepEqual(cycle.value, { name: "a", self: "[circular]" });
-  const big = await d.call("evaluate", { function: "() => 'y'.repeat(60 * 1024)" });
+  const whole = await d.call("evaluate", { function: "() => 'y'.repeat(60 * 1024)" });
+  assert.equal(whole.truncated, false);
+  assert.equal(whole.value.length, 60 * 1024);
+  const big = await d.call("evaluate", { function: "() => 'y'.repeat(1024 * 1024 + 10)" });
   assert.equal(big.truncated, true);
-  assert.equal(big.value.length, 50 * 1024);
+  assert.equal(big.value.length, 1024 * 1024);
 });
 
 test("API-U03 a browser speaking another protocol gets EXTENSION_OUTDATED", async () => {

@@ -2,7 +2,7 @@
 // Playwright's selectOption cases adopted by ID (specs/tools/fill_form.md): fill_form with an
 // option value or label, in the DOM lane and with trusted: true. Source: page-select-option.spec.ts.
 import assert from "node:assert/strict";
-import { after, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, test } from "node:test";
 import { sleep, startHarness } from "./harness.js";
 import { LANES, failsWith, pwPage } from "./pw.js";
 
@@ -14,6 +14,8 @@ before(async () => {
 after(async () => {
   await h?.close();
 });
+// each test opens its own tabs: close them so a long file does not pile tabs up
+afterEach(() => h.closeTabs());
 
 const SELECT = () => `${h.base}/pw/input/select.html`;
 /** Playwright's giveItAChanceToResolve. */

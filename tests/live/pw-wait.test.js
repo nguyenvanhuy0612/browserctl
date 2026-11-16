@@ -2,7 +2,7 @@
 // Playwright's waitForSelector cases adopted by ID (specs/tools/wait_for.md), through wait_for in
 // the DOM lane, and playwright-mcp's wait.spec.ts. Sources: page-wait-for-selector-1.spec.ts.
 import assert from "node:assert/strict";
-import { after, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, test } from "node:test";
 import { refIn, sleep, startHarness } from "./harness.js";
 import { PwError, failsWith, pwPage } from "./pw.js";
 
@@ -14,6 +14,8 @@ before(async () => {
 after(async () => {
   await h?.close();
 });
+// each test opens its own tabs: close them so a long file does not pile tabs up
+afterEach(() => h.closeTabs());
 
 const EMPTY = () => `${h.base}/pw/empty.html`;
 const open = () => pwPage(h, h.newSession(), "dom");

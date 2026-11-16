@@ -23,6 +23,17 @@ export const DEFAULT_DIALOG_POLICY = Object.freeze({ alert: "accept", confirm: "
 /** @param {string} instanceId @param {number} tabId */
 export const tabKey = (instanceId, tabId) => `${instanceId}:${tabId}`;
 
+/**
+ * The refusal of another session's tab, with the way to take it (specs/sessions.md).
+ * @param {number} tab @param {string} holder the session that holds it
+ */
+export function heldByOther(tab, holder) {
+  return new BctlError("TAB_NOT_OWNED", `tab ${tab} belongs to session ${holder}`, {
+    hint: `Take it only if the user asked for this tab: tabs({action: "adopt", tab: ${tab}, force: true}). Otherwise open a tab of your own.`,
+    holder,
+  });
+}
+
 export class Sessions {
   /** @type {Map<string, Session>} */
   sessions = new Map();
@@ -32,9 +43,11 @@ export class Sessions {
   closed = new Map();
   #file;
   #idleMs;
+  /** @type {Map<string, number>} calls in flight per session: a running call keeps its session alive */
+  #inflight = new Map();
 
   /** @param {{home: string, idleMs?: number}} options */
-  constructor({ home, idleMs = 30 * 60_000 }) {
+  constructor({ home, idleMs = 5 * 60_000 }) {
     this.#file = path.join(home, "sessions.json");
     this.#idleMs = idleMs;
     this.#load();
@@ -80,6 +93,27 @@ export class Sessions {
     }
     session.lastSeen = Date.now();
     return session;
+  }
+
+  /** A heartbeat keeps an existing session alive and never creates one. @param {string} id */
+  heartbeat(id) {
+    const session = this.sessions.get(id);
+    if (session) session.lastSeen = Date.now();
+    return Boolean(session);
+  }
+
+  /** A call of the session starts. @param {string} id */
+  begin(id) {
+    this.#inflight.set(id, (this.#inflight.get(id) ?? 0) + 1);
+  }
+
+  /** A call of the session ended. @param {string} id */
+  finish(id) {
+    const left = (this.#inflight.get(id) ?? 1) - 1;
+    if (left > 0) this.#inflight.set(id, left);
+    else this.#inflight.delete(id);
+    const session = this.sessions.get(id);
+    if (session) session.lastSeen = Date.now();
   }
 
   /** @param {string} instanceId @param {number} tabId */
@@ -156,7 +190,7 @@ export class Sessions {
   /** Sessions idle longer than the limit. */
   expired() {
     const cutoff = Date.now() - this.#idleMs;
-    return [...this.sessions.values()].filter((s) => s.lastSeen < cutoff).map((s) => s.id);
+    return [...this.sessions.values()].filter((s) => s.lastSeen < cutoff && !this.#inflight.has(s.id)).map((s) => s.id);
   }
 
   /**
@@ -181,7 +215,7 @@ export class Sessions {
     for (const [key] of this.closed) if (key.endsWith(`:${tab}`)) throw new BctlError("TAB_CLOSED", `tab ${tab} was closed`);
     if (holders.length === 0) throw new BctlError("TAB_CLOSED", `no tab ${tab} in a connected browser`);
     const owner = this.ownerOf(holders[0], tab);
-    if (owner) throw new BctlError("TAB_NOT_OWNED", `tab ${tab} belongs to session ${owner.sessionId}`, { holder: owner.sessionId });
+    if (owner) throw heldByOther(tab, owner.sessionId);
     throw new BctlError("TAB_NOT_OWNED", `tab ${tab} is not yours; adopt it first`, { hint: `tabs({action: "adopt", tab: ${tab}})` });
   }
 }

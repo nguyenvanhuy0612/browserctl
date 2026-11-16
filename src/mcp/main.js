@@ -7,7 +7,7 @@ import fs from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { callTool, endSession, listTools } from "../client.js";
+import { callTool, endSession, heartbeat, listTools } from "../client.js";
 
 export const INSTRUCTIONS = `browserctl operates pages in the user's own Chrome (their logins), in background tabs of your own.
 Loop: navigate (opens your tab) -> snapshot (refs like e5) -> click / type / fill_form with target: a ref -> read the result's outcome (url, new tabs, dialogs, DOM change).
@@ -39,6 +39,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
   return { content, isError: !result.ok };
 });
+
+// The session lives while this process does (specs/sessions.md); unref: the timer alone never
+// keeps the process running.
+const HEARTBEAT_MS = 60_000;
+setInterval(() => heartbeat(session), HEARTBEAT_MS).unref();
 
 let ending = false;
 async function shutdown() {

@@ -1,6 +1,6 @@
 # `evaluate`
 
-Status: verified
+Status: implemented (2026-11-16: result limit raised from 50 KB to 1 MB, owner's request)
 Depends on: `dom-lane.md`, `targets.md`, `relay.md`, `errors.md`
 
 ## Purpose
@@ -34,7 +34,7 @@ The parameter is named `function`, as in playwright-mcp, which agents already kn
    `USER_SCRIPTS_OFF` hint): Playwright `page.evaluate` or `locator.evaluate`.
 4. Serialize the value: JSON values as they are; `undefined` as `null` with `type: "undefined"`;
    DOM nodes as a short HTML preview; functions, symbols and cycles as a description. Results over
-   50 KB are cut and the cut is reported.
+   1 MB are cut and the cut is reported.
 5. A thrown error or rejected promise → `EVAL_ERROR` with the page's message and the first stack
    line.
 
@@ -45,7 +45,7 @@ The parameter is named `function`, as in playwright-mcp, which agents already kn
 | `lane` | `"dom"` \| `"cdp"` | yes | |
 | `value` | any JSON | yes | the result |
 | `type` | string | yes | `typeof` of the original value, `"node"` for DOM nodes |
-| `truncated` | boolean | yes | cut at 50 KB |
+| `truncated` | boolean | yes | cut at 1 MB |
 
 ## Errors
 
@@ -64,7 +64,7 @@ Run JavaScript in the page (page globals available). function: "() => document.t
 
 | ID | Kind | Case | Asserts |
 | --- | --- | --- | --- |
-| EVAL-U01 | unit | serialization: undefined, node, cycle, 60 KB string | `type`, preview, description, `truncated` |
+| EVAL-U01 | unit | serialization: undefined, node, cycle, a 60 KB string (whole), a string over 1 MB (cut) | `type`, preview, description, `truncated` |
 | EVAL-E01 | live | `() => document.title` | value |
 | EVAL-E02 | live | `(el) => el.value` with a ref inside an open shadow root | value; mark removed |
 | EVAL-E03 | live | async function resolving after 1 s in a background tab | awaited |

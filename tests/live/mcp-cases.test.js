@@ -2,7 +2,7 @@
 // playwright-mcp cases adopted under this project's IDs (form, evaluate, click, type and network
 // specs in Playwright's tests/mcp): the same pages and the same expectations on our results.
 import assert from "node:assert/strict";
-import { after, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, test } from "node:test";
 import { refIn, sleep, startHarness } from "./harness.js";
 import { LANES, pwPage } from "./pw.js";
 
@@ -14,6 +14,8 @@ before(async () => {
 after(async () => {
   await h?.close();
 });
+// each test opens its own tabs: close them so a long file does not pile tabs up
+afterEach(() => h.closeTabs());
 
 /** @param {"dom" | "cdp"} lane */
 const open = (lane = "dom") => pwPage(h, h.newSession(), lane);

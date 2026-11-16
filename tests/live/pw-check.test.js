@@ -2,7 +2,7 @@
 // Playwright's check cases adopted by ID (specs/tools/fill_form.md): fill_form with a boolean value,
 // in the DOM lane and with trusted: true. Source: page-check.spec.ts in Playwright's tests/page.
 import assert from "node:assert/strict";
-import { after, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, test } from "node:test";
 import { startHarness } from "./harness.js";
 import { LANES, failsWith, pwPage } from "./pw.js";
 
@@ -14,6 +14,8 @@ before(async () => {
 after(async () => {
   await h?.close();
 });
+// each test opens its own tabs: close them so a long file does not pile tabs up
+afterEach(() => h.closeTabs());
 
 /** @param {"dom" | "cdp"} lane */
 const open = (lane) => pwPage(h, h.newSession(), lane);

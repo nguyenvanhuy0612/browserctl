@@ -16,14 +16,14 @@ when a tool does not fit.
 Agent (MCP)  ─┐
 CLI          ─┼─ HTTP/JSON ─> Daemon (Node) ── WebSocket ──> Extension (MV3)
 Scripts      ─┘               tool registry                  DOM lane runtime (no debugger)
-                              sessions, tabs, leases          CDP relay (chrome.debugger)
+                              sessions, tabs                 CDP relay (chrome.debugger)
                               Playwright (CDP lane)           tabs, dialogs shim
                               call log
 ```
 
 | Component | Owns |
 | --- | --- |
-| Daemon | the tool registry (one source for MCP schema, CLI, HTTP); sessions, tab ownership, leases; choosing a lane per call; the CDP attach lifecycle; the call log |
+| Daemon | the tool registry (one source for MCP schema, CLI, HTTP); sessions, tab ownership, one action at a time per tab; choosing a lane per call; the CDP attach lifecycle; the call log |
 | Extension | executing DOM-lane operations in pages; relaying CDP; tab primitives; the dialog shim. It keeps no session state |
 | MCP server, CLI | thin clients of the daemon's HTTP API |
 

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { after, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, test } from "node:test";
 import { freshPage, pageLog, refIn, sleep, startHarness } from "./harness.js";
 
 /** @type {import("./harness.js").Harness} */
@@ -17,6 +17,8 @@ before(async () => {
 after(async () => {
   await h?.close();
 });
+// each test opens its own tabs: close them so a long file does not pile tabs up
+afterEach(() => h.closeTabs());
 
 const browserLink = () => /** @type {any} */ (h.daemon.browsers.connected()[0].link);
 const attachedTabs = () => /** @type {import("../../src/daemon/cdp/lane.js").CdpLane} */ (h.daemon.cdp).attachmentsOf(h.daemon.browsers.connected()[0].instanceId);

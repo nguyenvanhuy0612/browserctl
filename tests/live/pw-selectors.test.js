@@ -4,7 +4,7 @@
 // the snapshot features the compaction relies on. Sources: selectors-*.spec.ts and
 // page-aria-snapshot-ai.spec.ts in Playwright's tests/page.
 import assert from "node:assert/strict";
-import { after, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, test } from "node:test";
 import { refIn, sleep, startHarness } from "./harness.js";
 import { pwPage } from "./pw.js";
 
@@ -16,6 +16,8 @@ before(async () => {
 after(async () => {
   await h?.close();
 });
+// each test opens its own tabs: close them so a long file does not pile tabs up
+afterEach(() => h.closeTabs());
 
 const open = () => pwPage(h, h.newSession(), "dom");
 

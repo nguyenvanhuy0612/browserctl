@@ -79,6 +79,15 @@ export async function callTool(tool, params, who) {
   }
 }
 
+/** Keeps the session alive while its client lives (specs/sessions.md). @param {string} session */
+export async function heartbeat(session) {
+  try {
+    await fetch(`${base}/v1/sessions/${encodeURIComponent(session)}/heartbeat`, { method: "POST", signal: AbortSignal.timeout(2000) });
+  } catch {
+    // the daemon is down; the next tool call starts it
+  }
+}
+
 /** @param {string} session */
 export async function endSession(session) {
   try {

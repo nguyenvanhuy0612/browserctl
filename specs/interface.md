@@ -1,6 +1,6 @@
 # Interfaces: HTTP API, MCP, CLI, extension wire protocol, call log
 
-Status: verified
+Status: implemented (2026-11-16: heartbeat, `BROWSERCTL_SESSION_IDLE`)
 Depends on: `architecture.md`, `sessions.md`, `errors.md`
 
 ## Tool registry
@@ -24,6 +24,7 @@ Listens on `127.0.0.1:8765` (`BROWSERCTL_PORT` to change).
 | `GET /v1/tools` | | the registry: names, schemas, descriptions |
 | `POST /v1/tools/<name>` | the tool's parameters as JSON | `{ok: true, ...result}` or `{ok: false, error: {code, message, hint}}` |
 | `DELETE /v1/sessions/<id>` | | ends the session (`sessions.md`) |
+| `POST /v1/sessions/<id>/heartbeat` | | `{ok: true, known}`; keeps an existing session alive (`sessions.md`), `known: false` when there is none |
 | `GET /extension` (WebSocket upgrade) | | the extension's connection |
 
 Headers on tool calls: `X-Browserctl-Session` (session id), `X-Browserctl-Client` (`mcp`, `cli`,
@@ -31,7 +32,9 @@ or a script's name, recorded in the call log), `X-Browserctl-Close-Tabs` (`1`: t
 the tabs it opened when it ends, `sessions.md`; read only when the call creates the session). HTTP status is 200 for every tool answer, including
 `ok: false`; transport problems use 4xx/5xx.
 
-Python and other scripts use this API directly; no client library is required.
+Python and other scripts use this API directly; no client library is required. Scripts that run
+at the same time each set their own `X-Browserctl-Session`: the default `http` is one session with
+one current tab.
 
 ## Environment
 
@@ -40,6 +43,7 @@ Python and other scripts use this API directly; no client library is required.
 | `BROWSERCTL_PORT` | daemon, clients | `8765` | daemon port (the extension's storage key `daemonPort` must match) |
 | `BROWSERCTL_HOME` | daemon, clients | `~/.browserctl` | sessions, aliases, call log, screenshots, daemon log, the extension copy (`extension path`) |
 | `BROWSERCTL_DETACH_IDLE` | daemon | `30` | seconds without a CDP-lane call before the debugger detaches (`sessions.md`) |
+| `BROWSERCTL_SESSION_IDLE` | daemon | `300` | seconds without a request or heartbeat before a session ends (`sessions.md`) |
 | `BROWSERCTL_AUTO_START` | clients | | `manual`: clients never start the daemon |
 | `BROWSERCTL_CLOSE_TABS` | clients | | `1`: send `X-Browserctl-Close-Tabs: 1`, so the session's tabs close when it ends |
 
@@ -47,7 +51,7 @@ Python and other scripts use this API directly; no client library is required.
 
 - stdio server, started by the agent's client (`npx browserctl-mcp` or equivalent).
 - Starts the daemon if `/health` does not answer, then registers the tools from `GET /v1/tools`.
-- Generates one session id at start; sends `DELETE /v1/sessions/<id>` on exit.
+- Generates one session id at start; sends a heartbeat every 60 s and `DELETE /v1/sessions/<id>` on exit.
 - A tool result is one text block with the JSON result; `take_screenshot` adds an image block.
 - Server instructions (what the agent reads at connect): the loop in a few lines (`navigate` →
   `snapshot` → act with refs → read `outcome`), the target forms (`targets.md`), the common

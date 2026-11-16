@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "browserctl",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Lets AI agents operate web pages in this browser through the local browserctl daemon.",
   "minimum_chrome_version": "135",
   "permissions": [

@@ -35,12 +35,12 @@ passed on the owner's Chrome).
 | `architecture.md` (components, two lanes, reuse policy, invariants) | verified |
 | `dom-lane.md` (Playwright injected script in the extension, no debugger) | verified |
 | `relay.md` (CDP lane: extension relay and Playwright) | verified |
-| `sessions.md` (sessions, tabs, leases, attach lifecycle, banner policy) | verified |
+| `sessions.md` (sessions, tabs, attach lifecycle, banner policy) | implemented |
 | `targets.md` (refs and selectors, shared by every element tool) | verified |
 | `actions.md` (common action parameters: `timeout`, `scroll`, `wait`) | verified |
 | `settle.md` (when an action counts as finished) | verified |
 | `errors.md` (every error code, one table) | verified |
-| `interface.md` (HTTP API, MCP, CLI, extension wire protocol, call log) | verified |
+| `interface.md` (HTTP API, MCP, CLI, extension wire protocol, call log) | implemented |
 | `extension-ui.md` (toolbar popup) | verified |
 | `tools/status.md` | verified |
 | `tools/tabs.md` | verified |
@@ -57,7 +57,7 @@ passed on the owner's Chrome).
 | `tools/take_screenshot.md` | verified |
 | `tools/file_upload.md` | verified |
 | `tools/handle_dialog.md` | verified |
-| `tools/evaluate.md` | verified |
+| `tools/evaluate.md` | implemented |
 | `tools/run.md` | verified |
 | `tools/scroll.md` | verified |
 | `tools/network_requests.md` | verified |
@@ -66,6 +66,7 @@ passed on the owner's Chrome).
 
 | Date | Scope | Reviewer | Result |
 | --- | --- | --- | --- |
+| 2026-11-16 | `sessions.md`, `interface.md`: session idle limit 300 s (`BROWSERCTL_SESSION_IDLE`) with an MCP heartbeat every 60 s, replacing 30 min; take-over hint on `TAB_NOT_OWNED` (`adopt` with `force: true`, as in 0.9.x); actions on one tab run one at a time and a forced adopt waits for the action in flight (0.9.x: a tab is never taken mid-action). `tools/evaluate.md`: result limit 50 KB to 1 MB. `architecture.md`: the word "leases" removed | owner's direction; author self-review, no independent reviewer (the owner asked to keep the cost low) | SES-U10, SES-U11, SES-U12 and EVAL-U01 seen failing first. Statuses back to `implemented` until a run on the owner's Chrome. |
 | 2026-11-15 | UI-S01, SES-S01 on the owner's Chrome with the released extension 1.0.0 | owner, by hand; the author checked the daemon's side | Both passed; `extension-ui.md` and `sessions.md` set to `verified`. Every spec is now `verified`. |
 | 2026-11-15 | `architecture.md`: `beforeunload` removed from the reasons to use `trusted` (the shim handles it in the agent's tabs, `dom-lane.md`); package `browserctl-mcp`, version 1.0.0 | owner | Approved by the owner; statuses set to `verified` after the site run (11 pass), `implemented` for `extension-ui.md` and `sessions.md` until UI-S01 and SES-S01 are checked by hand. |
 | 2026-11-15 | First-release work: every spec ID given a test (gate `scripts/spec-ids.js`), the adopted Playwright and playwright-mcp cases ported or listed as not adopted with the reason, the five open gaps closed (`DIALOG_OPEN` replaced after measuring that no debugger can answer a dialog opened before it attached; settle numbers measured and kept; `closeTabsOnEnd` through `X-Browserctl-Close-Tabs`; `docs/TOOLS.md` generated), release gates (`scripts/preflight.js`) | author, each change spec first and test seen failing first; then an independent reviewer agent (read-only) over every uncommitted change and `snapshot.md` revision 2 | Porting and measuring found real defects, each fixed after its spec: `page.evaluate` hung in `run` (contexts not replayed to a second client), the first trusted input after a fresh load was dropped (paint holding), a `run` worker's `Fetch` events went to the daemon's Playwright, listener errors killed the run worker, `evaluate` code saw the wrapper's variables (`result`), DOM-lane clicks missed wrapped links, `display: contents` and text inside controls, a covered element was never re-scrolled, `fill_form` refused ARIA checkables and followed links inside labels, the CDP lane kept a swapped element, `textInput` was missing, chords sent no modifier key events, screenshots raced Chrome's capture quota, a stale CDP state survived a worker restart, `beforeunload` froze background tabs, and page-opened tabs were owned by the wrong session and took the user's view (Chrome's `openerTabId` is the active tab). The reviewer's 3 high findings (relay replay after a re-attach, two tests that could not fail) and 9 medium ones (child-session routing, `Runtime.disable` duplicates, two `beforeunload` handler forms, key aliases in the CDP lane, spec drift) are fixed with tests (RLY-U06..U08, KEY-U02, KEY-E07, NAV-E04 extended and shown failing by a mutation of the shim); the low ones are fixed or the spec reworded. |

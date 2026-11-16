@@ -46,6 +46,11 @@ export function startServer(daemon, { port, host = "127.0.0.1" }) {
         send(200, await daemon.call(tool[1], params, { sessionId, client, closeTabsOnEnd }));
         return;
       }
+      const beat = /^\/v1\/sessions\/([^/]+)\/heartbeat$/.exec(url.pathname);
+      if (req.method === "POST" && beat) {
+        send(200, { ok: true, known: daemon.sessions.heartbeat(decodeURIComponent(beat[1])) });
+        return;
+      }
       const session = /^\/v1\/sessions\/([^/]+)$/.exec(url.pathname);
       if (req.method === "DELETE" && session) {
         send(200, { ok: true, ...(await daemon.endSession(decodeURIComponent(session[1]))) });

@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { after, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, test } from "node:test";
 import { refIn, startHarness } from "./harness.js";
 import { failsWith, pwPage } from "./pw.js";
 
@@ -26,6 +26,8 @@ after(async () => {
   await h?.close();
   fs.rmSync(scratch, { recursive: true, force: true });
 });
+// each test opens its own tabs: close them so a long file does not pile tabs up
+afterEach(() => h.closeTabs());
 
 const open = () => pwPage(h, h.newSession(), "dom");
 /** The text of the input's first file, read in the page. @param {ReturnType<typeof pwPage>} page @param {string} selector */

@@ -7,7 +7,7 @@ import { BctlError } from "../errors.js";
 import { tabKey } from "../sessions.js";
 import { cdp, tab, target, trusted, urlMatcher } from "./common.js";
 
-const RESULT_LIMIT = 50 * 1024;
+const RESULT_LIMIT = 1024 * 1024;
 
 /**
  * Builds the MAIN-world script for evaluate: the agent's code is part of the source text, so no

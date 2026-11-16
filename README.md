@@ -178,6 +178,7 @@ hint names the next call to make.
 | `BROWSERCTL_PORT` | `8765` | Daemon port. When changed, set the extension's storage key `daemonPort` to match. |
 | `BROWSERCTL_HOME` | `~/.browserctl` | Sessions, browser aliases, the call log, screenshots, and the extension copy to load. |
 | `BROWSERCTL_DETACH_IDLE` | `30` | Seconds without a CDP-lane call before the debugger detaches. |
+| `BROWSERCTL_SESSION_IDLE` | `300` | Seconds without a request or heartbeat before a session ends and frees its tabs. |
 | `BROWSERCTL_AUTO_START` | | `manual`: clients never start the daemon themselves. |
 | `BROWSERCTL_CLOSE_TABS` | | `1`: tabs the session opened are closed when it ends (for example when the MCP server exits). |
 

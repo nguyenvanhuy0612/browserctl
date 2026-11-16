@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
-// Daemon entry point. BROWSERCTL_PORT (default 8765), BROWSERCTL_HOME (default ~/.browserctl).
+// Daemon entry point. BROWSERCTL_PORT (default 8765), BROWSERCTL_HOME (default ~/.browserctl),
+// BROWSERCTL_SESSION_IDLE (seconds, default 300), BROWSERCTL_DETACH_IDLE (seconds, default 30).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,7 +18,7 @@ export async function main() {
   const port = Number(process.env.BROWSERCTL_PORT ?? 8765);
   const home = process.env.BROWSERCTL_HOME ?? path.join(os.homedir(), ".browserctl");
   fs.mkdirSync(home, { recursive: true });
-  const daemon = new Daemon({ home, version, tools });
+  const daemon = new Daemon({ home, version, tools, sessionIdleMs: Number(process.env.BROWSERCTL_SESSION_IDLE ?? 300) * 1000 });
   daemon.cdp = new CdpLane(daemon, { idleMs: Number(process.env.BROWSERCTL_DETACH_IDLE ?? 30) * 1000 });
   const server = await startServer(daemon, { port });
   fs.writeFileSync(path.join(home, `daemon-${port}.json`), JSON.stringify({ pid: process.pid, port, version, startedAt: Date.now() }));

@@ -2,7 +2,7 @@
 // Playwright's keyboard cases adopted by ID (specs/tools/press_key.md), through press_key and
 // type with slowly, in the DOM lane and with trusted: true. Source: page-keyboard.spec.ts.
 import assert from "node:assert/strict";
-import { after, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, test } from "node:test";
 import { refIn, sleep, startHarness } from "./harness.js";
 import { LANES, failsWith, pwPage } from "./pw.js";
 
@@ -14,6 +14,8 @@ before(async () => {
 after(async () => {
   await h?.close();
 });
+// each test opens its own tabs: close them so a long file does not pile tabs up
+afterEach(() => h.closeTabs());
 
 const PREFIX = () => `${h.base}/pw`;
 /** @param {"dom" | "cdp"} lane */

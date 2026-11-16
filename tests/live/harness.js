@@ -173,6 +173,13 @@ export async function startHarness({ userScripts = true } = {}) {
   for (let i = 0; i < 300 && daemon.browsers.connected().length === 0; i++) await sleep(100);
   if (!daemon.browsers.connected().length) throw new Error("extension did not connect");
 
+  /** The targets the browser started with (its first tab, the extensions page): never closed by closeTabs. */
+  const initialPages = new Set(await pageTargets());
+  async function pageTargets() {
+    const { targetInfos } = await side.send("Target.getTargets");
+    return targetInfos.filter((/** @type {any} */ t) => t.type === "page").map((/** @type {any} */ t) => /** @type {string} */ (t.targetId));
+  }
+
   let sessionCounter = 0;
   const harness = {
     side,
@@ -283,6 +290,12 @@ export async function startHarness({ userScripts = true } = {}) {
         },
         close: () => side.send("Target.closeTarget", { targetId }),
       };
+    },
+    /** Closes every tab opened since the browser started, so a long file does not pile tabs up. */
+    async closeTabs() {
+      for (const targetId of await pageTargets()) {
+        if (!initialPages.has(targetId)) await side.send("Target.closeTarget", { targetId }).catch(() => {});
+      }
     },
     async close() {
       side.close();

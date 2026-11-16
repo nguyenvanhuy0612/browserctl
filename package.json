@@ -1,6 +1,6 @@
 {
   "name": "browserctl-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Browser control for AI agents in the user's real Chrome, through an MV3 extension and a local daemon.",
   "keywords": [
     "mcp",

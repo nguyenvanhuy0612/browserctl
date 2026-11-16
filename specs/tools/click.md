@@ -97,7 +97,7 @@ Unknown parameters are refused with `INVALID_PARAMS`, naming the valid ones.
 | Code | When | `hint` text |
 | --- | --- | --- |
 | `NO_TAB` | no current tab and no `tab` | `Open or select a tab first: tabs({action: "new"}).` |
-| `TAB_NOT_OWNED` | the tab is not this session's | `Use a tab from tabs({action: "list"}) marked as yours, or adopt it.` |
+| `TAB_NOT_OWNED` | the tab is not this session's | `Use a tab from tabs({action: "list"}) marked as yours, or adopt it.`; another session's tab: the take-over hint of `sessions.md` |
 | `REF_NOT_FOUND` | the ref's element is gone or the page navigated | `The element is gone or the page changed. Take a new snapshot.` |
 | `TARGET_NOT_FOUND` | selector matched nothing for 5 s | `Nothing matches. Take a snapshot and use a ref.` |
 | `AMBIGUOUS_TARGET` | selector matched several elements | `Matches N elements: <up to 5 as role "name" ref>. Use one ref.` |

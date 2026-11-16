@@ -343,17 +343,50 @@ export class Daemon {
    * @param {() => Promise<any>} action
    */
   async act(ref, action) {
-    const before = await this.pageState(ref);
-    const observer = this.observe(ref);
-    let result;
+    return this.#inTurn(ref, async () => {
+      const before = await this.pageState(ref);
+      const observer = this.observe(ref);
+      let result;
+      try {
+        result = await action();
+      } catch (error) {
+        observer.stop();
+        throw error;
+      }
+      const outcome = await this.settle(ref, before, observer);
+      return { result, outcome };
+    });
+  }
+
+  /** @type {Map<string, Promise<void>>} per tab, settles when the last action queued on it has ended */
+  #acting = new Map();
+
+  /**
+   * Actions on one tab run one at a time, each after the previous one ended (specs/sessions.md).
+   * @template T
+   * @param {TabRef} ref
+   * @param {() => Promise<T>} fn
+   * @returns {Promise<T>}
+   */
+  async #inTurn(ref, fn) {
+    const key = tabKey(ref.instanceId, ref.tabId);
+    const run = (this.#acting.get(key) ?? Promise.resolve()).then(fn);
+    const ended = run.then(
+      () => {},
+      () => {},
+    );
+    this.#acting.set(key, ended);
     try {
-      result = await action();
-    } catch (error) {
-      observer.stop();
-      throw error;
+      return await run;
+    } finally {
+      if (this.#acting.get(key) === ended) this.#acting.delete(key);
     }
-    const outcome = await this.settle(ref, before, observer);
-    return { result, outcome };
+  }
+
+  /** Resolves when the tab has no action in flight, or after maxMs. @param {TabRef} ref @param {number} maxMs */
+  async actionEnded(ref, maxMs) {
+    const running = this.#acting.get(tabKey(ref.instanceId, ref.tabId));
+    if (running) await Promise.race([running, sleep(maxMs)]);
   }
 
   // ---------- sessions ----------
@@ -383,6 +416,7 @@ export class Daemon {
     const started = Date.now();
     const session = this.sessions.touch(who.sessionId, who.client, { closeTabsOnEnd: who.closeTabsOnEnd });
     let response;
+    this.sessions.begin(session.id);
     try {
       const tool = this.registry.get(name);
       const valid = this.registry.validate(name, params ?? {});
@@ -400,6 +434,8 @@ export class Daemon {
       response = { ok: true, ...result };
     } catch (error) {
       response = { ok: false, error: toBctlError(error).toJSON() };
+    } finally {
+      this.sessions.finish(session.id);
     }
     const browser = session.current ? (this.browsers.byId(session.current.instanceId)?.alias ?? null) : null;
     this.callLog.write({ who, session, browser, name, params, response, ms: Date.now() - started });
