@@ -112,6 +112,10 @@ Playwright locator: CSS, `text=`, `role=button[name="Save"]`, XPath, plus the sh
 **Common action options.** `timeout` (seconds to wait for the element), `scroll` (`auto`, `center`
 or `none`) and `wait`, which waits for a condition after the action so act-then-wait is one call.
 
+**Tabs and sessions.** Each MCP server process is one session with one current tab, which tools use
+when `tab` is left out. Subagents of one client share that session, so each should open its own tab
+(`tabs` with `action: "new"`) and pass `tab` on every call; every result names the tab it acted on.
+
 ## How it works
 
 ```

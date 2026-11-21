@@ -70,10 +70,9 @@ export function startServer(daemon, { port, host = "127.0.0.1" }) {
     }
     // A run worker's own Playwright connection (specs/tools/run.md).
     const cdp = daemon.cdp;
-    const browser = url.searchParams.get("browser");
-    const tab = Number(url.searchParams.get("tab"));
-    if (url.pathname === "/cdp" && cdp && browser && tab) {
-      wss.handleUpgrade(req, socket, head, (ws) => cdp.serveWorker(browser, tab, ws));
+    const session = url.searchParams.get("session");
+    if (url.pathname === "/cdp" && cdp && session) {
+      wss.handleUpgrade(req, socket, head, (ws) => cdp.serveWorker(session, ws));
       return;
     }
     socket.destroy();

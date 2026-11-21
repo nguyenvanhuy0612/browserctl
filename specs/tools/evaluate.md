@@ -1,6 +1,6 @@
 # `evaluate`
 
-Status: implemented (2026-11-16: result limit raised from 50 KB to 1 MB, owner's request)
+Status: verified (2026-11-21: `timeout`, `action`)
 Depends on: `dom-lane.md`, `targets.md`, `relay.md`, `errors.md`
 
 ## Purpose
@@ -14,6 +14,8 @@ available; never refused because a tool exists for the job.
 | --- | --- | --- | --- | --- | --- |
 | `function` | string | yes | | a JavaScript function, `() => ...`, `async (el) => ...`, or an expression | the code |
 | `target` | string | no | | ref or selector | element passed as the function's first argument |
+| `timeout` | number | no | `30` | 1 to 300 seconds | how long the code may run, promise included |
+| `action` | boolean | no | `false` | | the code changes the page: run it as an action (below) |
 | `trusted` | boolean | no | `false` | | run through the CDP lane (shows the debugging bar) |
 | `tab` | integer | no | session's current tab | owned tab | which tab |
 
@@ -29,14 +31,19 @@ The parameter is named `function`, as in playwright-mcp, which agents already kn
    wrapper's variables (`result`, `value`, `element`); names starting with `__bctl` are
    reserved. The wrapper finds the marked element
    (searching open shadow roots), removes the mark, calls `function` with it if it is a function,
-   and awaits a returned promise (at most 30 s).
+   and awaits a returned promise.
 3. CDP lane (`trusted: true`, or userScripts off and the caller passed `trusted: true` after the
    `USER_SCRIPTS_OFF` hint): Playwright `page.evaluate` or `locator.evaluate`.
 4. Serialize the value: JSON values as they are; `undefined` as `null` with `type: "undefined"`;
    DOM nodes as a short HTML preview; functions, symbols and cycles as a description. Results over
    1 MB are cut and the cut is reported.
 5. A thrown error or rejected promise → `EVAL_ERROR` with the page's message and the first stack
-   line.
+   line. Code still running after `timeout` → `TIMEOUT` naming `evaluate` and the limit, with the
+   hint to raise `timeout` (not the hint of a page that stopped answering: the page answers other
+   calls meanwhile).
+6. `action: true`: the code runs as an action does (`sessions.md`: after the action in flight on
+   the tab), and the result carries `outcome` after the page settled (`settle.md`), as `click`'s
+   does. Without it nothing waits, so reading values stays fast.
 
 ## Result
 
@@ -46,6 +53,7 @@ The parameter is named `function`, as in playwright-mcp, which agents already kn
 | `value` | any JSON | yes | the result |
 | `type` | string | yes | `typeof` of the original value, `"node"` for DOM nodes |
 | `truncated` | boolean | yes | cut at 1 MB |
+| `outcome` | object | with `action: true` | what changed, as in `click` |
 
 ## Errors
 
@@ -57,7 +65,8 @@ The parameter is named `function`, as in playwright-mcp, which agents already kn
 
 ```text
 Run JavaScript in the page (page globals available). function: "() => document.title", or
-"(el) => el.value" with target: a ref. Promises are awaited. Use it whenever no other tool fits.
+"(el) => el.value" with target: a ref. Promises are awaited (timeout). action: true when the code
+changes the page: outcome after it reacts, like click. Use it whenever no other tool fits.
 ```
 
 ## Tests
@@ -75,10 +84,19 @@ Run JavaScript in the page (page globals available). function: "() => document.t
 | EVAL-E08 | live | `trusted: true`: `() => document.title`, and `(el) => el.id` with a selector | same values through Playwright |
 | EVAL-E09 | live | page globals named `result`, `value`, `element`, `mark` | each read back as the page set it |
 | EVAL-S01 | site | Facebook and GitHub, `document.title` | value, no debugging bar |
+| EVAL-E11 | live | `action: true` with code that clicks a button whose handler adds text after a 0 ms timer | `outcome.domChanged: true`, the text is there when the call returns |
+| EVAL-E12 | live | a promise that never settles, `timeout: 1`, in both lanes | `TIMEOUT` naming `evaluate` after about 1 s; the next call on the tab works |
 | EVAL-E10 | live | playwright-mcp `evaluate.spec.ts`: `document.title`, an element's style by locator, an object, a cyclic object, the expression `(1+1)`, a thrown error | the values (the cycle as `"[circular]"`); `EVAL_ERROR` with the message |
 
 Not adopted from `evaluate.spec.ts`: the sandboxed page (served with a CSP `sandbox` header the
 fixture server does not send) and the count of evaluations (no per-call page instrumentation).
+
+## Edge cases left out
+
+| Case | Why |
+| --- | --- |
+| Stopping code that is still running after `timeout` | the page's script cannot be interrupted from outside; the call returns and the code finishes on its own (a synchronous loop blocks the page, so the next call reports the page not answering) |
+| `outcome` without `action` | settle costs at least 800 ms; most evaluate calls read values |
 
 ## Deferred option: `chrome.scripting` fallback
 

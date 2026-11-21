@@ -2,10 +2,50 @@
 // DOM lane plumbing in the service worker: injects the runtime into frames and calls its
 // operations; runs evaluate through chrome.userScripts; captures the visible tab. Nothing here
 // touches chrome.debugger (specs/dom-lane.md).
-import { note } from "./diag.js";
+import { guarded, note } from "./diag.js";
 
 const RUNTIME_FILES = ["generated/pw-injected.js", "runtime/runtime.js"];
 const CAPTURE_SPACING_MS = 550;
+const REF_HIGH_KEY = "bctl.refHigh";
+
+/**
+ * Each tab's highest ref number, so a new document numbers its refs after the last one's
+ * (specs/targets.md). Kept in session storage: a service-worker restart must not reset it.
+ * @type {Promise<Record<string, number>> | null}
+ */
+let refHighs = null;
+
+/** @returns {Promise<Record<string, number>>} */
+function loadRefHighs() {
+  refHighs ??= chrome.storage.session.get(REF_HIGH_KEY).then(
+    (stored) => /** @type {Record<string, number>} */ (stored[REF_HIGH_KEY] ?? {}),
+    (error) => {
+      note("dom.loadRefHighs", error);
+      return {};
+    },
+  );
+  return refHighs;
+}
+
+/** @param {number} tabId @param {number | undefined} high */
+async function recordRefHigh(tabId, high) {
+  const highs = await loadRefHighs();
+  if (typeof high !== "number" || high <= (highs[tabId] ?? 0)) return;
+  highs[tabId] = high;
+  await chrome.storage.session.set({ [REF_HIGH_KEY]: highs }).catch((error) => note("dom.saveRefHighs", error));
+}
+
+/** Forgets the numbering of closed tabs. */
+export function listen() {
+  chrome.tabs.onRemoved.addListener(
+    guarded("dom.tabRemoved", async (tabId) => {
+      const highs = await loadRefHighs();
+      if (!(tabId in highs)) return;
+      delete highs[tabId];
+      await chrome.storage.session.set({ [REF_HIGH_KEY]: highs });
+    }),
+  );
+}
 
 /** @param {unknown} error */
 function scriptingError(error) {
@@ -21,16 +61,18 @@ function scriptingError(error) {
 /** @param {number} tabId @param {number} frameId */
 async function initFrame(tabId, frameId) {
   const target = { tabId, frameIds: [frameId] };
+  const refBase = (await loadRefHighs())[tabId] ?? 0;
   await chrome.scripting.executeScript({ target, world: "ISOLATED", files: RUNTIME_FILES });
   await chrome.scripting.executeScript({
     target,
     world: "ISOLATED",
-    func: (id) => /** @type {any} */ (globalThis).__bctlRuntime.init(id),
-    args: [frameId],
+    func: (id, base) => /** @type {any} */ (globalThis).__bctlRuntime.init(id, base),
+    args: [frameId, refBase],
   });
 }
 
 /**
+ * Runs an operation; records the tab's ref counter that each answer carries and strips it.
  * @param {number} tabId
  * @param {{frameIds?: number[], allFrames?: boolean}} where
  * @param {string} op
@@ -48,7 +90,10 @@ async function run(tabId, where, op, args) {
     },
     args: [op, args],
   });
-  return results.map((r) => ({ frameId: r.frameId, result: /** @type {any} */ (r.result) }));
+  const answers = results.map((r) => ({ frameId: r.frameId, result: /** @type {any} */ (r.result) }));
+  await recordRefHigh(tabId, Math.max(0, ...answers.map((a) => a.result?.refHigh ?? 0)));
+  for (const answer of answers) delete answer.result?.refHigh;
+  return answers;
 }
 
 /**

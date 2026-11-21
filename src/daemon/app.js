@@ -1,5 +1,6 @@
 // @ts-check
 // The daemon's core: browsers, sessions, tab events, DOM-lane calls, settle, and tool dispatch.
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Browsers } from "./browsers.js";
 import { CallLog } from "./calllog.js";
 import { BctlError, toBctlError } from "./errors.js";
@@ -17,6 +18,9 @@ const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms)
 
 /** @typedef {{name: string, data: any, at: number}} TabEvent */
 
+/** The tool call in progress, so the tab it resolves can be named in its result (specs/interface.md). */
+const currentCall = /** @type {AsyncLocalStorage<{tab: number | null}>} */ (new AsyncLocalStorage());
+
 export class Daemon {
   /**
    * The CDP lane, set by whoever starts the daemon (main.js, the live harness); unit tests without
@@ -33,7 +37,7 @@ export class Daemon {
     this.version = version;
     this.startedAt = Date.now();
     this.browsers = new Browsers({ home });
-    this.sessions = new Sessions({ home, idleMs: sessionIdleMs });
+    this.sessions = new Sessions({ home, idleMs: sessionIdleMs, onChange: () => this.#sendWatch() });
     this.registry = new Registry(tools);
     this.callLog = new CallLog({ home });
     /** @type {Map<string, Set<(e: TabEvent) => void>>} */
@@ -53,11 +57,30 @@ export class Daemon {
     for (const id of this.sessions.expired()) await this.endSession(id).catch(() => {});
   }
 
+  /** The tab ids last sent to each extension link as `watch`. @type {WeakMap<object, string>} */
+  #watched = new WeakMap();
+
+  /**
+   * Tells each browser which of its tabs some session owns, when that changed: the extension sends
+   * network events for those tabs only (specs/interface.md).
+   */
+  #sendWatch() {
+    for (const browser of this.browsers.connected()) {
+      const link = /** @type {import("./link.js").ExtensionLink} */ (browser.link);
+      const tabIds = [...this.sessions.owners.keys()].filter((key) => key.startsWith(`${browser.instanceId}:`)).map((key) => Number(key.slice(key.lastIndexOf(":") + 1)));
+      const sent = tabIds.sort((a, b) => a - b).join();
+      if (this.#watched.get(link) === sent) continue;
+      this.#watched.set(link, sent);
+      link.notify("watch", { tabIds });
+    }
+  }
+
   /** @param {Browser} browser */
   async #onConnected(browser) {
     const link = browser.link;
     if (!link) return;
     link.notify("welcome", { alias: browser.alias, version: this.version });
+    this.#sendWatch();
     // Ownership of tabs this browser no longer has is dropped (specs/sessions.md).
     try {
       const { tabs } = await link.request("tabs.list");
@@ -152,18 +175,24 @@ export class Daemon {
     for (const fn of this.observers.get(key) ?? []) fn(event);
   }
 
-  /** Collects a tab's events from now until stopped. @param {TabRef} ref */
-  observe(ref) {
+  /**
+   * Calls `fn` with each of a tab's events from now on; returns the function that stops it.
+   * @param {TabRef} ref @param {(e: TabEvent) => void} fn
+   */
+  onTabEvent(ref, fn) {
     const key = tabKey(ref.instanceId, ref.tabId);
-    /** @type {TabEvent[]} */
-    const events = [];
-    const fn = (/** @type {TabEvent} */ e) => events.push(e);
     if (!this.observers.has(key)) this.observers.set(key, new Set());
     /** @type {Set<any>} */ (this.observers.get(key)).add(fn);
-    return {
-      events,
-      stop: () => this.observers.get(key)?.delete(fn),
+    return () => {
+      this.observers.get(key)?.delete(fn);
     };
+  }
+
+  /** Collects a tab's events from now until stopped. @param {TabRef} ref */
+  observe(ref) {
+    /** @type {TabEvent[]} */
+    const events = [];
+    return { events, stop: this.onTabEvent(ref, (e) => events.push(e)) };
   }
 
   // ---------- browser access ----------
@@ -293,13 +322,14 @@ export class Daemon {
         while (!done() && Date.now() < deadline) await sleep(50);
         if (!done()) settled = false;
       }
+      // attribute changes do not break the quiet: animations make them all the time (specs/settle.md)
       let last = -1;
       let stableSince = Date.now();
       const quietDeadline = started + (navigated ? 13_000 : 3000);
       for (;;) {
         let count;
         try {
-          count = (await this.dom(ref, "info", {}, { timeoutMs: 3000 })).mutations;
+          count = (await this.dom(ref, "info", {}, { timeoutMs: 3000 })).content;
         } catch (error) {
           if (toBctlError(error).code === "TAB_CLOSED") throw error;
           count = last;
@@ -415,6 +445,7 @@ export class Daemon {
   async call(name, params, who) {
     const started = Date.now();
     const session = this.sessions.touch(who.sessionId, who.client, { closeTabsOnEnd: who.closeTabsOnEnd });
+    const context = { tab: /** @type {number | null} */ (null) };
     let response;
     this.sessions.begin(session.id);
     try {
@@ -430,8 +461,9 @@ export class Daemon {
           });
         });
       }
-      const result = await tool.handler(valid, { daemon: this, session });
-      response = { ok: true, ...result };
+      const result = await currentCall.run(context, () => tool.handler(valid, { daemon: this, session }));
+      // the tab acted on, unless the tool names it itself (specs/interface.md)
+      response = { ok: true, ...(context.tab !== null && { tab: context.tab }), ...result };
     } catch (error) {
       response = { ok: false, error: toBctlError(error).toJSON() };
     } finally {
@@ -452,6 +484,8 @@ export class Daemon {
     const connected = this.browsers.connected();
     const ref = this.sessions.resolveTab(session, tab, () => connected.map((b) => b.instanceId).filter((id) => tab !== undefined && this.#hasTab(id, tab)));
     this.linkOf(ref);
+    const call = currentCall.getStore();
+    if (call) call.tab = ref.tabId;
     return ref;
   }
 

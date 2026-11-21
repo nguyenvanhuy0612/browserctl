@@ -1,7 +1,7 @@
 // @ts-check
 // Runs `run` code in its own process with its own Playwright connection to the daemon's relay, so
-// a runaway script can be killed without stopping the daemon (specs/tools/run.md). `state`
-// persists between calls while this process lives.
+// a runaway script can be killed without stopping the daemon (specs/tools/run.md). One worker
+// serves a session's tabs; `state` persists between calls while this process lives.
 import { chromium } from "playwright-core";
 
 const endpoint = /** @type {string} */ (process.env.BROWSERCTL_CDP_ENDPOINT);
@@ -23,6 +23,29 @@ function onUncaught(error) {
 }
 process.on("uncaughtException", onUncaught);
 process.on("unhandledRejection", onUncaught);
+
+/** @type {WeakMap<import("playwright-core").Page, string>} */
+const targetIds = new WeakMap();
+
+/**
+ * The page of a tab, by the target id the daemon sends with each call; a tab the relay just added
+ * takes a moment to come up.
+ * @param {import("playwright-core").BrowserContext} context @param {string} targetId
+ */
+async function pageOf(context, targetId) {
+  for (let i = 0; i < 50; i++) {
+    for (const page of context.pages()) {
+      if (!targetIds.has(page)) {
+        const session = await context.newCDPSession(page);
+        targetIds.set(page, (await session.send("Target.getTargetInfo")).targetInfo.targetId);
+        await session.detach().catch(() => {});
+      }
+      if (targetIds.get(page) === targetId) return page;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error("the tab did not come up in the worker");
+}
 
 /** @param {unknown} v @param {Set<unknown>} seen @param {number} depth @returns {unknown} */
 function plain(v, seen = new Set(), depth = 0) {
@@ -46,12 +69,7 @@ process.on("message", async (/** @type {any} */ message) => {
   try {
     const browser = await connection;
     const context = browser.contexts()[0];
-    let page = context.pages()[0];
-    for (let i = 0; !page && i < 50; i++) {
-      await new Promise((r) => setTimeout(r, 100));
-      page = context.pages()[0];
-    }
-    if (!page) throw new Error("the tab did not come up in the worker");
+    const page = await pageOf(context, message.targetId);
     page.setDefaultTimeout(10_000);
     const fn = new AsyncFunction("page", "context", "state", "console", message.code);
     const work = fn(page, context, state, { ...capture, info: capture.log, warn: capture.log, error: capture.log });

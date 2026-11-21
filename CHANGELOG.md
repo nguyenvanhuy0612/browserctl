@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.0.2
+
+Reload the extension after updating: it speaks wire protocol 2, and the daemon refuses an older one
+with `EXTENSION_OUTDATED`.
+
+- Refs are unique within a tab across pages: a ref from an earlier page now fails with
+  `REF_NOT_FOUND` instead of naming an element of the new page once that page was snapshotted.
+- Every result of a call on a tab names the tab (`tab`). Subagents that share one MCP server share
+  its current tab; the server's instructions tell them to open their own tab and pass `tab`.
+- A current tab the user closed is `TAB_CLOSED` (was `NO_TAB`); `navigate` then opens a new tab.
+- The MCP server and CLI never send a call twice: a lost connection is reported as a call that may
+  have run, and long calls (`run` up to 600 s) are no longer cut at 300 s.
+- `snapshot` and `read` text comes as its own MCP text block, without JSON escaping.
+- Actions no longer wait 3 s on pages whose attributes change all the time (animations, progress
+  bars): only nodes and text count toward the page settling.
+- `evaluate` takes `timeout` (default 30 s) and `action: true`, which waits for the page to react
+  and returns `outcome` like `click`. A timeout while the page still answers says the code was
+  still waiting.
+- `run`: one worker per session for all its tabs (`state` survives switching tabs, `page` is the
+  call's tab); tabs a page opens appear as popups (`page.waitForEvent("popup")`); after the
+  extension reconnects the next call starts a fresh worker instead of failing.
+  `page.waitForLoadState()` no longer hangs now and then.
+- Network capture skips images, media and fonts and forgets failed requests; the extension sends
+  network events for the agent's tabs only.
+- `snapshot` and `read` see into closed shadow roots of web components (the DOM lane acts on their
+  elements too), `read` follows shadow roots and slots, and frames nest 10 levels deep (was 4); an
+  iframe that could not be read says `[not read]`.
+- A PDF tab and canvas-drawn areas get a notice line in `snapshot` (and `read` for a PDF) instead
+  of an empty or silent result. `read` works on SVG and XML documents.
+
 ## 1.0.1
 
 - Sessions end after 5 minutes without a request instead of 30 (`BROWSERCTL_SESSION_IDLE`, in

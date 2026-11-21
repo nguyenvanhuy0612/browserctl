@@ -40,7 +40,7 @@ function extensionCopy(dir, port) {
   return target;
 }
 
-const TYPES = /** @type {Record<string, string>} */ ({ ".json": "application/json", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".svg": "image/svg+xml" });
+const TYPES = /** @type {Record<string, string>} */ ({ ".json": "application/json", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".svg": "image/svg+xml", ".pdf": "application/pdf" });
 
 /**
  * Fixture pages from tests/fixtures. /csp/<name> serves the page with a strict CSP; /slow/<ms>/<name>

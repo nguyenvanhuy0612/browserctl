@@ -245,11 +245,10 @@ export const navigate = {
     if ((p.url === undefined) === (p.action === undefined)) {
       throw new BctlError("INVALID_PARAMS", "navigate takes exactly one of url and action", { hint: "Pass url: \"https://...\" or action: \"back\" | \"forward\" | \"reload\"." });
     }
-    let ref;
-    if (p.tab === undefined && !session.current) {
-      if (p.action) throw new BctlError("NO_TAB", "this session has no current tab");
-      ref = (await openTab(daemon, session, undefined, undefined)).ref;
-    } else ref = await daemon.tab(session, p.tab);
+    // a URL with no current tab, or one the user closed, opens a tab (specs/sessions.md); an action
+    // needs the tab and says NO_TAB or TAB_CLOSED
+    const opens = p.url !== undefined && p.tab === undefined && (!session.current || daemon.sessions.isClosed(session.current));
+    const ref = opens ? (await openTab(daemon, session, undefined, undefined)).ref : await daemon.tab(session, p.tab);
     const link = daemon.linkOf(ref);
     const before = await link.request("tabs.get", { tabId: ref.tabId });
     const observer = daemon.observe(ref);

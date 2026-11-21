@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createRequire } from "node:module";
-import { annotate, compact, cut, fit, nestFrames, noticeLines, parse, render } from "../../src/daemon/snapshot-text.js";
+import { annotate, compact, cut, fit, nestFrames, noticeLines, parse, PDF_NOTICE, render } from "../../src/daemon/snapshot-text.js";
 
 const { yaml } = createRequire(import.meta.url)("playwright-core/lib/utilsBundle");
 /** @param {string} text */
@@ -60,9 +60,9 @@ test("SNAP-U03 cut at a line boundary reports the cut", () => {
   assert.match(text, /more characters/);
 });
 
-test("TGT-U04 frame snapshots nest under their iframe", () => {
-  const nested = nestFrames(`- generic [ref=e1]:\n  - iframe [ref=e4]`, new Map([["e4", `- button "Inside" [ref=f7e2]`]]));
-  assert.equal(nested, `- generic [ref=e1]:\n  - iframe [ref=e4]:\n    - button "Inside" [ref=f7e2]`);
+test("TGT-U04 frame snapshots nest under their iframe; an unread frame is marked", () => {
+  const nested = nestFrames(`- generic [ref=e1]:\n  - iframe [ref=e4]\n  - iframe [ref=e5]`, new Map([["e4", `- button "Inside" [ref=f7e2]`]]), new Set(["e5"]));
+  assert.equal(nested, `- generic [ref=e1]:\n  - iframe [ref=e4]:\n    - button "Inside" [ref=f7e2]\n  - iframe [ref=e5] [not read]`);
 });
 
 test("SNAP-U05 a quoted role line (name with a colon) loses a redundant cursor marker", () => {
@@ -179,12 +179,15 @@ test("SNAP-U15 budget: long prose is folded harder before anything is cut; headi
   assertYaml(out.text);
 });
 
-test("SNAP-U16 notice lines for a page not ready and a modal are valid YAML", () => {
+test("SNAP-U16 notice lines for a page not ready, a modal, canvases and a PDF are valid YAML", () => {
   const lines = noticeLines({ ready: false, readyState: "interactive", quiet: false, pendingRequests: 2 }, { ref: "e5", role: "dialog", name: 'Welcome: "Hug" {x}' });
   assert.match(lines[0], /^- \(page not ready; document interactive, DOM still changing, 2 requests pending; snapshot again or wait_for\)$/);
   assert.match(lines[1], /^- \(a modal dialog "Welcome - Hug x" covers the page, starting at \[ref=e5\]; act inside it or close it first\)$/);
   assertYaml(lines.join("\n") + "\n- button \"OK\" [ref=e9]");
   assert.deepEqual(noticeLines({ ready: true, readyState: "complete", quiet: null, pendingRequests: 0 }, null), []);
+  const drawn = noticeLines({ ready: true, readyState: "complete", quiet: null, pendingRequests: 0 }, null, { count: 2, largest: "1200x800" });
+  assert.deepEqual(drawn, ["- (2 canvas areas drawn on the page, largest 1200x800 px; their content is pixels, not text; take_screenshot shows it)"]);
+  assertYaml(drawn.concat(PDF_NOTICE).join("\n"));
 });
 
 test("SNAP-U10 every compacted output, fold and cut line parses as YAML", () => {

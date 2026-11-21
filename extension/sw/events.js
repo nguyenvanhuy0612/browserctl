@@ -1,8 +1,18 @@
 // @ts-check
-// Browser events forwarded to the daemon. Every tab is reported; the daemon keeps what concerns
-// the tabs it owns (specs/interface.md).
-import { emit } from "./connection.js";
+// Browser events forwarded to the daemon. Tab and navigation events cover every tab (a tab the
+// daemon does not own yet can join a session); network events only the tabs the daemon watches,
+// every tab until it first says which (specs/interface.md).
+import { emit, onDaemonEvent } from "./connection.js";
 import { guarded } from "./diag.js";
+
+/** @type {Set<number> | null} */
+let watched = null;
+onDaemonEvent("watch", (/** @type {{tabIds: number[]}} */ data) => {
+  watched = new Set(data.tabIds);
+});
+
+/** @param {number} tabId */
+const isWatched = (tabId) => tabId >= 0 && (!watched || watched.has(tabId));
 
 /** @param {{tabId: number, frameId: number, url: string, timeStamp: number}} d */
 const nav = (d) => ({ tabId: d.tabId, frameId: d.frameId, url: d.url, at: d.timeStamp });
@@ -41,7 +51,7 @@ export function listen() {
   const filter = { urls: ["<all_urls>"] };
   chrome.webRequest.onSendHeaders.addListener(
     guarded("net.send", (d) => {
-      if (d.tabId < 0) return;
+      if (!isWatched(d.tabId)) return;
       emit("net.request", {
         phase: "send",
         tabId: d.tabId,
@@ -58,7 +68,7 @@ export function listen() {
   );
   chrome.webRequest.onCompleted.addListener(
     guarded("net.done", (d) => {
-      if (d.tabId < 0) return;
+      if (!isWatched(d.tabId)) return;
       emit("net.request", {
         phase: "done",
         tabId: d.tabId,
@@ -74,7 +84,7 @@ export function listen() {
   );
   chrome.webRequest.onErrorOccurred.addListener(
     guarded("net.error", (d) => {
-      if (d.tabId < 0) return;
+      if (!isWatched(d.tabId)) return;
       emit("net.request", { phase: "error", tabId: d.tabId, requestId: d.requestId, error: d.error, at: d.timeStamp });
     }),
     filter,

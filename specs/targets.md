@@ -1,6 +1,6 @@
 # Targets: refs and selectors
 
-Status: verified (revision 2, 2026-11-14: locator forms; TGT-U03, TGT-E08)
+Status: verified (2026-11-21: refs unique within a tab across documents, TGT-E09)
 Depends on: `dom-lane.md`
 
 ## Forms
@@ -48,6 +48,12 @@ every form.
   element, even an identical one.
 - A ref sent to a document whose runtime has not produced it (new document, fresh isolated world)
   → `REF_NOT_FOUND` with the hint to take a snapshot.
+- Refs are unique within a tab across documents. Playwright numbers refs from `e1` in every new
+  document, so a ref of an earlier document would name an element of a later one once that one was
+  snapshotted (measured 2026-11-21: `e2`, a heading of the first page, resolved to the second
+  page's heading after a `read` there). The extension keeps each tab's highest ref number (in
+  `chrome.storage.session`, so a service-worker restart keeps it; dropped when the tab closes),
+  and every new document's runtime numbers its refs after it (`dom-lane.md`).
 
 ## Frames
 
@@ -89,8 +95,9 @@ the action waits (a select swapped on hydration, Playwright SO-033) is found aga
 | TGT-E01 | live | snapshot twice, same element | same ref |
 | TGT-E02 | live | ref after navigation | `REF_NOT_FOUND` |
 | TGT-E03 | live | ref whose element was removed and replaced by an identical one | `REF_NOT_FOUND`, not the new element |
+| TGT-E09 | live | snapshot page A, navigate to page B, `read` there, then a ref of A that B also numbered | `REF_NOT_FOUND`; B's snapshot has no ref of A |
 | TGT-E07 | live | full snapshot, then a partial snapshot (`target`), then a ref from the first | still resolves |
-| TGT-U04 | unit | a child frame's snapshot and its parent's iframe line | nested under the iframe line, one level deeper |
+| TGT-U04 | unit | a child frame's snapshot and its parent's iframe line; an iframe whose frame was not read | nested under the iframe line, one level deeper; `[not read]` after the unread one's ref |
 | TGT-E04 | live | same-origin and cross-origin iframe | frame refs resolve; snapshot nests both |
 | TGT-E05 | live | ref and frame ref acted on with `trusted: true` | CDP lane hits the same element; marker attribute removed |
 | TGT-E06 | live | `role=button` matching 3 buttons | `AMBIGUOUS_TARGET` listing 3 |

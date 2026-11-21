@@ -1,6 +1,6 @@
 # DOM lane
 
-Status: verified (2026-11-14: `readBack`, `get`, `scroll` option on actionability)
+Status: verified (2026-11-21: ref numbering continues across documents; `info` content count)
 Depends on: `architecture.md`, `targets.md`
 
 The default way of operating a page: no `chrome.debugger`, so no debugging bar.
@@ -11,7 +11,10 @@ The default way of operating a page: no `chrome.debugger`, so no debugging bar.
   a build script (never edited by hand). The build emits the `InjectedScript` class; the runtime
   creates one instance per frame with that frame's sequence number (`frameSeq`), which Playwright
   uses as the ref prefix (`f2e7`). The same build step extracts Playwright's US keyboard layout for
-  `press_key`. It supplies the aria snapshot with refs, the selector
+  `press_key`. The build also exposes Playwright's ref counter to the runtime
+  (`__bctlRefCounter`, isolated world only): `init` raises it to the tab's highest ref number,
+  which the extension passes in, and every operation's answer carries the counter (`refHigh`),
+  which the extension records and strips (`targets.md`). It supplies the aria snapshot with refs, the selector
   engines, `elementState`, `expectHitTarget`, `dispatchEvent`, `fill`, `selectOptions`,
   `setInputFiles`.
 - `runtime.js`: ours. The operations below, built on the injected script. Every operation
@@ -20,6 +23,15 @@ The default way of operating a page: no `chrome.debugger`, so no debugging bar.
   world, in every frame, on first use after each document load. Injection is idempotent.
   Measured: first call on Facebook 119 ms including injection, later calls 40 ms.
 - The isolated world is immune to page globals (`window.Node` removed, `innerWidth` corrupted).
+- Closed shadow roots of custom elements are walked like open ones: in the isolated world only,
+  the runtime makes `Element.prototype.shadowRoot` answer, for an element whose name has a hyphen
+  and no open root, `chrome.dom.openOrClosedShadowRoot(element)`, so Playwright's engines and the
+  runtime see into them for snapshots, selectors, actions and `read`; the page's own `shadowRoot`
+  is untouched. Measured 2026-11-21: a closed root's text was missing from both `snapshot` and
+  `read` before; asking `chrome.dom` for every element made a 20,000-element snapshot 30% slower
+  (2.1 s instead of 1.6 s), asking only for custom elements costs nothing measurable. Closed roots
+  on built-in hosts (`div`, `span`, `section`, ...) are left out: components put them on custom
+  elements.
 
 ## Operations
 
@@ -28,7 +40,7 @@ returns `{ok: true, ...}` or `{ok: false, code, message}`; checks are one try, t
 
 | Operation | What it does |
 | --- | --- |
-| `info()` | URL, title, `visibilityState`, `readyState`, document age, frame sequence number, scroll position, and the mutation counts the daemon reads for `settle.md` and snapshot readiness |
+| `info()` | URL, title, `visibilityState`, `readyState`, document age, frame sequence number, scroll position, and the mutation counts the daemon reads: `mutations` (every change), `content` (nodes added or removed, text changed; `settle.md`) and `structure` (nodes added or removed; snapshot readiness) |
 | `snapshot({depth?, root?})` | aria snapshot, `mode: "ai"`, with the facts of `tools/snapshot.md` |
 | `read({target?, main?, links?})` | the text of `tools/read.md` |
 | `resolve(target)` | ref or selector to one element, strict; its description |

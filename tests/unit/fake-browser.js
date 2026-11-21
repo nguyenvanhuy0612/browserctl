@@ -60,8 +60,8 @@ export async function startDaemon({ home = fs.mkdtempSync(path.join(os.tmpdir(),
  */
 
 /**
- * A fake extension. Tabs live in `tabs`; every request is recorded in `requests`; `handlers`
- * override or add methods.
+ * A fake extension. Tabs live in `tabs`; every request is recorded in `requests` and every event
+ * the daemon sends in `events`; `handlers` override or add methods.
  * @param {number} port
  * @param {{instanceId?: string, name?: string, protocol?: number, userScripts?: boolean, handlers?: Record<string, Handler>}} [options]
  */
@@ -79,6 +79,8 @@ export async function connectFakeBrowser(port, { instanceId = "fake-1", name = "
     tabs: [],
     /** @type {{method: string, params: any}[]} */
     requests: [],
+    /** @type {{event: string, data: any}[]} */
+    events: [],
     /** @param {Partial<FakeTab>} [tab] */
     addTab(tab = {}) {
       const created = { tabId: nextTab++, url: "about:blank", title: "", active: false, ...tab };
@@ -114,7 +116,10 @@ export async function connectFakeBrowser(port, { instanceId = "fake-1", name = "
   };
   socket.on("message", async (raw) => {
     const message = JSON.parse(raw.toString());
-    if (message.id === undefined) return;
+    if (message.id === undefined) {
+      browser.events.push({ event: message.event, data: message.data });
+      return;
+    }
     browser.requests.push({ method: message.method, params: message.params });
     const handler = table[message.method];
     try {
@@ -134,6 +139,7 @@ export async function connectFakeBrowser(port, { instanceId = "fake-1", name = "
  *   socket: WebSocket,
  *   tabs: FakeTab[],
  *   requests: {method: string, params: any}[],
+ *   events: {event: string, data: any}[],
  *   addTab: (tab?: Partial<FakeTab>) => FakeTab,
  *   emit: (event: string, data: object) => void,
  *   close: () => void,

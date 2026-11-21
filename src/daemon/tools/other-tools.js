@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { Daemon } from "../app.js";
-import { BctlError } from "../errors.js";
+import { BctlError, toBctlError } from "../errors.js";
 import { tabKey } from "../sessions.js";
 import { cdp, tab, target, trusted, urlMatcher } from "./common.js";
 
@@ -69,31 +69,63 @@ function finish(value) {
   return { value: text.slice(0, RESULT_LIMIT), truncated: true };
 }
 
-/** @type {import("../registry.js").Tool} */
-export const evaluate = {
-  name: "evaluate",
-  description:
-    "Run JavaScript in the page (page globals available). function: \"() => document.title\", or \"(el) => el.value\" with target: a ref. Promises are awaited. Use it whenever no other tool fits.",
-  inputSchema: {
-    type: "object",
-    properties: { function: { type: "string", minLength: 1 }, target, trusted, tab },
-    required: ["function"],
-  },
-  async handler(p, { daemon, session }) {
-    const ref = await daemon.tab(session, p.tab);
-    const frameId = Daemon.frameOf(p.target);
+/**
+ * Runs the code once in the lane `trusted` picks. A TIMEOUT while the page still answers other
+ * calls is the code waiting, not a blocked page, and says so (specs/tools/evaluate.md).
+ * @param {import("../app.js").Daemon} daemon @param {import("../sessions.js").TabRef} ref
+ * @param {{function: string, target?: string, timeout: number, trusted?: boolean}} p
+ */
+async function evaluateOnce(daemon, ref, p) {
+  try {
     if (p.trusted) {
-      const r = await cdp(daemon).evaluate(ref, p.function, p.target);
+      const r = await cdp(daemon).evaluate(ref, p.function, p.target, p.timeout * 1000);
       return { lane: "cdp", ...finish(r.value), type: r.type };
     }
+    const frameId = Daemon.frameOf(p.target);
     const nonce = p.target ? (await daemon.dom(ref, "mark", { target: p.target }, { frameId })).nonce : null;
-    const answer = await daemon.linkOf(ref).request("eval.user", { tabId: ref.tabId, frameId, code: evaluateSource(p.function, nonce) }, 35_000);
+    const answer = await daemon.linkOf(ref).request("eval.user", { tabId: ref.tabId, frameId, code: evaluateSource(p.function, nonce) }, p.timeout * 1000);
     if (!answer.ok) throw new BctlError("EVAL_ERROR", answer.message ?? "evaluation failed");
     const result = answer.value;
     if (!result || typeof result !== "object") throw new BctlError("EVAL_ERROR", "the code did not produce a result");
     if (!result.ok) throw new BctlError("EVAL_ERROR", `${result.message}${result.stack ? ` (${result.stack.trim()})` : ""}`);
     const value = result.value && typeof result.value === "object" && result.value.__type === "undefined" ? null : result.value;
     return { lane: "dom", ...finish(value), type: result.type };
+  } catch (error) {
+    const e = toBctlError(error);
+    if (e.code !== "TIMEOUT") throw e;
+    const answering = await daemon.dom(ref, "info", {}, { timeoutMs: 2000 }).then(
+      () => true,
+      () => false,
+    );
+    if (!answering) throw e;
+    throw new BctlError("TIMEOUT", `evaluate did not finish in ${p.timeout} s`, {
+      hint: "The page still answers, so the code is waiting on something. Raise timeout, or return without awaiting what never settles.",
+    });
+  }
+}
+
+/** @type {import("../registry.js").Tool} */
+export const evaluate = {
+  name: "evaluate",
+  description:
+    "Run JavaScript in the page (page globals available). function: \"() => document.title\", or \"(el) => el.value\" with target: a ref. Promises are awaited (timeout). action: true when the code changes the page: outcome after it reacts, like click. Use it whenever no other tool fits.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      function: { type: "string", minLength: 1 },
+      target,
+      timeout: { type: "number", minimum: 1, maximum: 300, default: 30 },
+      action: { type: "boolean", default: false },
+      trusted,
+      tab,
+    },
+    required: ["function"],
+  },
+  async handler(p, { daemon, session }) {
+    const ref = await daemon.tab(session, p.tab);
+    if (!p.action) return evaluateOnce(daemon, ref, p);
+    const { result, outcome } = await daemon.act(ref, () => evaluateOnce(daemon, ref, p));
+    return { ...result, outcome };
   },
 };
 

@@ -73,7 +73,7 @@ test("API-E02 / API-E03 MCP server starts the daemon and registers every tool; e
       });
     const init = /** @type {any} */ (await rpc(1, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } }));
     assert.match(init.result.instructions, /trusted: true/);
-    for (const word of [/label=/, /\btimeout\b/, /\bscroll\b/, /\bwait\b/, /\bget\b/]) assert.match(init.result.instructions, word);
+    for (const word of [/label=/, /\btimeout\b/, /\bscroll\b/, /\bwait\b/, /\bget\b/, /pass tab/]) assert.match(init.result.instructions, word);
     child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
     const list = /** @type {any} */ (await rpc(2, "tools/list", {}));
     assert.equal(list.result.tools.length, 19);
@@ -91,6 +91,49 @@ test("API-E02 / API-E03 MCP server starts the daemon and registers every tool; e
     assert.ok(!sessions.some((/** @type {any} */ s) => s.id === sessionId), "session ended on exit");
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill();
+  }
+});
+
+test("API-U08 snapshot and read text follow the JSON as their own block, unescaped", async () => {
+  const { toolContent } = await import("../../src/mcp/content.js");
+  const text = '- button "Save" [ref=e5]\n- link "Home"';
+  for (const [tool, field] of [["snapshot", "snapshot"], ["read", "text"]]) {
+    const blocks = /** @type {{text: string}[]} */ (toolContent(tool, { ok: true, url: "u", [field]: text }));
+    assert.equal(blocks.length, 2, tool);
+    assert.deepEqual(JSON.parse(blocks[0].text), { ok: true, url: "u" });
+    assert.equal(blocks[1].text, text);
+  }
+  const click = /** @type {{text: string}[]} */ (toolContent("click", { ok: true, text: "kept" }));
+  assert.deepEqual(click.map((b) => JSON.parse(b.text)), [{ ok: true, text: "kept" }]);
+  assert.equal(toolContent("snapshot", { ok: false, error: { code: "NO_TAB" } }).length, 1);
+});
+
+test("API-U09 the client never resends a call the daemon may have run; a refused connection is not running", async () => {
+  let seen = 0;
+  const server = net.createServer((socket) => {
+    socket.once("data", () => {
+      seen++;
+      socket.destroy();
+    });
+  });
+  const serverPort = await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(/** @type {net.AddressInfo} */ (server.address()).port)));
+  const saved = { port: process.env.BROWSERCTL_PORT, auto: process.env.BROWSERCTL_AUTO_START };
+  process.env.BROWSERCTL_PORT = String(serverPort);
+  process.env.BROWSERCTL_AUTO_START = "manual";
+  try {
+    // a fresh module instance, which reads the port set above
+    const { callTool } = /** @type {typeof import("../../src/client.js")} */ (await import(new URL("../../src/client.js?u09", import.meta.url).href));
+    const who = { session: "u09", client: "unit" };
+    await assert.rejects(callTool("click", { target: "#x" }, who), /may have run/);
+    assert.equal(seen, 1);
+    await new Promise((r) => server.close(r));
+    await assert.rejects(callTool("click", { target: "#x" }, who), /not running/);
+    assert.equal(seen, 1);
+  } finally {
+    server.close();
+    process.env.BROWSERCTL_PORT = saved.port;
+    if (saved.auto === undefined) delete process.env.BROWSERCTL_AUTO_START;
+    else process.env.BROWSERCTL_AUTO_START = saved.auto;
   }
 });
 

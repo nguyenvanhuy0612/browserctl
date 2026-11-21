@@ -92,6 +92,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 debuggerRelay.listen();
+dom.listen();
 events.listen();
 chrome.alarms.create("bctl.reconnect", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(guarded("alarm", () => connect()));

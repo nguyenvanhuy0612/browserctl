@@ -214,12 +214,14 @@ Set how dialogs in your tab are answered: accept: true/false, promptText, scope:
 
 ## `evaluate`
 
-Run JavaScript in the page (page globals available). function: "() => document.title", or "(el) => el.value" with target: a ref. Promises are awaited. Use it whenever no other tool fits.
+Run JavaScript in the page (page globals available). function: "() => document.title", or "(el) => el.value" with target: a ref. Promises are awaited (timeout). action: true when the code changes the page: outcome after it reacts, like click. Use it whenever no other tool fits.
 
 | Parameter | Type | Required | Default | Limits | Meaning |
 | --- | --- | --- | --- | --- | --- |
 | `function` | string | yes |  |  |  |
 | `target` | string | no |  |  | A ref (e5) or a locator (#id, label=Email, role=button[name="Save"], ...). |
+| `timeout` | number | no | `30` | 1 to 300 |  |
+| `action` | boolean | no | `false` |  |  |
 | `trusted` | boolean | no | `false` |  | Real input through Chrome's debugger (shows its debugging bar). |
 | `tab` | integer | no |  | at least 0 | Tab id from tabs list. Default: your current tab. |
 

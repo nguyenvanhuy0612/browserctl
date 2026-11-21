@@ -1,6 +1,6 @@
 # Interfaces: HTTP API, MCP, CLI, extension wire protocol, call log
 
-Status: implemented (2026-11-16: heartbeat, `BROWSERCTL_SESSION_IDLE`)
+Status: verified (2026-11-21: `tab` in results, MCP text blocks, client resend rule, `watch`)
 Depends on: `architecture.md`, `sessions.md`, `errors.md`
 
 ## Tool registry
@@ -32,6 +32,10 @@ or a script's name, recorded in the call log), `X-Browserctl-Close-Tabs` (`1`: t
 the tabs it opened when it ends, `sessions.md`; read only when the call creates the session). HTTP status is 200 for every tool answer, including
 `ok: false`; transport problems use 4xx/5xx.
 
+Every successful result of a call that resolved a tab carries `tab`, the tab's id, unless the
+tool's own result has a `tab` field already (`tabs`, `navigate`), so an agent sees which tab it
+acted on (`sessions.md`: agents sharing a session).
+
 Python and other scripts use this API directly; no client library is required. Scripts that run
 at the same time each set their own `X-Browserctl-Session`: the default `http` is one session with
 one current tab.
@@ -52,14 +56,28 @@ one current tab.
 - stdio server, started by the agent's client (`npx browserctl-mcp` or equivalent).
 - Starts the daemon if `/health` does not answer, then registers the tools from `GET /v1/tools`.
 - Generates one session id at start; sends a heartbeat every 60 s and `DELETE /v1/sessions/<id>` on exit.
-- A tool result is one text block with the JSON result; `take_screenshot` adds an image block.
+- A tool result is one text block with the JSON result. The long text of `snapshot` (its
+  `snapshot` field) and of `read` (its `text` field) leaves the JSON and follows as a second text
+  block as it is, so its quotes and line breaks are not escaped (escaped YAML costs tokens and reads
+  worse). `take_screenshot` adds an image block.
 - Server instructions (what the agent reads at connect): the loop in a few lines (`navigate` →
   `snapshot` → act with refs → read `outcome`), the target forms (`targets.md`), the common
-  action parameters (`actions.md`), `get` and `read`, the two lanes and `trusted`, and `evaluate`
-  as the fallback. They are budgeted with the tool descriptions; a preflight gate measures the total
+  action parameters (`actions.md`), `get` and `read`, the two lanes and `trusted`, `evaluate`
+  as the fallback, and that agents sharing the server open their own tab and pass `tab`
+  (`sessions.md`). They are budgeted with the tool descriptions; a preflight gate measures the total
   (API-E02: under 22,500 characters; raised from 20,200 on 2026-11-14 for `get` and the common
   action parameters, whose locator list lives once in the instructions instead of in every
   `target`).
+
+## Clients
+
+The MCP server and the CLI share one HTTP client. It waits for a tool's answer without a time
+limit: the tool's own `timeout` bounds the call (measured 2026-11-21: Node's `fetch` gives up after
+300 s without response headers, which cut `run` calls that may last 600 s, and its retry ran the
+code a second time). It sends a call again only when the daemon refused the connection, so the call
+never reached it; then it starts the daemon (unless `BROWSERCTL_AUTO_START=manual`) and sends once
+more. A connection lost after the call was sent is an error saying the call may have run; it is
+never sent again, since a repeated click or `run` acts twice.
 
 ## CLI
 
@@ -84,13 +102,22 @@ Transport: the WebSocket at `/extension`, one JSON object per message.
 | extension → daemon | `{event, data}` |
 
 After registering the browser the daemon answers with `{event: "welcome", data: {alias, version}}`
-(`extension-ui.md`).
+(`extension-ui.md`), then `{event: "watch", data: {tabIds}}`, the tabs of that browser some session
+owns; it sends `watch` again after every change of ownership. The extension sends `net.request`
+only for those tabs (every tab until the first `watch`), so the user's own browsing does not
+travel to the daemon to be dropped there. A tab that joins a session (a popup) is watched from the `watch`
+that names it; requests it made before that are not reported.
 
 Hello (first event): `{protocol, extensionVersion, instanceId, browser: {name, version},
 profileLabel, browserStartedAt, userScripts}`. `browserStartedAt` is set in
 `chrome.runtime.onStartup` and kept in `chrome.storage.session`, so it changes when the browser
 restarts, not when the service worker does. A `protocol` different from the daemon's →
 `EXTENSION_OUTDATED` on every call for that browser, with the reload instructions in the hint.
+
+Protocol 2 (2026-11-21) adds what the daemon now relies on: `watch`, the runtime's `content`
+count (`settle.md`) and ref numbering across documents (`targets.md`). With an extension speaking
+protocol 1, settle would end without waiting and refs could repeat, so it gets
+`EXTENSION_OUTDATED` and the reload hint.
 
 Methods (the extension's whole surface):
 
@@ -105,7 +132,7 @@ Methods (the extension's whole surface):
 Events: `debugger.event`, `debugger.detached`, `tabs.created`, `tabs.removed`, `tabs.updated`,
 `nav.beforeNavigate`, `nav.committed`, `nav.domContentLoaded`, `nav.completed`,
 `nav.historyStateUpdated`, `nav.createdTarget` (a tab opened by a page, with its source tab even
-for `noopener` links), `nav.error`, `net.request` (from `webRequest`, every tab; the daemon keeps only owned tabs'), `diag` (internal errors that
+for `noopener` links), `nav.error`, `net.request` (from `webRequest`, the watched tabs), `diag` (internal errors that
 the extension caught).
 
 Rules: the extension never logs errors to the console (`architecture.md`); it probes `GET /health`
@@ -134,6 +161,10 @@ agents use the tools (`architecture.md` reuse policy, and the probe runs).
 | API-U04 | unit | call log line for `evaluate` | full code recorded, with session and browser alias |
 | API-U06 | unit | `extension path` twice, with a stray file in the folder before the second run | prints `$BROWSERCTL_HOME/extension`, which holds `manifest.json` and `generated/pw-injected.js`; the second run leaves no stray file |
 | API-U05 | unit | CLI: `--doubleClick` with a bad `--button`, `--session other` without a tab, `daemon status` | `INVALID_PARAMS` exit 1, `NO_TAB` exit 1, exit 0 |
+| API-U07 | unit | `get` on the current tab; `tabs list` | the `get` result carries `tab`; the `tabs` result keeps its own shape |
+| API-U08 | unit | MCP content of a `snapshot`, a `read`, a `click` result | two text blocks with the text unescaped for the first two, one JSON block for `click` |
+| API-U09 | unit | the client against a server that drops the connection after reading a call; against a closed port with `BROWSERCTL_AUTO_START=manual` | an error saying the call may have run, the server saw the call once; the daemon-not-running error |
+| API-U10 | unit | a session opens a tab, opens a second, releases the first | `watch` after each change with the owned tabs of that browser |
 | API-E01 | live | daemon stopped, extension running 60 s, daemon started | extension connects within 35 s; Errors page empty |
 | API-E02 | live | MCP server start with no daemon | daemon started, tools registered; the instructions name the locator forms (`label=`), `timeout`, `scroll`, `wait` and `get` |
 | API-E03 | live | MCP server exit | session ended, attachments detached |

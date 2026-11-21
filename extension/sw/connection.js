@@ -2,7 +2,7 @@
 // The extension's link to the daemon. The daemon is probed with a caught fetch before the
 // WebSocket is opened, so a stopped daemon never leaves an entry on the Errors page
 // (specs/interface.md, specs/architecture.md).
-import { note } from "./diag.js";
+import { guarded, note } from "./diag.js";
 import { PROTOCOL } from "./protocol.js";
 
 const DEFAULT_PORT = 8765;
@@ -24,6 +24,13 @@ let queueLoaded = false;
 let handlers = {};
 /** @type {() => Promise<object>} */
 let helloFactory = async () => ({});
+/** Handlers of the daemon's one-way events other than `welcome`. @type {Record<string, (data: any) => void>} */
+const daemonEvents = {};
+
+/** @param {string} event @param {(data: any) => void} handler */
+export function onDaemonEvent(event, handler) {
+  daemonEvents[event] = guarded(`daemon.${event}`, handler);
+}
 /** @type {{phase: "connecting" | "connected" | "down", port: number, alias: string | null, daemonVersion: string | null, since: number}} */
 const state = { phase: "connecting", port: DEFAULT_PORT, alias: null, daemonVersion: null, since: Date.now() };
 
@@ -181,7 +188,7 @@ export async function connect() {
         state.alias = data.data?.alias ?? null;
         state.daemonVersion = data.data?.version ?? null;
         setPhase("connected");
-      }
+      } else if (typeof data?.event === "string") daemonEvents[data.event]?.(data.data);
     };
     ws.onclose = () => {
       if (socket === ws) socket = null;

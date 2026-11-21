@@ -1,6 +1,6 @@
 # `read`
 
-Status: verified
+Status: verified (2026-11-21: shadow roots, documents without a body, PDF notice)
 Depends on: `dom-lane.md`, `targets.md`, `errors.md`
 
 ## Purpose
@@ -26,8 +26,13 @@ both.
 
 1. Resolve the tab; take a DOM-lane snapshot silently if this document has none, so controls in
    the text carry refs (`targets.md`).
-2. Walk the rendered DOM of `target`, the main content, or the body, skipping what is not visible
-   (Playwright `isElementVisible`), in every frame (frames are written where their iframe is):
+2. Walk the rendered DOM of `target`, the main content, or the body (the document element when
+   there is no body: SVG and XML documents), skipping what is not visible (Playwright
+   `isElementVisible`), in every frame (frames are written where their iframe is) and through
+   shadow roots, open or closed, in the order they render (a host's shadow tree, a slot's assigned
+   nodes; measured 2026-11-21: a web component's text was missing from `read` while `snapshot` had
+   it, and an SVG document failed with `INTERNAL_ERROR`). A PDF in Chrome's viewer reads as the
+   notice line of `tools/snapshot.md`:
    - headings as `#`..`######`, paragraphs separated by blank lines, list items as `- ` / `1. `;
    - tables as Markdown tables, every row (no folding);
    - links as `[text](url)`; images as `![alt]`; buttons and form fields as
@@ -73,4 +78,13 @@ slices: pass nextOffset as offset to continue.
 | READ-E05 | live | a button ref from the text | `click` on it works |
 | READ-E06 | live | form with filled fields | values shown |
 | READ-E07 | live | background tab | works, no debugger |
+| READ-E08 | live | text in an open shadow root, in a closed one, and in a slotted light child | each at its place |
+| READ-E09 | live | an SVG document | its text |
 | READ-S01 | site | GitHub repository page, `main: true` | README text, no header links |
+
+## Edge cases left out
+
+| Case | Why |
+| --- | --- |
+| Options of a closed `select` other than the chosen one | `read` gives what the page shows, the value; `snapshot` lists every option |
+| Canvas and PDF text | pixels and another extension's page; `snapshot` names them and points to `take_screenshot` |

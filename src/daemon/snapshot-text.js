@@ -578,12 +578,17 @@ export function annotate(text, { facts = {}, refless = [] } = {}) {
   return render(roots);
 }
 
+/** The whole snapshot and `read` text of a PDF tab: Chrome's viewer keeps its text out of the page. */
+export const PDF_NOTICE = "- (PDF in Chrome's viewer; its text is not in the page; take_screenshot shows it, evaluate with fetch(location.href) gets the file)";
+
 /**
- * First lines that tell the agent the page is not ready or is covered by a modal.
+ * First lines that tell the agent the page is not ready, is covered by a modal, or draws content
+ * on canvases (specs/tools/snapshot.md).
  * @param {{ready: boolean, readyState: string, quiet: boolean | null, pendingRequests: number}} readiness
  * @param {{ref: string | null, role: string, name: string} | null} modal
+ * @param {{count: number, largest: string} | null} [canvas]
  */
-export function noticeLines(readiness, modal) {
+export function noticeLines(readiness, modal, canvas = null) {
   const lines = [];
   if (!readiness.ready) {
     const why = [];
@@ -597,20 +602,27 @@ export function noticeLines(readiness, modal) {
     const at = modal.ref ? `, starting at [ref=${modal.ref}]` : "";
     lines.push(`- (a modal ${modal.role}${name} covers the page${at}; act inside it or close it first)`);
   }
+  if (canvas) {
+    const areas = canvas.count === 1 ? "1 canvas area" : `${canvas.count} canvas areas`;
+    lines.push(`- (${areas} drawn on the page, largest ${canvas.largest} px; their content is pixels, not text; take_screenshot shows it)`);
+  }
   return lines;
 }
 
 /**
- * Puts each frame's snapshot under the line of its iframe element.
+ * Puts each frame's snapshot under the line of its iframe element; an iframe whose frame was not
+ * read gets `[not read]` (specs/tools/snapshot.md).
  * @param {string} text
  * @param {Map<string, string>} frames iframe ref -> that frame's snapshot text
+ * @param {Set<string>} [unread] iframe refs whose frame could not be read
  */
-export function nestFrames(text, frames) {
+export function nestFrames(text, frames, unread = new Set()) {
   /** @param {Node[]} nodes */
   const visit = (nodes) => {
     for (const node of nodes) {
       const ref = refOf(node.line);
       const inner = ref ? frames.get(ref) : undefined;
+      if (ref && unread.has(ref)) node.line = withFacts(node.line, ["[not read]"]);
       if (inner !== undefined) {
         if (!node.line.endsWith(":")) node.line += ":";
         node.children.push(...parse(inner));

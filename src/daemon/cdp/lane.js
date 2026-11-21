@@ -26,9 +26,23 @@ const TAB_BODY_LIMIT = 100 * 1024 * 1024;
  *   browser: Promise<import("playwright-core").Browser>,
  *   pages: Map<number, import("playwright-core").Page>,
  *   claiming: Promise<unknown>,
- *   captures: Map<number, {bodies: {url: string, method: string, at: number, body: string, base64: boolean, size: number}[], bytes: number}>,
+ *   captures: Map<number, Capture>,
  * }} BrowserState
+ * @typedef {{
+ *   bodies: {url: string, method: string, at: number, body: string, base64: boolean, size: number}[],
+ *   bytes: number,
+ *   inflight: Map<string, {url: string, method: string, at: number}>,
+ * }} Capture
+ * @typedef {{
+ *   child: import("node:child_process").ChildProcess,
+ *   ref: TabRef,
+ *   relay: Promise<CdpRelay>,
+ *   connected: (relay: CdpRelay) => void,
+ * }} Worker
  */
+
+// Bodies not kept: binary files an agent reads through the page (specs/tools/network_requests.md).
+const SKIPPED_BODIES = new Set(["Image", "Media", "Font"]);
 
 /** Playwright's errors as public codes (specs/tools/click.md). @param {unknown} error */
 export function mapPlaywrightError(error) {
@@ -66,7 +80,7 @@ export class CdpLane {
   #idleMs;
   /** @type {Map<string, BrowserState>} */
   #states = new Map();
-  /** @type {Map<string, {child: import("node:child_process").ChildProcess, ref: TabRef}>} */
+  /** @type {Map<string, Worker>} one `run` worker per session */
   #workers = new Map();
   #nextCall = 1;
 
@@ -82,10 +96,18 @@ export class CdpLane {
     const link = this.#daemon.linkOf(ref);
     let state = this.#states.get(ref.instanceId);
     if (state && state.link === link) return state;
-    // the extension reconnected (service worker restart): the old connection's state is gone
-    if (state) this.#closeState(state);
+    // the extension reconnected (service worker restart): the old connection's state is gone, and
+    // so are the run workers, whose connections were relayed over it (specs/tools/run.md)
+    if (state) {
+      this.#closeState(state);
+      for (const worker of this.#workers.values()) if (worker.ref.instanceId === ref.instanceId) this.#stopWorker(worker);
+    }
     const attachments = new Attachments(browser, { idleMs: this.#idleMs });
-    const relay = new CdpRelay(attachments, { onCreateTarget: async () => this.#newTabFor(ref) });
+    const relay = new CdpRelay(attachments, {
+      onCreateTarget: async () => {
+        throw new Error("the daemon's own connection opens no tabs");
+      },
+    });
     state = {
       link,
       attachments,
@@ -100,14 +122,14 @@ export class CdpLane {
     return state;
   }
 
-  /** A tab opened by Playwright code joins the session of the tab it came from. @param {TabRef} from */
-  async #newTabFor(from) {
-    const owner = this.#daemon.sessions.ownerOf(from.instanceId, from.tabId);
-    const created = await this.#daemon.linkOf(from).request("tabs.create", { url: "about:blank" });
-    const session = owner ? this.#daemon.sessions.sessions.get(owner.sessionId) : undefined;
-    if (session) {
-      this.#daemon.sessions.own(session, from.instanceId, created.tabId, "owned");
-    }
+  /**
+   * A tab that `run` code opens (`context.newPage()`) joins the code's session.
+   * @param {TabRef} ref a tab of that browser @param {string} sessionId
+   */
+  async #newTabFor(ref, sessionId) {
+    const created = await this.#daemon.linkOf(ref).request("tabs.create", { url: "about:blank" });
+    const session = this.#daemon.sessions.sessions.get(sessionId);
+    if (session) this.#daemon.sessions.own(session, ref.instanceId, created.tabId, "owned");
     return created.tabId;
   }
 
@@ -346,8 +368,11 @@ export class CdpLane {
     return { base64: buffer.toString("base64"), ...imageSize(buffer) };
   }
 
-  /** @param {TabRef} ref @param {string} fn @param {string | undefined} target */
-  async evaluate(ref, fn, target) {
+  /**
+   * @param {TabRef} ref @param {string} fn @param {string | undefined} target
+   * @param {number} timeoutMs how long the code may run; Playwright's evaluate has no limit of its own
+   */
+  async evaluate(ref, fn, target, timeoutMs) {
     try {
       // The agent's code, a function or an expression, is compiled at the top level of the source,
       // so it sees the page's globals and none of this wrapper's names (specs/tools/evaluate.md).
@@ -355,7 +380,13 @@ export class CdpLane {
       // Playwright runs a string as an expression and a Function as a function of the element.
       /** @type {any} */
       const onElement = new Function("__bctlElement", `return ${call}(__bctlElement);`);
-      const value = target ? (await this.#withTarget(ref, target, (l) => l.evaluate(onElement))).result : await (await this.page(ref)).evaluate(`${call}(undefined)`);
+      const work = target ? this.#withTarget(ref, target, (l) => l.evaluate(onElement)).then((r) => r.result) : this.page(ref).then((page) => page.evaluate(`${call}(undefined)`));
+      /** @type {NodeJS.Timeout | undefined} */
+      let timer;
+      const late = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new BctlError("TIMEOUT", `evaluate did not finish in ${timeoutMs / 1000} s`)), timeoutMs);
+      });
+      const value = await Promise.race([work, late]).finally(() => clearTimeout(timer));
       return { value: value === undefined ? null : value, type: value === null ? "null" : typeof value };
     } catch (error) {
       const e = mapPlaywrightError(error);
@@ -373,7 +404,7 @@ export class CdpLane {
       await this.page(ref);
       state.attachments.pin(ref.tabId, "network");
       await state.attachments.send(ref.tabId, undefined, "Network.enable", {});
-      if (!state.captures.has(ref.tabId)) state.captures.set(ref.tabId, { bodies: [], bytes: 0 });
+      if (!state.captures.has(ref.tabId)) state.captures.set(ref.tabId, { bodies: [], bytes: 0, inflight: new Map() });
     } else {
       state.captures.delete(ref.tabId);
       state.attachments.unpin(ref.tabId, "network");
@@ -385,34 +416,42 @@ export class CdpLane {
     return this.#states.get(ref.instanceId)?.captures.has(ref.tabId) ?? false;
   }
 
-  /** @type {Map<string, {url: string, method: string, at: number}>} */
-  #inflight = new Map();
-
-  /** @param {BrowserState} state @param {{tabId: number, sessionId?: string, method: string, params: any}} e */
+  /**
+   * Keeps the body of each finished request of a capturing tab, except binary files; a failed
+   * request is forgotten (specs/tools/network_requests.md).
+   * @param {BrowserState} state @param {{tabId: number, sessionId?: string, method: string, params: any}} e
+   */
   #onNetworkEvent(state, e) {
     const capture = state.captures.get(e.tabId);
     if (!capture || e.sessionId) return;
-    if (e.method === "Network.responseReceived") {
-      this.#inflight.set(`${e.tabId}:${e.params.requestId}`, { url: e.params.response.url, method: "", at: Date.now() });
-    }
-    if (e.method === "Network.requestWillBeSent") {
-      this.#inflight.set(`${e.tabId}:${e.params.requestId}`, { url: e.params.request.url, method: e.params.request.method, at: Date.now() });
-    }
-    if (e.method === "Network.loadingFinished") {
-      const key = `${e.tabId}:${e.params.requestId}`;
-      const meta = this.#inflight.get(key);
-      this.#inflight.delete(key);
-      if (!meta) return;
-      state.attachments
-        .send(e.tabId, undefined, "Network.getResponseBody", { requestId: e.params.requestId })
-        .then((/** @type {any} */ r) => {
-          const size = r.body.length;
-          if (size > BODY_LIMIT) return;
-          capture.bodies.push({ url: meta.url, method: meta.method, at: meta.at, body: r.body, base64: r.base64Encoded, size });
-          capture.bytes += size;
-          while (capture.bytes > TAB_BODY_LIMIT && capture.bodies.length) capture.bytes -= /** @type {any} */ (capture.bodies.shift()).size;
-        })
-        .catch(() => {});
+    const { requestId } = e.params;
+    switch (e.method) {
+      case "Network.requestWillBeSent":
+        capture.inflight.set(requestId, { url: e.params.request.url, method: e.params.request.method, at: Date.now() });
+        return;
+      case "Network.responseReceived":
+        if (SKIPPED_BODIES.has(e.params.type)) capture.inflight.delete(requestId);
+        // a request sent before capture started: known from its response, method unknown
+        else if (!capture.inflight.has(requestId)) capture.inflight.set(requestId, { url: e.params.response.url, method: "", at: Date.now() });
+        return;
+      case "Network.loadingFailed":
+        capture.inflight.delete(requestId);
+        return;
+      case "Network.loadingFinished": {
+        const meta = capture.inflight.get(requestId);
+        capture.inflight.delete(requestId);
+        if (!meta) return;
+        state.attachments
+          .send(e.tabId, undefined, "Network.getResponseBody", { requestId })
+          .then((/** @type {any} */ r) => {
+            const size = r.body.length;
+            if (size > BODY_LIMIT) return;
+            capture.bodies.push({ url: meta.url, method: meta.method, at: meta.at, body: r.body, base64: r.base64Encoded, size });
+            capture.bytes += size;
+            while (capture.bytes > TAB_BODY_LIMIT && capture.bodies.length) capture.bytes -= /** @type {any} */ (capture.bodies.shift()).size;
+          })
+          .catch(() => {});
+      }
     }
   }
 
@@ -431,15 +470,65 @@ export class CdpLane {
   // ---------- run ----------
 
   /**
-   * A relay for a worker process's own Playwright connection (specs/tools/run.md).
-   * @param {string} instanceId @param {number} tabId @param {import("ws").WebSocket} ws
+   * A session's worker connecting its Playwright to its own relay over the tab attachments
+   * (specs/tools/run.md). A tab that a page in one of its tabs opens joins it as that page's popup.
+   * @param {string} sessionId @param {import("ws").WebSocket} ws
    */
-  serveWorker(instanceId, tabId, ws) {
-    const ref = { instanceId, tabId };
-    const state = this.#state(ref);
-    const relay = new CdpRelay(state.attachments, { onCreateTarget: async () => this.#newTabFor(ref) });
+  serveWorker(sessionId, ws) {
+    const worker = this.#workers.get(sessionId);
+    if (!worker) {
+      ws.close();
+      return;
+    }
+    const state = this.#state(worker.ref);
+    /** @type {(() => void)[]} */
+    const stops = [];
+    const relay = new CdpRelay(state.attachments, {
+      onCreateTarget: () => this.#newTabFor(worker.ref, sessionId),
+      onClaim: (tabId) => {
+        const popups = (/** @type {import("../app.js").TabEvent} */ e) => {
+          if (e.name === "newTab") relay.claim(e.data.tab, tabId).catch(() => {});
+        };
+        stops.push(this.#daemon.onTabEvent({ instanceId: worker.ref.instanceId, tabId }, popups));
+      },
+    });
     relay.serve(ws);
-    relay.claim(tabId).catch(() => ws.close());
+    ws.on("close", () => {
+      for (const stop of stops) stop();
+    });
+    worker.connected(relay);
+  }
+
+  /**
+   * The session's worker for a tab of this browser, started if there is none or it cannot serve
+   * the tab (another browser, or it died).
+   * @param {string} sessionId @param {TabRef} ref
+   */
+  #worker(sessionId, ref) {
+    const existing = this.#workers.get(sessionId);
+    if (existing && existing.ref.instanceId === ref.instanceId && existing.child.exitCode === null && existing.child.signalCode === null) return existing;
+    if (existing) this.#stopWorker(existing);
+    const endpoint = `ws://127.0.0.1:${this.#daemon.port}/cdp?session=${encodeURIComponent(sessionId)}`;
+    /** @type {(relay: CdpRelay) => void} */
+    let connected = () => {};
+    /** @type {Promise<CdpRelay>} */
+    const relay = new Promise((resolve) => {
+      connected = resolve;
+    });
+    const child = fork(WORKER, [], { env: { ...process.env, BROWSERCTL_CDP_ENDPOINT: endpoint }, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    /** @type {Worker} */
+    const worker = { child, ref, relay, connected };
+    this.#workers.set(sessionId, worker);
+    worker.child.on("exit", () => {
+      if (this.#workers.get(sessionId) === worker) this.#workers.delete(sessionId);
+    });
+    return worker;
+  }
+
+  /** @param {Worker} worker */
+  #stopWorker(worker) {
+    for (const [id, w] of this.#workers) if (w === worker) this.#workers.delete(id);
+    worker.child.kill("SIGKILL");
   }
 
   /**
@@ -450,45 +539,34 @@ export class CdpLane {
     const state = this.#state(ref);
     await this.page(ref);
     state.attachments.pin(ref.tabId, "run");
-    const key = `${session.id}`;
-    let worker = this.#workers.get(key);
-    const dead = (/** @type {import("node:child_process").ChildProcess} */ c) => c.killed || c.exitCode !== null || c.signalCode !== null;
-    if (worker && (worker.ref.tabId !== ref.tabId || worker.ref.instanceId !== ref.instanceId || dead(worker.child))) {
-      worker.child.kill();
-      worker = undefined;
-    }
-    if (!worker) {
-      const endpoint = `ws://127.0.0.1:${this.#daemon.port}/cdp?browser=${encodeURIComponent(ref.instanceId)}&tab=${ref.tabId}`;
-      const child = fork(WORKER, [], { env: { ...process.env, BROWSERCTL_CDP_ENDPOINT: endpoint }, stdio: ["ignore", "ignore", "ignore", "ipc"] });
-      worker = { child, ref };
-      this.#workers.set(key, worker);
-      child.on("exit", () => {
-        if (this.#workers.get(key)?.child === child) this.#workers.delete(key);
-      });
-    }
+    const worker = this.#worker(session.id, ref);
     const id = this.#nextCall++;
-    const child = worker.child;
     try {
       return await new Promise((resolve, reject) => {
+        /** @param {(() => void)} settle */
+        const end = (settle) => {
+          clearTimeout(timer);
+          worker.child.off("message", onMessage);
+          worker.child.off("exit", onExit);
+          settle();
+        };
         const timer = setTimeout(() => {
-          if (this.#workers.get(key)?.child === child) this.#workers.delete(key);
-          child.kill("SIGKILL");
-          reject(new BctlError("TIMEOUT", `run took more than ${timeoutSeconds} s; the worker was stopped and state was lost`));
+          this.#stopWorker(worker);
+          end(() => reject(new BctlError("TIMEOUT", `run took more than ${timeoutSeconds} s; the worker was stopped and state was lost`)));
         }, timeoutSeconds * 1000);
         /** @param {any} message */
         const onMessage = (message) => {
           if (message?.id !== id) return;
-          clearTimeout(timer);
-          child.off("message", onMessage);
-          if (message.ok) resolve({ value: message.value, console: message.console });
-          else reject(new BctlError("EVAL_ERROR", message.error));
+          end(() => (message.ok ? resolve({ value: message.value, console: message.console }) : reject(new BctlError("EVAL_ERROR", message.error))));
         };
-        child.on("message", onMessage);
-        child.once("exit", () => {
-          clearTimeout(timer);
-          reject(new BctlError("TIMEOUT", "the run worker stopped; state was lost"));
-        });
-        child.send({ id, code });
+        const onExit = () => end(() => reject(new BctlError("TIMEOUT", "the run worker stopped; state was lost")));
+        worker.child.on("message", onMessage);
+        worker.child.once("exit", onExit);
+        // the call's tab joins the worker's connection; the worker picks its page by target id
+        worker.relay
+          .then((relay) => relay.claim(ref.tabId))
+          .then(() => worker.child.send({ id, code, targetId: state.attachments.info(ref.tabId)?.targetId }))
+          .catch((error) => end(() => reject(toBctlError(error))));
       });
     } finally {
       state.attachments.unpin(ref.tabId, "run");
@@ -513,13 +591,12 @@ export class CdpLane {
 
   /** @param {string} sessionId */
   endSession(sessionId) {
-    this.#workers.get(sessionId)?.child.kill();
-    this.#workers.delete(sessionId);
+    const worker = this.#workers.get(sessionId);
+    if (worker) this.#stopWorker(worker);
   }
 
   close() {
-    for (const w of this.#workers.values()) w.child.kill();
-    this.#workers.clear();
+    for (const worker of [...this.#workers.values()]) this.#stopWorker(worker);
     for (const state of this.#states.values()) this.#closeState(state);
     this.#states.clear();
   }

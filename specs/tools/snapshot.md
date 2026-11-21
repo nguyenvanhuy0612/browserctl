@@ -1,6 +1,6 @@
 # `snapshot`
 
-Status: verified (revision 2, 2026-11-14: readiness, facts on lines, modal layer, prose folding,
+Status: verified (2026-11-21: closed shadow roots, notices for PDF and canvas, frames 10 deep; revision 2, 2026-11-14: readiness, facts on lines, modal layer, prose folding,
 YAML-safe markers, SNAP-U05 to U16 and SNAP-E06 to E10; see the review log in `specs/README.md`)
 Depends on: `dom-lane.md`, `targets.md`, `settle.md`, `sessions.md`, `errors.md`
 
@@ -42,9 +42,20 @@ long prose, but every fold says how much it hides and how to see it, and no ref 
    `quiet: false` and the last `readyState` actually measured. A page still not ready gets a first line
    `- (page not ready; … snapshot again or wait_for)` naming what is still going on. (Measured:
    YouTube and Facebook right after `navigate` gave an almost empty tree with no warning.)
-3. Playwright aria snapshot, `mode: "ai"`, of `target` or the body, in each frame; nest frames under
-   their iframe nodes (`targets.md`). Its refs join the document's ref map (`targets.md`); refs
-   from earlier snapshots of the same document stay valid.
+3. Playwright aria snapshot, `mode: "ai"`, of `target` or the body (the document element when
+   there is no body: SVG and XML documents), in each frame; nest frames under their iframe nodes
+   (`targets.md`), up to 10 levels deep (measured 2026-11-21: a frame 6 levels down was an empty
+   iframe line under the old limit of 4). An iframe whose document was not read (deeper than that,
+   or a frame the extension cannot script) gets `[not read]` after its ref, so an empty frame and
+   an unread one look different. Shadow roots are walked open or closed (`dom-lane.md`). Its refs
+   join the document's ref map (`targets.md`); refs from earlier snapshots of the same document
+   stay valid.
+   Content that is not in the DOM gets a notice line instead of silence (measured 2026-11-21: a
+   PDF tab gave an empty snapshot, a page drawn on a canvas gave no line for it):
+   - a PDF shown by Chrome's viewer (`document.contentType` is `application/pdf`):
+     `- (PDF in Chrome's viewer; its text is not in the page; take_screenshot shows it, evaluate with fetch(location.href) gets the file)`;
+   - visible canvases of at least 100 by 50 CSS pixels in the main frame (icons and sparklines are
+     smaller): `- (2 canvas areas drawn on the page, largest 1200x800 px; their content is pixels, not text; take_screenshot shows it)`.
 4. **Facts.** The runtime adds what the aria tree does not say, as extra brackets after the ref of
    the line they describe (`[ref=e5] [empty]`), in every mode:
 
@@ -201,11 +212,14 @@ says the page is not ready, snapshot again. Works in background tabs without the
 | SNAP-U19 | unit | label echoes next to a searchbox, a spinbutton and a slider; a run of long `note` and `time` nodes | echoes dropped; the run folds as prose |
 | SNAP-U18 | unit | readiness with a page that stops answering after the first measurement | `ready: false`, `quiet: false`, the measured `readyState` (not a guessed one) |
 | SNAP-U17 | unit | 30 sections, each a heading, a 3 KB link-heavy paragraph and a 2 KB table, `maxChars` 20000 | all 30 headings kept; paragraphs and tables collapsed with their refs and `snapshot target=`; no hard cut; valid YAML |
-| SNAP-U16 | unit | readiness and modal top lines | text and YAML validity |
+| SNAP-U16 | unit | readiness, modal, canvas and PDF notice lines | text and YAML validity |
 | SNAP-E07 | live | form fixture: empty and filled inputs, email field, unnamed select with a label before it, custom slider, native `<progress>`, two "Reply" buttons in two posts | `[empty]` only on the empty ones, `[type=email]`, `[near=…]`, `[value=…]`, two different `[ctx=…]`; every annotated ref clicks or fills |
 | SNAP-E08 | live | overlay fixture: fixed full-screen modal with a button; fixed full-height app shell holding the whole page; an `aria-modal` backdrop without a role around `role=dialog` named "Welcome" | modal line and `[modal]` on the first, nothing on the second, `modal dialog "Welcome"` on the third; the modal's button ref clicks |
 | SNAP-E11 | live | two `Edit` buttons outside any item, each after its own `h2`, with headings in open shadow roots before, between and after them | `[ctx="Section A"]`, `[ctx="Section B"]` |
 | SNAP-E12 | live | a page heading, then a web component whose shadow root holds `h2 "Shadow A"`, `Edit`, `h2 "Shadow B"`, `Edit` | `[ctx="Shadow A"]`, `[ctx="Shadow B"]` |
+| SNAP-E13 | live | a closed shadow root holding a paragraph and a button, next to an input, a select and a `<details>` | the paragraph is listed, the button's ref clicks in the DOM lane; the input, select and details lines are as without the change (no user-agent shadow content) |
+| SNAP-E14 | live | a PDF tab | the PDF notice line only; `read` gives the same notice |
+| SNAP-E15 | live | a 300 by 150 canvas and a 16 by 16 one; iframes nested 6 and 12 levels deep | one canvas notice naming 300x150; the text 6 levels down is listed, also by `read`; the iframe at level 11 carries `[not read]` |
 | SNAP-E09 | live | page that adds its content 1 s after load | snapshot right after `navigate` has the content, `ready: true`, `waitedMs` about 1000 |
 | SNAP-E10 | live | link inside a closed menu | listed with `[hidden]` and no ref; after opening the menu it has a ref and clicks |
 
@@ -217,5 +231,7 @@ project's own (`targets.md`) and have their own tests.
 
 | Case | Why |
 | --- | --- |
-| Canvas content | not in the accessibility tree; `take_screenshot` |
-| Closed shadow roots | unreachable |
+| Canvas content | pixels, not in the accessibility tree; the notice line points to `take_screenshot` |
+| PDF text | Chrome's viewer is another extension's page, which no extension may script; the notice line points to `take_screenshot` and the file |
+| Canvases inside frames | the notice covers the main frame; frames are rarely drawn surfaces |
+| A closed shadow root's elements as targets in the CDP lane or for `evaluate` | Playwright's CDP side and the page's MAIN world see open roots only; the DOM lane reaches them (`dom-lane.md`) |

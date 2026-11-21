@@ -1,6 +1,6 @@
 # `network_requests`
 
-Status: verified
+Status: verified (2026-11-21: no bodies for images, media and fonts; failed requests forgotten)
 Depends on: `sessions.md`, `relay.md`, `errors.md`
 
 ## Purpose
@@ -27,7 +27,10 @@ See the requests the tab made (to find the API behind a page) and read response 
    daemon keeps the last 1000 per tab.
 2. Response bodies need the CDP lane: `captureBodies: true` attaches the tab, enables `Network`,
    and pins the attachment until `captureBodies: false` or the session ends. Bodies are kept for
-   requests made while capture is on (at most 10 MB per body, 100 MB per tab).
+   requests made while capture is on (at most 10 MB per body, 100 MB per tab), except images,
+   media and fonts: they are binary, an agent reads them through the page, and fetching each one
+   would move megabytes over the extension's socket for nothing. A request that fails is forgotten
+   at once; turning capture off forgets the tab's requests in flight.
 3. `id` with `body: true` for a request without a captured body → `BODY_UNAVAILABLE`, hint:
    turn on `captureBodies` and repeat the action.
 4. Requests to replay with cookies: `evaluate` with `fetch` in the page (the page's cookies and
@@ -63,7 +66,7 @@ To call an API with the page's cookies, use evaluate with fetch.
 | NET-E02 | live | `filter`, `types`, `since` | correct subset |
 | NET-E03 | live | body without capture | `BODY_UNAVAILABLE` |
 | NET-S01 | site | Facebook after load, `limit: 5` | requests listed |
-| NET-E04 | live | capture on, fetch JSON, read body | body equals the response; bar shown; capture off detaches after idle |
+| NET-E04 | live | capture on, fetch JSON and load an image, read both bodies | the JSON body equals the response; the image is `BODY_UNAVAILABLE`; bar shown; capture off detaches after idle |
 | NET-E05 | live | playwright-mcp `network.spec.ts`: a click's fetch (200) and a missing image (404), a substring `filter`, an invalid `/regex/` filter, ids that stay with their request, details of one request with its headers, a failed request | listed with status; filtered; `INVALID_PARAMS`; the same id finds the same request; `requestHeaders` and `status`; the failure with its error, listed once |
 
 Not adopted from `network.spec.ts`: the `static` option (`types` selects instead), the list's text

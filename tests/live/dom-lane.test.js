@@ -172,6 +172,17 @@ describe("settle", () => {
     assert.ok(took >= 2900 && took < 4500, `took ${took} ms`);
   });
 
+  test("SET-E08 an attribute changing forever does not hold the action", async () => {
+    const s = h.newSession();
+    await freshPage(h, s, "reactions.html");
+    const started = Date.now();
+    const r = await h.ok("click", { target: "#churn" }, s);
+    const took = Date.now() - started;
+    assert.equal(r.outcome.settled, true);
+    assert.equal(r.outcome.domChanged, true);
+    assert.ok(took < 1500, `took ${took} ms`);
+  });
+
   test("SET-E04 a link to a page the server delays 2 s waits for it", async () => {
     const s = h.newSession();
     await freshPage(h, s, "reactions.html");
@@ -191,16 +202,16 @@ describe("settle", () => {
     assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms`);
   });
 
-  test("SET-E07 a reaction 700 ms later needs wait on the action", async () => {
+  test("SET-E07 a reaction 2.5 s later needs wait on the action", async () => {
     const s = h.newSession();
     await freshPage(h, s, "reactions.html");
-    await h.ok("click", { target: "#t700" }, s);
+    await h.ok("click", { target: "#t2500" }, s);
     assert.deepEqual(await done(s), []);
     await freshPage(h, s, "reactions.html");
-    const r = await h.ok("click", { target: "#t700", wait: { text: "done t700" } }, s);
+    const r = await h.ok("click", { target: "#t2500", wait: { text: "done t2500" } }, s);
     assert.equal(r.waited.ok, true);
     assert.ok(r.waited.waitedMs > 0, "the wait did the waiting");
-    assert.deepEqual(await done(s), ["done t700"]);
+    assert.deepEqual(await done(s), ["done t2500"]);
   });
 });
 
@@ -220,6 +231,69 @@ describe("blocked pages", () => {
 });
 
 describe("snapshot and read", () => {
+  const closedElement = `customElements.define("x-closed", class extends HTMLElement {
+  constructor() {
+    super();
+    const root = this.attachShadow({ mode: "closed" });
+    root.innerHTML = "<p>Closed text</p><button>Closed button</button>";
+    root.querySelector("button").onclick = () => (window.__log ??= []).push("closed clicked");
+  }
+});`;
+  const pdfNotice = "- (PDF in Chrome's viewer; its text is not in the page; take_screenshot shows it, evaluate with fetch(location.href) gets the file)";
+
+  test("SNAP-E13 a closed shadow root is listed and acted on; built-in controls are unchanged", async () => {
+    const s = h.newSession();
+    const url = h.content(`<input value="v"><select><option>One</option></select><details><summary>More</summary><p>Inside</p></details><x-closed></x-closed><script>${closedElement}</script>`);
+    await h.ok("navigate", { url }, s);
+    const text = /** @type {string} */ ((await h.ok("snapshot", {}, s)).snapshot);
+    assert.match(text, /Closed text/);
+    await h.ok("click", { target: refIn(text, 'button "Closed button"') }, s);
+    assert.deepEqual(await pageLog(h, s), ["closed clicked"]);
+    const lines = text.split("\n");
+    const indent = (/** @type {string} */ l) => l.length - l.trimStart().length;
+    const at = lines.findIndex((l) => l.includes("- textbox"));
+    assert.ok(indent(lines[at + 1] ?? "") <= indent(lines[at]), `textbox has no children:\n${text}`);
+    assert.equal(lines.filter((l) => l.includes("- option")).length, 1, text);
+  });
+
+  test("SNAP-E14 a PDF tab gives the PDF notice in snapshot and read", async () => {
+    const s = h.newSession();
+    await h.ok("navigate", { url: `${h.base}/doc.pdf` }, s);
+    assert.equal((await h.ok("snapshot", {}, s)).snapshot, pdfNotice);
+    assert.equal((await h.ok("read", {}, s)).text, pdfNotice);
+  });
+
+  test("SNAP-E15 a canvas notice for drawn areas; frames 6 deep are read, deeper than 10 marked not read", async () => {
+    const s = h.newSession();
+    const nest = (/** @type {number} */ n, /** @type {string} */ inner) => {
+      let html = inner;
+      for (let i = 0; i < n; i++) html = `<iframe srcdoc="${html.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}"></iframe>`;
+      return html;
+    };
+    const url = h.content(`<canvas width="300" height="150"></canvas><canvas width="16" height="16"></canvas>${nest(6, "<p>Six levels down</p>")}${nest(12, "<p>Twelve levels down</p>")}`);
+    await h.ok("navigate", { url }, s);
+    const text = /** @type {string} */ ((await h.ok("snapshot", {}, s)).snapshot);
+    const notices = text.split("\n").filter((l) => l.includes("canvas"));
+    assert.deepEqual(notices, ["- (1 canvas area drawn on the page, largest 300x150 px; their content is pixels, not text; take_screenshot shows it)"]);
+    assert.match(text, /Six levels down/);
+    assert.doesNotMatch(text, /Twelve levels down/);
+    assert.match((await h.ok("read", {}, s)).text, /Six levels down/);
+    assert.equal(text.split("\n").filter((l) => l.includes("[not read]")).length, 1, text);
+  });
+
+  test("READ-E08 / READ-E09 read walks open and closed shadow roots and slots; an SVG document reads", async () => {
+    const s = h.newSession();
+    const url = h.content(`<x-open><span>Slotted child</span></x-open><x-closed></x-closed><script>
+customElements.define("x-open", class extends HTMLElement { constructor() { super(); this.attachShadow({ mode: "open" }).innerHTML = "<p>Open text</p><slot></slot>"; } });
+${closedElement}</script>`);
+    await h.ok("navigate", { url }, s);
+    const text = (await h.ok("read", {}, s)).text;
+    for (const part of ["Open text", "Slotted child", "Closed text"]) assert.ok(text.includes(part), `${part} in:\n${text}`);
+    assert.ok(text.indexOf("Open text") < text.indexOf("Slotted child"), "the shadow tree renders before its slot's child");
+    await h.ok("navigate", { url: `${h.base}/image.svg` }, s);
+    assert.match((await h.ok("read", {}, s)).text, /SVG document text/);
+  });
+
   test("SNAP-E01 / SNAP-E04 cursor:pointer div has a ref; background tab, no debugger", async () => {
     const s = h.newSession();
     await freshPage(h, s);
@@ -340,6 +414,20 @@ describe("snapshot and read", () => {
     const inside = refIn(snap, 'button "Inside button"');
     await h.ok("navigate", { url: `${h.base}/other.html` }, s);
     assert.equal((await h.call("click", { target: inside }, s)).error.code, "REF_NOT_FOUND");
+  });
+
+  test("TGT-E09 a ref of an earlier document never names an element of a later one", async () => {
+    const s = h.newSession();
+    await freshPage(h, s);
+    const first = (await h.ok("snapshot", {}, s)).snapshot;
+    const heading = refIn(first, 'heading "Fixture page"');
+    await h.ok("navigate", { url: `${h.base}/other.html` }, s);
+    await h.ok("read", {}, s);
+    assert.equal((await h.call("get", { target: heading, timeout: 0 }, s)).error?.code, "REF_NOT_FOUND");
+    const second = (await h.ok("snapshot", {}, s)).snapshot;
+    const refs = (/** @type {string} */ text) => new Set([...text.matchAll(/\[ref=(e\d+)\]/g)].map((m) => m[1]));
+    const reused = [...refs(second)].filter((r) => refs(first).has(r));
+    assert.deepEqual(reused, [], "the second document's refs are new");
   });
 
   test("TYPE-E04 / FORM-E04 / FORM-E05 masked field, missing option, custom switch", async () => {
@@ -734,6 +822,29 @@ describe("waiting and evaluate", () => {
     assert.match(thrown.error.message, /boom/);
     const node = await h.ok("evaluate", { function: "() => document.body" }, s);
     assert.equal(node.type, "node");
+  });
+
+  test("EVAL-E11 action: true waits for the page to react and reports the outcome", async () => {
+    const s = h.newSession();
+    await freshPage(h, s, "reactions.html");
+    const r = await h.ok("evaluate", { function: "() => document.querySelector('#t0').click()", action: true }, s);
+    assert.equal(r.outcome.domChanged, true);
+    assert.equal(r.outcome.settled, true);
+    assert.deepEqual((await h.ok("evaluate", { function: "() => [...document.querySelectorAll('.done')].map((e) => e.textContent)" }, s)).value, ["done t0"]);
+  });
+
+  test("EVAL-E12 code still running after timeout is TIMEOUT naming evaluate, in both lanes", async () => {
+    const s = h.newSession();
+    await freshPage(h, s);
+    for (const trusted of [false, true]) {
+      const started = Date.now();
+      const r = await h.call("evaluate", { function: "() => new Promise(() => {})", timeout: 1, trusted }, s);
+      const took = Date.now() - started;
+      assert.equal(r.error.code, "TIMEOUT", `trusted: ${trusted}`);
+      assert.match(r.error.message, /evaluate .*1 s/);
+      assert.ok(took < 3000, `took ${took} ms`);
+      assert.equal((await h.ok("evaluate", { function: "() => 1 + 1", trusted }, s)).value, 2);
+    }
   });
 
   test("EVAL-E05 strict CSP page works through userScripts", async () => {

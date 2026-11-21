@@ -166,11 +166,13 @@ describe("network and evaluate", () => {
     const s = h.newSession();
     await freshPage(h, s);
     await h.ok("network_requests", { captureBodies: true }, s);
-    await h.ok("evaluate", { function: "async () => (await fetch('/other.html')).status" }, s);
+    await h.ok("evaluate", { function: "async () => { await new Promise((r) => { const i = new Image(); i.onload = i.onerror = r; i.src = '/pw/pptr.png'; }); return (await fetch('/other.html')).status; }" }, s);
     await sleep(500);
     const list = await h.ok("network_requests", { filter: "other.html" }, s);
     const detail = await h.ok("network_requests", { id: list.requests[0].id, body: true }, s);
     assert.match(detail.request.body, /Other page/);
+    const image = await h.ok("network_requests", { filter: "pptr.png" }, s);
+    assert.equal((await h.call("network_requests", { id: image.requests[0].id, body: true }, s)).error.code, "BODY_UNAVAILABLE");
     assert.equal(detail.capturingBodies, true);
     await h.ok("network_requests", { captureBodies: false }, s);
   });
@@ -230,6 +232,51 @@ describe("run", () => {
     const opened = list.tabs.find((/** @type {any} */ t) => t.mine && t.url.endsWith("other.html"));
     assert.ok(opened, JSON.stringify(list.tabs));
     assert.equal(opened.active, false);
+  });
+
+  test("RLY-E07 waitForLoadState resolves on a loaded tab, every time", async () => {
+    for (let i = 0; i < 8; i++) {
+      const s = h.newSession();
+      await freshPage(h, s);
+      const code = "for (const state of ['domcontentloaded', 'load']) await page.waitForLoadState(state, { timeout: 3000 }); return 'loaded';";
+      assert.equal((await h.ok("run", { code, timeout: 10 }, s)).value, "loaded", `run ${i}`);
+      await h.closeTabs();
+    }
+  });
+
+  test("RUN-E12 a tab the page opens is the worker's popup", async () => {
+    const s = h.newSession();
+    await freshPage(h, s);
+    const code = `await page.evaluate((u) => { const a = document.createElement("a"); a.href = u; a.target = "_blank"; a.id = "pop"; a.textContent = "pop"; document.body.prepend(a); }, ${JSON.stringify(`${h.base}/other.html`)});
+const [popup] = await Promise.all([page.waitForEvent("popup", { timeout: 5000 }), page.click("#pop")]);
+await popup.waitForLoadState("domcontentloaded");
+return { url: popup.url(), pages: context.pages().length };`;
+    const r = await h.ok("run", { code, timeout: 20 }, s);
+    assert.match(r.value.url, /other\.html$/);
+    assert.equal(r.value.pages, 2);
+  });
+
+  test("RUN-E13 state and the worker stay across the session's tabs; page is the call's tab", async () => {
+    const s = h.newSession();
+    const a = await freshPage(h, s);
+    const b = await freshPage(h, s, "other.html");
+    await h.ok("run", { code: "state.from = page.url(); return null;", tab: a }, s);
+    const r = await h.ok("run", { code: "return [state.from, page.url()];", tab: b }, s);
+    assert.match(r.value[0], /page\.html$/);
+    assert.match(r.value[1], /other\.html$/);
+    assert.match((await h.ok("run", { code: "return page.url();", tab: a }, s)).value, /page\.html$/);
+  });
+
+  test("RUN-E14 after the extension reconnects run starts a new worker", async () => {
+    const s = h.newSession();
+    await freshPage(h, s);
+    await h.ok("run", { code: "state.n = 1; return 1;" }, s);
+    await h.stopServiceWorker();
+    for (let i = 0; i < 350 && h.daemon.browsers.connected().length === 0; i++) await sleep(100);
+    await sleep(500);
+    const r = await h.ok("run", { code: "return [state.n ?? null, page.url()];", timeout: 20 }, s);
+    assert.equal(r.value[0], null);
+    assert.match(r.value[1], /page\.html$/);
   });
 
   // RUN-E07 to RUN-E11 adopt playwright-mcp's run-code.spec.ts cases.

@@ -43,13 +43,15 @@ export class Sessions {
   closed = new Map();
   #file;
   #idleMs;
+  #onChange;
   /** @type {Map<string, number>} calls in flight per session: a running call keeps its session alive */
   #inflight = new Map();
 
-  /** @param {{home: string, idleMs?: number}} options */
-  constructor({ home, idleMs = 5 * 60_000 }) {
+  /** @param {{home: string, idleMs?: number, onChange?: () => void}} options onChange: after every change, once saved */
+  constructor({ home, idleMs = 5 * 60_000, onChange = () => {} }) {
     this.#file = path.join(home, "sessions.json");
     this.#idleMs = idleMs;
+    this.#onChange = onChange;
     this.#load();
   }
 
@@ -71,6 +73,7 @@ export class Sessions {
     } catch {
       // ownership still holds in memory
     }
+    this.#onChange();
   }
 
   /**
@@ -164,11 +167,24 @@ export class Sessions {
     return owner;
   }
 
-  /** A tab closed in the browser. @param {string} instanceId @param {number} tabId */
+  /**
+   * A tab closed in the browser. It stays the session's current tab, so a call without `tab` says
+   * TAB_CLOSED rather than NO_TAB (specs/sessions.md).
+   * @param {string} instanceId @param {number} tabId
+   */
   tabClosed(instanceId, tabId) {
-    const owner = this.release(instanceId, tabId);
-    if (owner) this.closed.set(tabKey(instanceId, tabId), Date.now());
+    const key = tabKey(instanceId, tabId);
+    const owner = this.owners.get(key);
+    if (!owner) return undefined;
+    this.owners.delete(key);
+    this.closed.set(key, Date.now());
+    this.persist();
     return owner;
+  }
+
+  /** @param {TabRef} ref */
+  isClosed(ref) {
+    return this.closed.has(tabKey(ref.instanceId, ref.tabId));
   }
 
   /** @param {Session} session @param {TabRef | null} tab */
@@ -204,8 +220,7 @@ export class Sessions {
   resolveTab(session, tab, instancesWithTab) {
     if (tab === undefined) {
       if (!session.current) throw new BctlError("NO_TAB", "this session has no current tab");
-      const key = tabKey(session.current.instanceId, session.current.tabId);
-      if (this.closed.has(key)) throw new BctlError("TAB_CLOSED", `tab ${session.current.tabId} was closed`);
+      if (this.isClosed(session.current)) throw new BctlError("TAB_CLOSED", `tab ${session.current.tabId} was closed`);
       return session.current;
     }
     const mine = this.tabsOf(session.id).filter((t) => t.tabId === tab);

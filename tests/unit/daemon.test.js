@@ -146,6 +146,56 @@ test("SES-U12 actions on one tab run one at a time; a forced adopt waits for the
   assert.deepEqual(order, ["click", "adopt"]);
 });
 
+test("SES-U13 the current tab closed in the browser is TAB_CLOSED; navigate then opens a new tab", async () => {
+  const d = await daemon();
+  const b = await browser(d.port, {
+    handlers: {
+      "tabs.navigate": ({ tabId, url }, fake) => {
+        for (const name of ["nav.beforeNavigate", "nav.domContentLoaded"]) fake.emit(name, { tabId, frameId: 0, url });
+        return {};
+      },
+    },
+  });
+  await until(() => d.daemon.browsers.connected().length === 1);
+  const tab = (await d.call("tabs", { action: "new" }, "s")).tab.tab;
+  b.tabs = b.tabs.filter((t) => t.tabId !== tab);
+  b.emit("tabs.removed", { tabId: tab });
+  await until(() => !d.daemon.sessions.ownerOf("fake-1", tab));
+  assert.equal((await d.call("get", { target: "#x" }, "s")).error.code, "TAB_CLOSED");
+  const opened = await d.call("navigate", { url: "about:blank" }, "s");
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+  assert.notEqual(opened.tab, tab);
+  assert.equal(d.daemon.sessions.sessions.get("s")?.current?.tabId, opened.tab);
+});
+
+test("API-U07 a result names the tab it acted on; tabs keeps its own tab field", async () => {
+  const d = await daemon();
+  await browser(d.port);
+  await until(() => d.daemon.browsers.connected().length === 1);
+  const tab = (await d.call("tabs", { action: "new" }, "s")).tab.tab;
+  const got = await d.call("get", { target: "#x" }, "s");
+  assert.equal(got.ok, true, JSON.stringify(got));
+  assert.equal(got.tab, tab);
+  const listed = await d.call("tabs", { action: "list" }, "s");
+  assert.equal(listed.tab, undefined);
+  assert.equal(typeof (await d.call("tabs", { action: "select", tab }, "s")).tab, "object");
+});
+
+test("API-U10 the daemon tells the extension which tabs to watch after every change of ownership", async () => {
+  const d = await daemon();
+  const b = await browser(d.port);
+  await until(() => d.daemon.browsers.connected().length === 1);
+  const watched = () => b.events.filter((e) => e.event === "watch").map((e) => [...e.data.tabIds].sort());
+  await until(() => watched().length === 1);
+  assert.deepEqual(watched().at(-1), []);
+  const one = (await d.call("tabs", { action: "new" }, "s")).tab.tab;
+  await until(() => watched().some((ids) => ids.includes(one)));
+  const two = (await d.call("tabs", { action: "new" }, "s")).tab.tab;
+  await until(() => watched().some((ids) => ids.length === 2));
+  await d.call("tabs", { action: "release", tab: one }, "s");
+  await until(() => String(watched().at(-1)) === String([two]));
+});
+
 test("SES-U07 ownership survives a daemon restart through sessions.json", async () => {
   const first = await startDaemon();
   const b = await connectFakeBrowser(first.port);

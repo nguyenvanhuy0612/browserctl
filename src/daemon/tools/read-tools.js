@@ -2,15 +2,19 @@
 // snapshot, read, wait_for (specs/tools/snapshot.md, read.md, wait_for.md).
 import { Daemon } from "../app.js";
 import { BctlError, toBctlError } from "../errors.js";
-import { annotate, fit, nestFrames, noticeLines } from "../snapshot-text.js";
+import { annotate, fit, nestFrames, noticeLines, PDF_NOTICE } from "../snapshot-text.js";
 import { tabKey } from "../sessions.js";
 import { by, checkWait, tab, target, timeout, urlMatcher } from "./common.js";
 
 const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
 
+/** Frames nest at most this deep in a snapshot or read (specs/tools/snapshot.md). */
+const FRAME_LEVELS = 10;
+
 /**
- * Snapshots each child frame under its iframe element, matched by the handshake
- * (specs/targets.md). The caller has already made every frame load the runtime.
+ * Reads each child frame for its iframe element, matched by the handshake (specs/targets.md),
+ * level by level; the iframes whose frame was not read (not found, failed, or too deep) come back
+ * as `unread`. The caller has already made every frame load the runtime.
  * @param {Daemon} daemon
  * @param {import("../sessions.js").TabRef} ref
  * @param {string[]} iframeRefs
@@ -19,26 +23,30 @@ const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms)
 async function collectFrames(daemon, ref, iframeRefs, read) {
   /** @type {Map<string, string>} */
   const byRef = new Map();
+  /** @type {Set<string>} */
+  const unread = new Set();
   let pending = iframeRefs;
-  for (let level = 0; level < 4 && pending.length; level++) {
+  for (let level = 0; level < FRAME_LEVELS && pending.length; level++) {
     await sleep(60);
     const frames = await daemon.domAll(ref, "info");
     /** @type {string[]} */
     const next = [];
     for (const iframeRef of pending) {
       const frame = frames.find((f) => f.result?.ok && f.result.probe === iframeRef && f.frameId !== 0);
-      if (!frame) continue;
       try {
+        if (!frame) throw new Error("no frame answered for this iframe");
         const part = await read(frame.frameId);
         byRef.set(iframeRef, part.text);
         next.push(...part.iframes);
       } catch {
-        // a frame that navigated away meanwhile
+        // not scriptable, or it navigated away meanwhile
+        unread.add(iframeRef);
       }
     }
     pending = next;
   }
-  return byRef;
+  for (const iframeRef of pending) unread.add(iframeRef);
+  return { byRef, unread };
 }
 
 const READY_TYPES = new Set(["main_frame", "sub_frame", "script", "xmlhttprequest"]);
@@ -111,15 +119,15 @@ export const snapshot = {
     await daemon.domAll(ref, "info").catch(() => []);
     const readiness = await waitReady(daemon, ref);
     const main = await daemon.dom(ref, "snapshot", { target: p.target, depth: p.depth }, { frameId });
-    let text = annotate(main.snapshot, main);
+    let text = main.pdf ? PDF_NOTICE : annotate(main.snapshot, main);
     if (main.iframes.length) {
-      const frames = await collectFrames(daemon, ref, main.iframes, async (id) => {
+      const { byRef, unread } = await collectFrames(daemon, ref, main.iframes, async (id) => {
         const part = await daemon.dom(ref, "snapshot", { depth: p.depth }, { frameId: id });
         return { text: annotate(part.snapshot, part), iframes: part.iframes };
       });
-      text = nestFrames(text, frames);
+      text = nestFrames(text, byRef, unread);
     }
-    const notices = noticeLines(readiness, main.modal);
+    const notices = noticeLines(readiness, main.modal, main.canvas);
     const maxChars = p.maxChars ?? 20000;
     // notice lines and their newlines count toward maxChars
     const noticeChars = notices.reduce((sum, line) => sum + line.length + 1, 0);
@@ -177,14 +185,14 @@ export const read = {
     const frameId = Daemon.frameOf(p.target);
     await daemon.domAll(ref, "info").catch(() => []);
     const main = await daemon.dom(ref, "read", { target: p.target, main: p.main, links: p.links }, { frameId });
-    let text = main.text;
+    let text = main.pdf ? PDF_NOTICE : main.text;
     const frameMarkers = [...text.matchAll(/\[frame ((?:f\d+)?e\d+)\]/g)].map((m) => m[1]);
     if (frameMarkers.length) {
-      const frames = await collectFrames(daemon, ref, frameMarkers, async (id) => {
+      const { byRef: frames } = await collectFrames(daemon, ref, frameMarkers, async (id) => {
         const part = await daemon.dom(ref, "read", { links: p.links }, { frameId: id });
         return { text: part.text, iframes: [...part.text.matchAll(/\[frame ((?:f\d+)?e\d+)\]/g)].map((m) => m[1]) };
       });
-      for (let pass = 0; pass < 4; pass++) {
+      for (let pass = 0; pass < FRAME_LEVELS; pass++) {
         text = text.replace(/\[frame ((?:f\d+)?e\d+)\]/g, (/** @type {string} */ whole, /** @type {string} */ r) => (frames.has(r) ? `--- frame ${r} ---\n${frames.get(r)}\n--- end of frame ${r} ---` : whole));
       }
     }

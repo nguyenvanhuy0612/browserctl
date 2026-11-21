@@ -123,23 +123,25 @@ test("RLY-U03 after a detach the next command re-attaches and replays the journa
   assert.equal(removed?.params.params.identifier, "2");
 });
 
-test("RLY-U04 Runtime.enable waits for a Page.getFrameTree in flight on the same session", async () => {
-  /** @type {number} */
-  let treeAnswered = 0;
-  const link = new FakeLink(async (method) => {
-    if (method !== "Page.getFrameTree") return {};
-    await sleep(100);
-    treeAnswered = Date.now();
-    return frameTree;
-  });
-  const { relay } = setup(link);
-  const c = client(relay);
-  const session = await attachedSession(relay, c);
-  const tree = c.send("Page.getFrameTree", {}, session);
-  await c.send("Runtime.enable", {}, session);
-  await tree;
-  const enable = link.sent.find((s) => s.params?.method === "Runtime.enable");
-  assert.ok(enable && enable.at >= treeAnswered, "Runtime.enable went out after the frame tree came back");
+test("RLY-U04 Runtime.enable and Page.setLifecycleEventsEnabled wait for a Page.getFrameTree in flight on the same session", async () => {
+  for (const method of ["Runtime.enable", "Page.setLifecycleEventsEnabled"]) {
+    /** @type {number} */
+    let treeAnswered = 0;
+    const link = new FakeLink(async (sent) => {
+      if (sent !== "Page.getFrameTree") return {};
+      await sleep(100);
+      treeAnswered = Date.now();
+      return frameTree;
+    });
+    const { relay } = setup(link);
+    const c = client(relay);
+    const session = await attachedSession(relay, c);
+    const tree = c.send("Page.getFrameTree", {}, session);
+    await c.send(method, method === "Runtime.enable" ? {} : { enabled: true }, session);
+    await tree;
+    const enable = link.sent.find((s) => s.params?.method === method);
+    assert.ok(enable && enable.at >= treeAnswered, `${method} went out after the frame tree came back`);
+  }
 });
 
 test("RLY-U05 / SES-U09 canceled_by_user drops every target, raises the event and refuses new attaches", async () => {

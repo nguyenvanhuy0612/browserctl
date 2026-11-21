@@ -1,6 +1,6 @@
 # Sessions, browsers, tabs and the debugger lifecycle
 
-Status: implemented (2026-11-16: idle limit and heartbeat, take-over hint, one action at a time per tab; not yet run on the owner's Chrome)
+Status: verified (2026-11-21: agents sharing a session, current tab closed)
 Depends on: `architecture.md`
 
 ## Browsers
@@ -63,6 +63,12 @@ Depends on: `architecture.md`
   then takes the tab.
 - Each session has one current tab; tools default to it. `tabs({action: "new"})` and
   `tabs({action: "select"})` change it.
+- One MCP server process is one session, and agents that share it (subagents of one client) share
+  its current tab: a call without `tab` from one agent acts on the tab another agent last opened
+  or selected (measured 2026-11-21: a second agent's `navigate` moved the first agent's page). No
+  per-agent identity reaches the server, so the agents keep apart themselves: the MCP instructions
+  tell each agent to open its own tab and pass `tab` on every call, and every result of a call that
+  acted on a tab names it (`tab`, `interface.md`), so a change of tab is visible.
 - New tabs are created with `active: false` in the browser's last focused normal window, next to
   the user's tabs and not in a tab group (the owner dropped grouping on 2026-11-14: groups moved the
   user's tabs around and added nothing an agent needs). If no normal window exists, a minimized,
@@ -77,7 +83,8 @@ Depends on: `architecture.md`
 - Such a tab must not take the user's view: when Chrome opens it active, the daemon activates
   again the tab that was active before, which Chrome reports as the new tab's `openerTabId`
   (same measurement: in three runs it was the previously active tab every time).
-- A closed tab is dropped from its session; the next call on it fails with `TAB_CLOSED`.
+- A closed tab is dropped from its session; the next call on it, by id or as the session's current
+  tab, fails with `TAB_CLOSED` (not `NO_TAB`), and `navigate` without `tab` opens a new tab.
 
 ## Debugger lifecycle (CDP lane)
 
@@ -108,6 +115,7 @@ Depends on: `architecture.md`
 | SES-U10 | unit | heartbeats past the idle limit, then none; a heartbeat for an unknown session | the session lives while they come and ends after; the unknown one is not created |
 | SES-U11 | unit | session B calls `click` on A's tab, then `adopt` without `force` | both `TAB_NOT_OWNED` with A as `holder` and a hint naming `adopt` with `force: true` |
 | SES-U12 | unit | two `click` calls sent together on one tab; `adopt` with `force` during an action | the second click starts after the first settled; the adopt answers after the action ended |
+| SES-U13 | unit | the session's current tab closes in the browser | the next call without `tab` → `TAB_CLOSED`; `navigate` with a URL opens a new tab and makes it current |
 | SES-E01 | live | `tabs new` | tab inactive, not grouped, user's active tab unchanged |
 | SES-E02 | live | daemon killed with an attached tab, restarted | on reconnect the stale attachment is detached |
 | SES-E03 | live | CDP call, then 30 s idle | detached; bar gone within 6 s more |

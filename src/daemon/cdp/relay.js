@@ -8,11 +8,15 @@ const JOURNALED =
 
 /**
  * @typedef {{id: string, tabId: number, domains: Set<string>, parentSessionId?: string, frameTree?: Promise<unknown>}} ClientSession
- * @typedef {{tabId: number, primary: ClientSession, sessions: Map<string, ClientSession>, children: Set<string>, journal: {method: string, params: any, clientIdentifier?: string, currentIdentifier?: string}[]}} Target
+ * @typedef {{tabId: number, openerId?: string, primary: ClientSession, sessions: Map<string, ClientSession>, children: Set<string>, journal: {method: string, params: any, clientIdentifier?: string, currentIdentifier?: string}[]}} Target
  */
 
 // Domains whose events arrive without the client asking for them.
 const UNSOLICITED = new Set(["Target", "Inspector"]);
+
+// Commands after which Chrome reports what exists at once (contexts, the current lifecycle); the
+// client takes those reports only once it has the frame tree (specs/relay.md).
+const AFTER_FRAME_TREE = new Set(["Runtime.enable", "Page.setLifecycleEventsEnabled"]);
 
 let relayCounter = 0;
 
@@ -31,6 +35,7 @@ export class CdpRelay {
   #nextSession = 1;
   #prefix = `r${++relayCounter}`;
   #onCreateTarget;
+  #onClaim;
   /** @type {(message: object) => void} */
   #sink = () => {};
   #disconnect = () => {};
@@ -42,11 +47,12 @@ export class CdpRelay {
 
   /**
    * @param {import("./attachments.js").Attachments} attachments
-   * @param {{onCreateTarget: (url: string) => Promise<number>}} options
+   * @param {{onCreateTarget: (url: string) => Promise<number>, onClaim?: (tabId: number) => void}} options
    */
-  constructor(attachments, { onCreateTarget }) {
+  constructor(attachments, { onCreateTarget, onClaim = () => {} }) {
     this.#attachments = attachments;
     this.#onCreateTarget = onCreateTarget;
+    this.#onClaim = onClaim;
   }
 
   /** In-process transport for playwright-core's connectOverCDP. */
@@ -102,8 +108,11 @@ export class CdpRelay {
     return this.#targets.has(tabId);
   }
 
-  /** @param {number} tabId */
-  async claim(tabId) {
+  /**
+   * Makes a tab one of this client's targets; with `openerTabId` it is that tab's popup.
+   * @param {number} tabId @param {number} [openerTabId]
+   */
+  async claim(tabId, openerTabId) {
     if (this.#targets.has(tabId)) return;
     this.#attachments.addRelay(tabId, this);
     try {
@@ -112,11 +121,13 @@ export class CdpRelay {
       this.#attachments.removeRelay(tabId, this);
       throw error;
     }
+    const openerId = openerTabId === undefined ? undefined : this.#attachments.info(openerTabId)?.targetId;
     /** @type {Target} */
-    const target = { tabId, primary: /** @type {any} */ (null), sessions: new Map(), children: new Set(), journal: [] };
+    const target = { tabId, openerId, primary: /** @type {any} */ (null), sessions: new Map(), children: new Set(), journal: [] };
     target.primary = this.#addSession(target);
     this.#targets.set(tabId, target);
     if (this.#autoAttach) this.#announce(target);
+    this.#onClaim(tabId);
   }
 
   /** @param {number} tabId */
@@ -191,7 +202,7 @@ export class CdpRelay {
 
   /** @param {Target} target */
   #info(target) {
-    return { ...this.#attachments.info(target.tabId), attached: true };
+    return { ...this.#attachments.info(target.tabId), attached: true, ...(target.openerId && { openerId: target.openerId }) };
   }
 
   /** @param {any} message */
@@ -301,9 +312,9 @@ export class CdpRelay {
       if (entry) target.journal.splice(target.journal.indexOf(entry), 1);
       return this.#attachments.send(target.tabId, undefined, method, { identifier: entry?.currentIdentifier ?? params.identifier });
     }
-    // Chrome reports existing contexts on Runtime.enable; Playwright drops contexts of frames it has
-    // not seen yet, so Runtime.enable waits for a Page.getFrameTree in flight on the same session.
-    if (method === "Runtime.enable" && session.frameTree) await session.frameTree.catch(() => {});
+    // Chrome reports existing contexts and the lifecycle at once; Playwright drops those of frames it
+    // has not seen yet, so they wait for a Page.getFrameTree in flight on the same session.
+    if (AFTER_FRAME_TREE.has(method) && session.frameTree) await session.frameTree.catch(() => {});
     const pending = method === "Runtime.enable" ? this.#enableRuntime(target.tabId, undefined, session.id, params) : this.#attachments.send(target.tabId, undefined, method, params);
     if (method === "Page.getFrameTree") session.frameTree = pending;
     const result = await pending;

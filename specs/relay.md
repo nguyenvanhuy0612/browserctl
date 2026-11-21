@@ -1,6 +1,6 @@
 # CDP lane: relay and Playwright
 
-Status: verified
+Status: verified (2026-11-21: lifecycle events after the frame tree)
 Depends on: `architecture.md`, `sessions.md`
 
 Used only for what the DOM lane cannot do (`architecture.md`). Shows Chrome's debugging bar
@@ -21,7 +21,7 @@ while attached.
 | Answer `Browser.getVersion`, `Target.setAutoAttach`, `Target.getTargets`, `Target.getTargetInfo`, `Target.attachToTarget`, `Target.attachToBrowserTarget`, `Target.detachFromTarget`, `Target.createTarget` (inactive tab owned by the session), `Target.closeTarget`, `Target.activateTarget`, `Browser.setDownloadBehavior`, `Target.setDiscoverTargets`, `Target.getBrowserContexts` in the relay | `chrome.debugger` has no browser target |
 | Answer `Browser.close` with `{}` and never forward it | the browser is the user's |
 | Other browser-level commands go through any attached tab | `Storage.*` and similar work on a tab session |
-| `Runtime.enable` waits for an in-flight `Page.getFrameTree` on the same session | Playwright drops contexts of frames it has not seen (BrowserMCP relay) |
+| `Runtime.enable` and `Page.setLifecycleEventsEnabled` wait for an in-flight `Page.getFrameTree` on the same session | Chrome reports existing contexts and the current lifecycle at once, and Playwright drops contexts of frames it has not seen (BrowserMCP relay) and lifecycle events that come before its frame tree, because it starts listening for them only then; through the extension those events can overtake the frame tree's answer (measured 2026-11-21: `page.waitForLoadState()` in `run` on a loaded tab hung in 2 of 8 runs) |
 | Journal state-setting commands (`*.enable`, `Emulation.set*`, `Network.set*`, `Page.addScriptToEvaluateOnNewDocument`, `Runtime.addBinding`, `Target.setAutoAttach`, `Fetch.enable`); replay them after a re-attach, mapping script identifiers | idle detach must not lose Playwright's setup |
 | After a re-attach, send `Runtime.executionContextsCleared` to Playwright before replaying | context ids change across attachments (uniqueId does not); hiding the change broke `evaluate` |
 | Re-attach before handing work to Playwright (`wake`), not inside its first command | Playwright then sees the new contexts before it sends anything |
@@ -48,7 +48,8 @@ last detach; a stopped service worker keeps its attachments; Cancel arrives as
 | RLY-U01 | unit | fake extension: Playwright connects, one claimed tab | page listed |
 | RLY-U02 | unit | `Browser.close` from the client | answered, not forwarded |
 | RLY-U03 | unit | detach then command | re-attach, journal replayed in order, script ids mapped |
-| RLY-U04 | unit | `Runtime.enable` racing `Page.getFrameTree` | contexts after frame tree |
+| RLY-U04 | unit | `Runtime.enable` and `Page.setLifecycleEventsEnabled` racing `Page.getFrameTree` | each sent after the frame tree came back |
+| RLY-E07 | live | `run` on a loaded tab: `page.waitForLoadState()` for `domcontentloaded` and `load`, 8 times, each on a new tab | each resolves |
 | RLY-U05 | unit | `canceled_by_user` | all targets dropped, event raised |
 | RLY-U06 | unit | two relays: the second's `Runtime.enable`; then a detach, the first's journal replay, and a third relay's `Runtime.enable` | the second and the third client each get the live contexts, once |
 | RLY-U07 | unit | two relays use `Network`; one disables it, then the other; `Runtime.disable` then `Runtime.enable` | the first disable is not sent, the second is; after the re-enable each context arrives once |

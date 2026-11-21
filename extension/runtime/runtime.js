@@ -7,12 +7,33 @@
   const g = /** @type {any} */ (globalThis);
   if (g.__bctlRuntime) return;
 
+  // Closed shadow roots, through the extension's chrome.dom, as `shadowRoot` in this isolated world
+  // only: Playwright's engines and this runtime walk them like open ones; the page sees nothing.
+  // Only custom elements are asked: asking for every element cost 30% of a large snapshot
+  // (specs/dom-lane.md).
+  const openOrClosed = g.chrome?.dom?.openOrClosedShadowRoot;
+  const nativeShadowRoot = Object.getOwnPropertyDescriptor(Element.prototype, "shadowRoot")?.get;
+  if (openOrClosed && nativeShadowRoot) {
+    Object.defineProperty(Element.prototype, "shadowRoot", {
+      configurable: true,
+      get() {
+        const open = nativeShadowRoot.call(this);
+        if (open || !this.localName.includes("-")) return open;
+        try {
+          return openOrClosed(this);
+        } catch {
+          return null;
+        }
+      },
+    });
+  }
+
   const REF = /^(f\d+)?e\d+$/;
   const FOCUSABLE = "a[href],area[href],button,input,select,textarea,iframe,summary,[tabindex],[contenteditable]:not([contenteditable=false])";
   const MARK = "data-bctl-target";
 
-  /** @type {{injected: any, frameId: number, refs: Map<string, WeakRef<Element>>, mutations: number, structure: number, probe: string | null, ready: boolean}} */
-  const state = { injected: null, frameId: 0, refs: new Map(), mutations: 0, structure: 0, probe: null, ready: false };
+  /** @type {{injected: any, frameId: number, refs: Map<string, WeakRef<Element>>, mutations: number, content: number, structure: number, probe: string | null, ready: boolean}} */
+  const state = { injected: null, frameId: 0, refs: new Map(), mutations: 0, content: 0, structure: 0, probe: null, ready: false };
 
   class OpError extends Error {
     /** @param {string} code @param {string} message @param {object} [extra] */
@@ -25,9 +46,13 @@
 
   // ---------- setup ----------
 
-  /** @param {number} frameId */
-  function init(frameId) {
+  /**
+   * @param {number} frameId
+   * @param {number} refBase the tab's highest ref number so far: this document numbers after it (specs/targets.md)
+   */
+  function init(frameId, refBase = 0) {
     if (state.ready) return { ok: true, frameId: state.frameId };
+    g.__bctlRefCounter.raise(refBase);
     const InjectedScript = g.__bctlInjectedScriptClass;
     state.injected = new InjectedScript(globalThis, {
       isUnderTest: false,
@@ -45,7 +70,9 @@
       for (const record of records) {
         if (record.type === "attributes" && record.attributeName?.startsWith("data-bctl")) continue;
         state.mutations++;
-        // nodes added or removed: what hydration does (attribute and text churn is not counted)
+        // content: nodes and text, what settle waits on; structure: nodes, what hydration does
+        // (specs/settle.md, tools/snapshot.md). Attribute churn counts in neither.
+        if (record.type !== "attributes") state.content++;
         if (record.type === "childList") state.structure++;
       }
     }).observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
@@ -881,9 +908,24 @@
     return { facts, refless, modal };
   }
 
+  /**
+   * Visible canvases big enough to hold content (not icons), for the snapshot's notice line
+   * (specs/tools/snapshot.md).
+   */
+  function drawnAreas() {
+    const sizes = deepQueryAll(document, "canvas")
+      .filter((c) => state.injected.utils.isElementVisible(c))
+      .map((c) => c.getBoundingClientRect())
+      .filter((r) => r.width >= 100 && r.height >= 50)
+      .sort((a, b) => b.width * b.height - a.width * a.height);
+    return sizes.length ? { count: sizes.length, largest: `${Math.round(sizes[0].width)}x${Math.round(sizes[0].height)}` } : null;
+  }
+
   /** @param {{target?: string, depth?: number}} params */
   function snapshot({ target, depth }) {
     const root = target ? resolve(target) : document.body ?? document.documentElement;
+    // Chrome's PDF viewer is another extension's page: nothing of the PDF is in this document
+    const pdf = document.contentType === "application/pdf";
     const text = state.injected.ariaSnapshot(root, { mode: "ai", ...(depth ? { depth } : {}) });
     const tree = state.injected._lastAriaSnapshotForQuery;
     for (const [ref, info] of tree?.info ?? []) state.refs.set(ref, new WeakRef(info.element));
@@ -906,16 +948,18 @@
     } catch {
       // facts are extra; the snapshot itself stands without them
     }
-    return { snapshot: text, iframes, ...extra };
+    return { snapshot: text, iframes, ...extra, pdf, canvas: target ? null : drawnAreas() };
   }
 
   /** @param {{target?: string, main?: boolean, links?: boolean}} params */
   function read({ target, main = false, links = true }) {
+    if (document.contentType === "application/pdf") return { text: "", pdf: true };
     if (!target) snapshot({});
-    let root = target ? resolve(target) : document.body;
+    const body = document.body ?? document.documentElement;
+    let root = target ? resolve(target) : body;
     if (!target && main) {
       const articles = [...document.querySelectorAll("article")].sort((a, b) => b.textContent.length - a.textContent.length);
-      root = document.querySelector("main,[role=main]") ?? articles[0] ?? document.body;
+      root = document.querySelector("main,[role=main]") ?? articles[0] ?? body;
     }
     const utils = state.injected.utils;
     /** @type {string[]} */
@@ -926,20 +970,36 @@
     const visible = (e) => utils.isElementVisible(e);
     /** @param {Element} e */
     const refOf = (e) => /** @type {any} */ (e)._ariaRef?.ref;
+    /**
+     * The nodes that render inside `e`: a host's shadow tree, a slot's assigned nodes (its own
+     * children when nothing is assigned), else its children (specs/tools/read.md).
+     * @param {Element} e @returns {Node[]}
+     */
+    const rendered = (e) => {
+      if (e.shadowRoot) return [...e.shadowRoot.childNodes];
+      if (e instanceof HTMLSlotElement) {
+        const assigned = e.assignedNodes({ flatten: true });
+        if (assigned.length) return assigned;
+      }
+      return [...e.childNodes];
+    };
+    /** @param {Element} e */
+    const renderedElements = (e) => /** @type {Element[]} */ (rendered(e).filter((n) => n.nodeType === Node.ELEMENT_NODE));
 
     /** @param {Node} node @returns {string} */
     function inlineText(node) {
       if (node.nodeType === Node.TEXT_NODE) return inline(node.nodeValue ?? "");
       if (node.nodeType !== Node.ELEMENT_NODE) return "";
       const e = /** @type {Element} */ (node);
-      if (!visible(e) && e.localName !== "br") return "";
+      // a slot has no box (display: contents); the nodes it shows are checked themselves
+      if (!visible(e) && e.localName !== "br" && !(e instanceof HTMLSlotElement)) return "";
       const tag = e.localName;
       if (tag === "br") return "\n";
       if (tag === "img") return e.getAttribute("alt") ? `![${inline(e.getAttribute("alt") ?? "")}]` : "";
       if (tag === "script" || tag === "style" || tag === "template") return "";
       const control = controlText(e);
       if (control) return control;
-      const inner = [...e.childNodes].map(inlineText).join("");
+      const inner = rendered(e).map(inlineText).join("");
       if (tag === "a" && links && /** @type {HTMLAnchorElement} */ (e).href) {
         const label = inner.trim();
         return label ? `[${label}](${/** @type {HTMLAnchorElement} */ (e).href})` : "";
@@ -979,6 +1039,9 @@
 
     const BLOCKS = new Set(["p", "div", "section", "article", "main", "header", "footer", "nav", "aside", "form", "fieldset", "figure", "figcaption", "blockquote", "dl", "dt", "dd", "details", "summary", "li", "ul", "ol", "table", "pre", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "body", "iframe"]);
 
+    /** A block of its own, or a component whose shadow tree holds blocks. @param {Element} e @returns {boolean} */
+    const isBlock = (e) => BLOCKS.has(e.localName) || Boolean(e.shadowRoot && renderedElements(e).some(isBlock));
+
     /** @param {Element} e @param {number} listDepth */
     function block(e, listDepth) {
       if (!visible(e)) return;
@@ -1006,26 +1069,26 @@
       }
       if (tag === "ul" || tag === "ol") {
         let n = 0;
-        for (const child of e.children) {
+        for (const child of renderedElements(e)) {
           if (child.localName !== "li" || !visible(child)) continue;
           n++;
-          const own = [...child.childNodes].filter((c) => !(c.nodeType === Node.ELEMENT_NODE && /^(ul|ol)$/.test(/** @type {Element} */ (c).localName)));
+          const own = rendered(child).filter((c) => !(c.nodeType === Node.ELEMENT_NODE && /^(ul|ol)$/.test(/** @type {Element} */ (c).localName)));
           const line = own.map(inlineText).join("").trim();
           out.push("  ".repeat(listDepth) + (tag === "ol" ? `${n}. ` : "- ") + line);
-          for (const nested of child.children) if (/^(ul|ol)$/.test(nested.localName)) block(nested, listDepth + 1);
+          for (const nested of renderedElements(child)) if (/^(ul|ol)$/.test(nested.localName)) block(nested, listDepth + 1);
         }
         return;
       }
       // A block with only inline content becomes one paragraph; otherwise recurse.
-      const hasBlockChild = [...e.children].some((c) => BLOCKS.has(c.localName));
+      const hasBlockChild = renderedElements(e).some(isBlock);
       if (!hasBlockChild) {
         const text = inlineText(e).trim();
         if (text) out.push(text);
         return;
       }
       let pending = "";
-      for (const child of e.childNodes) {
-        if (child.nodeType === Node.ELEMENT_NODE && BLOCKS.has(/** @type {Element} */ (child).localName)) {
+      for (const child of rendered(e)) {
+        if (child.nodeType === Node.ELEMENT_NODE && isBlock(/** @type {Element} */ (child))) {
           if (pending.trim()) out.push(pending.trim());
           pending = "";
           block(/** @type {Element} */ (child), listDepth);
@@ -1185,6 +1248,7 @@
       age: Math.round(performance.now()),
       frameId: state.frameId,
       mutations: state.mutations,
+      content: state.content,
       structure: state.structure,
       probe: state.probe,
       scrollY,
@@ -1249,16 +1313,24 @@
       return state.ready;
     },
     init,
-    /** @param {string} op @param {any[]} args */
+    /**
+     * Every answer carries the ref counter (`refHigh`), which the extension records for the tab
+     * and strips (specs/dom-lane.md).
+     * @param {string} op @param {any[]} args
+     */
     call(op, args) {
       const fn = ops[op];
-      if (!fn) return { ok: false, code: "UNKNOWN_OP", message: op };
-      try {
-        return { ok: true, ...fn(args?.[0] ?? {}) };
-      } catch (error) {
-        const e = /** @type {any} */ (error);
-        return { ok: false, code: e.code ?? "RUNTIME_ERROR", message: String(e.message ?? e).slice(0, 500), ...(e.extra ?? {}) };
+      let answer;
+      if (!fn) answer = { ok: false, code: "UNKNOWN_OP", message: op };
+      else {
+        try {
+          answer = { ok: true, ...fn(args?.[0] ?? {}) };
+        } catch (error) {
+          const e = /** @type {any} */ (error);
+          answer = { ok: false, code: e.code ?? "RUNTIME_ERROR", message: String(e.message ?? e).slice(0, 500), ...(e.extra ?? {}) };
+        }
       }
+      return { ...answer, refHigh: g.__bctlRefCounter.get() };
     },
   };
 })();
