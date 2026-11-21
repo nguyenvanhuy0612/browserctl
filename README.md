@@ -156,6 +156,9 @@ Output is the JSON result; `--pretty` indents it, `--session <name>` picks the s
 ## HTTP API
 
 Scripts in any language can call the daemon directly. Each request names its session in a header.
+The HTTP API does not start the daemon: run `browserctl daemon start` first, unless an MCP server
+already started it. A session ends after 5 minutes without a request (`BROWSERCTL_SESSION_IDLE`)
+and frees its tabs.
 
 ```python
 import json, urllib.request
@@ -173,13 +176,13 @@ print(call("read", main=True)["text"])
 ```
 
 Every answer is `{"ok": true, ...}` or `{"ok": false, "error": {"code", "message", "hint"}}`; the
-hint names the next call to make.
+hint, when present, names the next call to make.
 
 ## Configuration
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `BROWSERCTL_PORT` | `8765` | Daemon port. When changed, set the extension's storage key `daemonPort` to match. |
+| `BROWSERCTL_PORT` | `8765` | Daemon port. When changed, set the same port in the extension's popup. |
 | `BROWSERCTL_HOME` | `~/.browserctl` | Sessions, browser aliases, the call log, screenshots, and the extension copy to load. |
 | `BROWSERCTL_DETACH_IDLE` | `30` | Seconds without a CDP-lane call before the debugger detaches. |
 | `BROWSERCTL_SESSION_IDLE` | `300` | Seconds without a request or heartbeat before a session ends and frees its tabs. |

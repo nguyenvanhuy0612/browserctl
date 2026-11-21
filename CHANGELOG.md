@@ -22,8 +22,8 @@ with `EXTENSION_OUTDATED`.
   call's tab); tabs a page opens appear as popups (`page.waitForEvent("popup")`); after the
   extension reconnects the next call starts a fresh worker instead of failing.
   `page.waitForLoadState()` no longer hangs now and then.
-- Network capture skips images, media and fonts and forgets failed requests; the extension sends
-  network events for the agent's tabs only.
+- Body capture skips images, media and fonts (they are still listed) and drops the pending body of
+  a failed request; the extension sends network events for the agent's tabs only.
 - `snapshot` and `read` see into closed shadow roots of web components (the DOM lane acts on their
   elements too), `read` follows shadow roots and slots, and frames nest 10 levels deep (was 4); an
   iframe that could not be read says `[not read]`.
