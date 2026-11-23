@@ -7,7 +7,7 @@ agent's MCP client: a daemon left running from an older version is still open, a
 or CLI from an older install starts the daemon of its own version. The extension needs no reload
 (same wire protocol).
 
-- **Fixed: any web page could control the browser through the daemon** (CVSS 3.1 9.6,
+- **Fixed: any web page could control the browser through the daemon** (CVSS 3.1 9.3,
   `AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N`; versions up to 1.0.2). The daemon's HTTP API had no check
   and answered with `Access-Control-Allow-Origin: *`, so a page the user opened could call every
   tool, including `evaluate`, and read the answers: page content, cookies and tokens of the user's
