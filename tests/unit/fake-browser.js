@@ -63,10 +63,11 @@ export async function startDaemon({ home = fs.mkdtempSync(path.join(os.tmpdir(),
  * A fake extension. Tabs live in `tabs`; every request is recorded in `requests` and every event
  * the daemon sends in `events`; `handlers` override or add methods.
  * @param {number} port
- * @param {{instanceId?: string, name?: string, protocol?: number, userScripts?: boolean, handlers?: Record<string, Handler>}} [options]
+ * `origin` is the handshake's Origin header, an extension's by default; null sends none.
+ * @param {{instanceId?: string, name?: string, protocol?: number, userScripts?: boolean, handlers?: Record<string, Handler>, origin?: string | null}} [options]
  */
-export async function connectFakeBrowser(port, { instanceId = "fake-1", name = "Chrome", protocol = PROTOCOL, userScripts = true, handlers = {} } = {}) {
-  const socket = new WebSocket(`ws://127.0.0.1:${port}/extension`);
+export async function connectFakeBrowser(port, { instanceId = "fake-1", name = "Chrome", protocol = PROTOCOL, userScripts = true, handlers = {}, origin = "chrome-extension://fakeextensionid" } = {}) {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/extension`, origin === null ? {} : { origin });
   await new Promise((resolve, reject) => {
     socket.once("open", resolve);
     socket.once("error", reject);

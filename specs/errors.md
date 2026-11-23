@@ -1,6 +1,6 @@
 # Errors
 
-Status: verified
+Status: verified (2026-11-23: REQUEST_REFUSED; was verified)
 Depends on: none
 
 Every failed call returns:
@@ -40,4 +40,5 @@ code is added here before any code returns it.
 | `DEBUGGER_CANCELED` | the user pressed Cancel on the debugging bar |
 | `DEBUGGER_BUSY` | another debugger (DevTools) holds the tab |
 | `TIMEOUT` | the call's overall time limit passed; when the page itself did not answer a DOM-lane request, the hint says a dialog only the user can answer or a script that never yields blocks it (`dom-lane.md`) |
+| `REQUEST_REFUSED` | HTTP 403: the request's `Host` or `Origin` failed the daemon's checks, so a web page or a rebound host name sent it (`interface.md`, who may call the daemon); the hint says to call `http://127.0.0.1:<port>` from a local process without an `Origin` header |
 | `INTERNAL_ERROR` | a fault in browserctl itself; the message has the cause, the call log has the details |

@@ -318,3 +318,49 @@ describe("CDP lane lifecycle", () => {
     assert.ok(!attached.includes(tab), "stale attachment detached");
   });
 });
+
+describe("web pages cannot reach the daemon", () => {
+  test("API-E05 a page's fetch, form post and WebSockets to the daemon run nothing and read nothing", async () => {
+    const s = h.newSession();
+    await freshPage(h, s);
+    const daemonBase = `http://127.0.0.1:${h.port}`;
+    const marker = (/** @type {string} */ n) => `${h.base}/other.html?poc=${n}`;
+    const formName = JSON.stringify({ action: "new", url: `${marker("form")}#` }).slice(0, -2);
+    const page = h.content(`<!doctype html><title>poc</title>
+<iframe name="sink"></iframe>
+<form id="f" method="post" enctype="text/plain" target="sink" action="${daemonBase}/v1/tools/tabs"><input name='${formName}' value='"}'></form>
+<script>
+window.__poc = {};
+const post = (key, init) => fetch("${daemonBase}/v1/tools/tabs", { method: "POST", body: JSON.stringify({ action: "new", url: "${marker("")}" + key }), ...init })
+  .then(r => r.text()).then(t => (__poc[key] = "read:" + t), e => (__poc[key] = "error:" + e.name));
+post("fetch");
+post("noreferrer", { referrerPolicy: "no-referrer" });
+navigator.sendBeacon("${daemonBase}/v1/tools/tabs", JSON.stringify({ action: "new", url: "${marker("beacon")}" }));
+document.getElementById("f").submit();
+const socket = (key, url, hello) => {
+  const ws = new WebSocket(url);
+  ws.onopen = () => { __poc[key] = "open"; if (hello) ws.send(JSON.stringify({ event: "hello", data: hello })); };
+  ws.onerror = () => { __poc[key] ??= "error"; };
+};
+socket("extension", "ws://127.0.0.1:${h.port}/extension", { protocol: 2, extensionVersion: "1.0.2", instanceId: "evil", browser: { name: "Chrome", version: "1" }, profileLabel: "evil", browserStartedAt: 1, userScripts: true });
+socket("cdp", "ws://127.0.0.1:${h.port}/cdp?session=${s}");
+</script>`);
+    await h.ok("navigate", { url: page }, s);
+    /** @type {any} */
+    let poc = {};
+    for (let i = 0; i < 50 && Object.keys(poc).length < 4; i++) {
+      await sleep(100);
+      poc = (await h.ok("evaluate", { function: "() => window.__poc" }, s)).value;
+    }
+    await sleep(1000);
+    assert.match(poc.fetch, /^error:/, "the page read no answer");
+    assert.match(poc.noreferrer, /^error:/, "Origin: null read no answer");
+    assert.notEqual(poc.extension, "open");
+    assert.notEqual(poc.cdp, "open");
+    assert.equal(h.daemon.browsers.connected().length, 1, "no fake browser registered");
+    const { tabs } = await h.ok("tabs", { action: "list", all: true }, s);
+    assert.deepEqual(tabs.filter((/** @type {any} */ t) => t.url.includes("poc=")), [], "no tab opened by the page");
+    // the real clients still work: the extension, the DOM lane, and a run worker over /cdp
+    assert.equal((await h.ok("run", { code: "return await page.evaluate(() => 1 + 1);", timeout: 10 }, s)).value, 2);
+  });
+});

@@ -16,14 +16,21 @@ export function startServer(daemon, { port, host = "127.0.0.1" }) {
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    /** @param {number} status @param {unknown} body */
-    const send = (status, body) => {
-      res.writeHead(status, { "content-type": "application/json", "access-control-allow-origin": "*" });
+    /** @param {number} status @param {unknown} body @param {Record<string, string>} [extra] */
+    const send = (status, body, extra = {}) => {
+      res.writeHead(status, { "content-type": "application/json", ...extra });
       res.end(JSON.stringify(body));
     };
+    const refused = refusal(req, url.pathname, boundPort(server));
+    if (refused) {
+      send(403, { ok: false, error: refused });
+      return;
+    }
     try {
       if (req.method === "GET" && url.pathname === "/health") {
-        send(200, { ok: true, version: daemon.version, protocol: PROTOCOL });
+        // the extension's probe is a CORS request when the user limits its site access
+        const origin = header(req, "origin");
+        send(200, { ok: true, version: daemon.version, protocol: PROTOCOL }, origin?.startsWith(EXTENSION_ORIGIN) ? { "access-control-allow-origin": origin } : {});
         return;
       }
       if (req.method === "GET" && url.pathname === "/v1/tools") {
@@ -64,6 +71,10 @@ export function startServer(daemon, { port, host = "127.0.0.1" }) {
 
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", "http://localhost");
+    if (refusal(req, url.pathname, boundPort(server))) {
+      socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+      return;
+    }
     if (url.pathname === "/extension") {
       wss.handleUpgrade(req, socket, head, (ws) => daemon.browsers.adopt(ws));
       return;
@@ -85,6 +96,30 @@ export function startServer(daemon, { port, host = "127.0.0.1" }) {
       resolve(server);
     });
   });
+}
+
+const EXTENSION_ORIGIN = "chrome-extension://";
+
+/** @param {http.Server} server */
+function boundPort(server) {
+  return /** @type {import("node:net").AddressInfo} */ (server.address()).port;
+}
+
+/**
+ * Who may call the daemon (specs/interface.md): only its own Host, no Origin except the
+ * extension's on /extension and any on /health. Returns the error for a refused request.
+ * @param {http.IncomingMessage} req @param {string} pathname @param {number} port
+ * @returns {{code: string, message: string, hint: string} | null}
+ */
+function refusal(req, pathname, port) {
+  const hint = `Call http://127.0.0.1:${port} from a local process, without an Origin header (a request copied from the browser's DevTools carries one).`;
+  const host = header(req, "host")?.toLowerCase();
+  if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) {
+    return { code: "REQUEST_REFUSED", message: `request refused: its Host header is not 127.0.0.1:${port} or localhost:${port}`, hint };
+  }
+  const origin = header(req, "origin");
+  const allowed = pathname === "/extension" ? origin?.startsWith(EXTENSION_ORIGIN) === true : pathname === "/health" || origin === undefined;
+  return allowed ? null : { code: "REQUEST_REFUSED", message: "request refused: it carries an Origin header, so a web page sent it", hint };
 }
 
 /** @param {http.IncomingMessage} req @param {string} name */

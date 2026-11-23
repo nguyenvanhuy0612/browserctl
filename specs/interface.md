@@ -1,6 +1,6 @@
 # Interfaces: HTTP API, MCP, CLI, extension wire protocol, call log
 
-Status: verified (2026-11-21: `tab` in results, MCP text blocks, client resend rule, `watch`)
+Status: verified (2026-11-23: who may call the daemon; was verified 2026-11-21)
 Depends on: `architecture.md`, `sessions.md`, `errors.md`
 
 ## Tool registry
@@ -26,6 +26,7 @@ Listens on `127.0.0.1:8765` (`BROWSERCTL_PORT` to change).
 | `DELETE /v1/sessions/<id>` | | ends the session (`sessions.md`) |
 | `POST /v1/sessions/<id>/heartbeat` | | `{ok: true, known}`; keeps an existing session alive (`sessions.md`), `known: false` when there is none |
 | `GET /extension` (WebSocket upgrade) | | the extension's connection |
+| `GET /cdp?session=<id>` (WebSocket upgrade) | | a `run` worker's Playwright connection (`tools/run.md`) |
 
 Headers on tool calls: `X-Browserctl-Session` (session id), `X-Browserctl-Client` (`mcp`, `cli`,
 or a script's name, recorded in the call log), `X-Browserctl-Close-Tabs` (`1`: the session closes
@@ -39,6 +40,85 @@ acted on (`sessions.md`: agents sharing a session).
 Python and other scripts use this API directly; no client library is required. Scripts that run
 at the same time each set their own `X-Browserctl-Session`: the default `http` is one session with
 one current tab.
+
+### Who may call the daemon
+
+Only local processes (the MCP server, the CLI, `run` workers, the user's own scripts) and the
+browserctl extension. Web pages never: a page the user opens in any browser on the machine must
+neither run a tool nor read an answer. Every HTTP request and every WebSocket upgrade passes these
+checks, in order, before it is routed (so an unknown path with a bad header is 403, not 404):
+
+1. **Host.** The `Host` header, compared without regard to case, must be exactly
+   `127.0.0.1:<port>` or `localhost:<port>`, where `<port>` is the port the server is bound to
+   (`server.address().port`, which differs from the configured value when it is 0). Everything
+   else is refused: a missing `Host`, a missing port (also when the port is 80), another port,
+   `localhost.`, `[::1]`, `0.0.0.0`, any other name. This stops DNS rebinding, where a page's own
+   host name is made to point at `127.0.0.1`.
+2. **Origin on `/extension`.** The upgrade must carry an `Origin` starting with
+   `chrome-extension://`; any other value, `null`, or a missing `Origin` is refused.
+3. **Origin elsewhere.** Every other path except `/health` is refused when the request carries an
+   `Origin` header, whatever its value (`null`, an empty value and `chrome-extension://...`
+   included). Browsers send `Origin` on every request whose body or method a page controls
+   (`fetch` and XHR other than GET or HEAD, cross-origin CORS GETs, form posts, `sendBeacon`), with
+   `Origin: null` after a cross-origin redirect, under `Referrer-Policy: no-referrer` and from
+   sandboxed and `data:` documents, and on every WebSocket handshake. Requests a browser makes
+   without `Origin` (no-cors GETs, `<a ping>`, reports) carry no body a page chooses, so they can
+   reach only `GET /health` and `GET /v1/tools`, which change nothing. Local clients send no
+   `Origin` (measured 2026-11-23: Node `fetch` and `WebSocket`, `node:http`, `ws`, Playwright
+   `connectOverCDP`, curl, Python `urllib` and `requests`).
+4. **`/health`** passes check 3 with any `Origin`: it changes nothing and holds no data, and the
+   extension probes it.
+
+Answers carry no `Access-Control-Allow-Origin`, with one exception: `/health` answers a request
+whose `Origin` starts with `chrome-extension://` with `Access-Control-Allow-Origin` set to that
+origin, so the extension's probe still works when the user limits its site access and its
+`fetch` becomes a CORS request. A page therefore cannot read even the answers it can still reach.
+
+A refused HTTP request gets status 403 and `{ok: false, error: {code: "REQUEST_REFUSED", message,
+hint}}`. The message names the header that failed: `request refused: its Host header is not
+127.0.0.1:<port> or localhost:<port>`, or `request refused: it carries an Origin header, so a web
+page sent it`. The hint is `Call http://127.0.0.1:<port> from a local process, without an Origin
+header (a request copied from the browser's DevTools carries one).` The call never reaches the
+daemon: no session is created and no call log line is written. A refused upgrade gets
+`HTTP/1.1 403 Forbidden` and the socket is closed.
+
+The fake extension in unit tests (`tests/unit/fake-browser.js`) sends
+`Origin: chrome-extension://fakeextensionid`, as the real one does.
+
+Cases covered: cross-origin `fetch` with a simple body (no preflight), `sendBeacon`, form posts,
+`Origin: null`, an empty `Origin`, WebSocket upgrades to `/extension` and `/cdp` from a page, DNS
+rebinding.
+Left out, and why:
+
+- Other processes running as the same OS user: they can already read the user's files and drive
+  Chrome directly, so a check here would not stop them.
+- Other OS users on the same machine: they reach `127.0.0.1` too and send no `Origin`, so they can
+  run tools in this user's Chrome. browserctl drives the user's own desktop browser, which is
+  normally a single-user machine; on a shared machine this is a real gap.
+- Server-side request forgery through another local service: a bug in another program on the
+  machine that lets a remote attacker make it send a POST with a chosen JSON body to
+  `127.0.0.1:<port>` passes every check (no `Origin`, the right `Host`). It needs such a bug in
+  software the user runs; none is known.
+- Other installed extensions: they pass check 2, so a malicious extension the user installed could
+  register as a browser and see the calls agents send to it, including one that lacks the
+  `debugger` permission itself. `/v1/*` still refuses its `Origin`. Pinning browserctl's id would
+  change it for every installed copy (the user would set the port and "Allow User Scripts" again)
+  to guard against an extension the user chose to install.
+- A browser or privacy add-on that strips `Origin` from cross-site posts: none known.
+- The next layer for the cases above, if browserctl is used where they matter: a secret token
+  created at daemon start, kept in a file only the user can read, and required on every `/v1/*`
+  call and on `/cdp`. Not done now: it covers no web-page attack, and every script that calls the
+  HTTP API would have to send it (owner's decision, 2026-11-23, after the reporter listed these
+  cases).
+- `Content-Type` is not checked: check 3 already refuses browser posts, and curl's `-d` and
+  Python's `urllib` send `application/x-www-form-urlencoded`, so scripts would break.
+- A page can still tell that a daemon listens (a no-cors `GET /health` resolves instead of
+  failing); it learns nothing else, not even the version.
+- Clients that add `Origin` on their own are refused (Deno with `--location`, Python
+  `websocket-client` by default); the hint says why.
+- The extension's probe with limited site access is covered by the header rule above and API-U11,
+  not by a live test: the live harness grants `<all_urls>`.
+- Refusals are not written to the daemon log; the 403 answer names the header.
 
 ## Environment
 
@@ -165,6 +245,9 @@ agents use the tools (`architecture.md` reuse policy, and the probe runs).
 | API-U08 | unit | MCP content of a `snapshot`, a `read`, a `click` result | two text blocks with the text unescaped for the first two, one JSON block for `click` |
 | API-U09 | unit | the client against a server that drops the connection after reading a call; against a closed port with `BROWSERCTL_AUTO_START=manual` | an error saying the call may have run, the server saw the call once; the daemon-not-running error |
 | API-U10 | unit | a session opens a tab, opens a second, releases the first | `watch` after each change with the owned tabs of that browser |
+| API-U11 | unit | HTTP requests to `POST /v1/tools/tabs`, `GET /v1/tools`, `POST /v1/sessions/<id>/heartbeat`, `DELETE /v1/sessions/<id>`, an unknown path, and `/health`: with no `Origin`; with `Origin` `http://evil.example`, `null`, an empty value, `chrome-extension://x`; with `Host` `evil.example:<port>`, `LOCALHOST:<port>`, `localhost.:<port>`, `127.0.0.1` (no port), `127.0.0.1:<port + 1>` | no `Origin` with `127.0.0.1:<port>` or `LOCALHOST:<port>`: answered as before; every `Origin` on a non-`/health` path, the unknown path included, and every other `Host`: 403 `REQUEST_REFUSED` with the message naming the header and the hint, no session created, no call log line; `/health` with any `Origin`: 200, with `Access-Control-Allow-Origin` equal to the `Origin` only for `chrome-extension://`; no other answer has the header |
+| API-U12 | unit | WebSocket upgrades: `/extension` without `Origin`, with `Origin` `http://evil.example`, `null`, `chrome-extension://fakeextensionid`; `/cdp?session=x` with `Origin` `http://evil.example`, `null`, and without one; either upgrade with a bad `Host` | only `/extension` with `chrome-extension://` registers a browser; `/cdp` without `Origin` is answered 101 and reaches the CDP lane once; every other upgrade gets 403 and registers nothing |
+| API-E05 | live | a page served from the fixture origin `http://127.0.0.1:<fixtures>` calls the daemon: `fetch` POST `tabs new` with a string body, the same with `referrerPolicy: "no-referrer"`, `sendBeacon`, a form post into an iframe, a WebSocket to `/extension` (sending a hello) and to `/cdp?session=<the test's session>` | the page reads no answer, no tab opens, the daemon still has one browser, neither socket opens; a `run` call and the extension's connection work as before |
 | API-E01 | live | daemon stopped, extension running 60 s, daemon started | extension connects within 35 s; Errors page empty |
 | API-E02 | live | MCP server start with no daemon | daemon started, tools registered; the instructions name the locator forms (`label=`), `timeout`, `scroll`, `wait` and `get` |
 | API-E03 | live | MCP server exit | session ended, attachments detached |

@@ -3,6 +3,7 @@
 // and error handling that need no page (specs/sessions.md, interface.md, tools/*.md).
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import { after, test } from "node:test";
 import { REF } from "../../src/daemon/targets.js";
@@ -391,4 +392,126 @@ test("DOM-U01 a call that meets a document being replaced is repeated on the new
   assert.equal(r.value, "after", JSON.stringify(r));
   assert.equal(replaced, 2);
   assert.equal((await d.call("get", { target: "f3e1" })).error.code, "REF_NOT_FOUND");
+});
+
+/**
+ * A raw HTTP request, so the test controls Host and Origin (fetch does not let it set Host).
+ * @param {number} port @param {string} method @param {string} pathname @param {Record<string, string>} [headers] @param {string} [body]
+ * @returns {Promise<{status: number, headers: import("node:http").IncomingHttpHeaders, body: any}>}
+ */
+function raw(port, method, pathname, headers = {}, body) {
+  return new Promise((resolve, reject) => {
+    const request = http.request({ host: "127.0.0.1", port, method, path: pathname, headers: { host: `127.0.0.1:${port}`, ...headers } }, (response) => {
+      /** @type {Buffer[]} */
+      const chunks = [];
+      response.on("data", (c) => chunks.push(c));
+      response.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        let parsed = text;
+        try {
+          parsed = JSON.parse(text);
+        } catch {}
+        resolve({ status: /** @type {number} */ (response.statusCode), headers: response.headers, body: parsed });
+      });
+    });
+    request.on("error", reject);
+    request.end(body);
+  });
+}
+
+/**
+ * A raw WebSocket handshake: the status the daemon answers (101 when it accepts), or 0 when it
+ * drops the socket without an answer.
+ * @param {number} port @param {string} pathname @param {Record<string, string>} [headers]
+ * @returns {Promise<number>}
+ */
+function upgrade(port, pathname, headers = {}) {
+  return new Promise((resolve) => {
+    const request = http.request({
+      host: "127.0.0.1",
+      port,
+      path: pathname,
+      headers: { host: `127.0.0.1:${port}`, connection: "Upgrade", upgrade: "websocket", "sec-websocket-version": "13", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==", ...headers },
+    });
+    request.on("upgrade", (response, socket) => {
+      socket.destroy();
+      resolve(/** @type {number} */ (response.statusCode));
+    });
+    request.on("response", (response) => {
+      response.resume();
+      resolve(/** @type {number} */ (response.statusCode));
+    });
+    request.on("error", () => resolve(0));
+    request.end();
+  });
+}
+
+test("API-U11 HTTP: a web Origin or a foreign Host is refused before routing; local callers and /health are answered", async () => {
+  const d = await daemon();
+  const json = { "content-type": "application/json" };
+  const port = d.port;
+  const calls = [
+    ["POST", "/v1/tools/tabs", JSON.stringify({ action: "list" }), 200],
+    ["GET", "/v1/tools", undefined, 200],
+    ["POST", "/v1/sessions/probe/heartbeat", undefined, 200],
+    ["DELETE", "/v1/sessions/probe", undefined, 200],
+    ["GET", "/nowhere", undefined, 404],
+  ];
+  const origins = ["http://evil.example", "null", "", "chrome-extension://x"];
+  const hosts = [`evil.example:${port}`, `localhost.:${port}`, "127.0.0.1", `127.0.0.1:${port + 1}`];
+  for (const [method, pathname, body, status] of calls) {
+    const send = (/** @type {Record<string, string>} */ headers) => raw(port, /** @type {string} */ (method), /** @type {string} */ (pathname), { ...json, ...headers }, /** @type {any} */ (body));
+    for (const host of [`127.0.0.1:${port}`, `LOCALHOST:${port}`]) {
+      const local = await send({ host, "x-browserctl-session": "local" });
+      assert.equal(local.status, status, `${method} ${pathname} from a local caller via ${host}`);
+      assert.equal(local.headers["access-control-allow-origin"], undefined);
+    }
+    const refusals = [...origins.map((value) => ["origin", value]), ...hosts.map((value) => ["host", value])];
+    for (const [header, value] of refusals) {
+      const refused = await send({ "x-browserctl-session": "web", [header]: value });
+      const what = `${method} ${pathname} with ${header}: "${value}"`;
+      assert.equal(refused.status, 403, what);
+      assert.equal(refused.body.ok, false, what);
+      assert.equal(refused.body.error.code, "REQUEST_REFUSED", what);
+      assert.match(refused.body.error.message, header === "origin" ? /Origin header/ : /Host header/, what);
+      assert.match(refused.body.error.hint, new RegExp(`http://127\\.0\\.0\\.1:${port} from a local process`), what);
+      assert.equal(refused.headers["access-control-allow-origin"], undefined, what);
+    }
+  }
+  const heartbeat = await raw(port, "POST", "/v1/sessions/web/heartbeat");
+  assert.equal(heartbeat.body.known, false, "a refused call creates no session");
+  const log = fs.readFileSync(path.join(d.home, "calls.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.ok(log.some((l) => l.session === "local"), "local calls are logged");
+  assert.ok(!log.some((l) => l.session === "web"), "refused calls are not logged");
+
+  const fromExtension = await raw(port, "GET", "/health", { origin: "chrome-extension://fakeextensionid" });
+  assert.equal(fromExtension.status, 200);
+  assert.equal(fromExtension.headers["access-control-allow-origin"], "chrome-extension://fakeextensionid");
+  const fromPage = await raw(port, "GET", "/health", { origin: "http://evil.example" });
+  assert.equal(fromPage.status, 200);
+  assert.equal(fromPage.headers["access-control-allow-origin"], undefined);
+  assert.equal((await raw(port, "GET", "/health")).headers["access-control-allow-origin"], undefined);
+  assert.equal((await raw(port, "GET", "/health", { host: `evil.example:${port}` })).status, 403);
+});
+
+test("API-U12 WebSocket: /extension only from an extension origin, /cdp only without Origin, both only on the daemon's Host", async () => {
+  /** @type {string[]} */
+  const served = [];
+  const d = await daemon({ cdp: () => ({ serveWorker: (/** @type {string} */ session, /** @type {any} */ ws) => (served.push(session), ws.close()), close() {} }) });
+  await assert.rejects(browser(d.port, { origin: null }), "no Origin on /extension");
+  await assert.rejects(browser(d.port, { origin: "http://evil.example" }), "a web Origin on /extension");
+  assert.equal(await upgrade(d.port, "/extension", { origin: "http://evil.example" }), 403);
+  assert.equal(await upgrade(d.port, "/extension", { origin: "null" }), 403);
+  assert.equal(await upgrade(d.port, "/extension", { origin: "chrome-extension://fakeextensionid", host: `evil.example:${d.port}` }), 403);
+  assert.equal(d.daemon.browsers.connected().length, 0);
+  await browser(d.port);
+  await until(() => d.daemon.browsers.connected().length === 1);
+
+  assert.equal(await upgrade(d.port, "/cdp?session=x", { origin: "http://evil.example" }), 403);
+  assert.equal(await upgrade(d.port, "/cdp?session=x", { origin: "null" }), 403);
+  assert.equal(await upgrade(d.port, "/cdp?session=x", { host: `evil.example:${d.port}` }), 403);
+  assert.deepEqual(served, []);
+  assert.equal(await upgrade(d.port, "/cdp?session=x"), 101);
+  await until(() => served.length === 1);
+  assert.deepEqual(served, ["x"]);
 });

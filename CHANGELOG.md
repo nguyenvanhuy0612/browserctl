@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.0.3
+
+Security release. After updating, stop the old daemon (`browserctl daemon stop`) and restart your
+agent's MCP client: a daemon left running from an older version is still open, and an MCP server
+or CLI from an older install starts the daemon of its own version. The extension needs no reload
+(same wire protocol).
+
+- **Fixed: any web page could control the browser through the daemon** (CVSS 3.1 9.6,
+  `AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N`; versions up to 1.0.2). The daemon's HTTP API had no check
+  and answered with `Access-Control-Allow-Origin: *`, so a page the user opened could call every
+  tool, including `evaluate`, and read the answers: page content, cookies and tokens of the user's
+  logged-in sites. A page could also open the `/extension` socket (to pose as a browser) and the
+  `/cdp` socket of a session. Now:
+  - every request must name the daemon's own host (`127.0.0.1:<port>` or `localhost:<port>`),
+    which stops DNS rebinding;
+  - a request that carries an `Origin` header, which browsers add to every request a page sends,
+    is refused with 403 `REQUEST_REFUSED`; `/extension` accepts only a `chrome-extension://`
+    origin, and `/health` stays open;
+  - no answer carries `Access-Control-Allow-Origin: *`.
+
+  The MCP server, the CLI, `run` and your own scripts (curl, Python) send no `Origin` and work as
+  before. A request copied from the browser's DevTools carries one: remove that header.
+
+  Reported privately by Giulliano Amaral (https://giullianoamaral.com).
+
+- **Known limitations.** These checks stop web pages, not everything that runs on the machine:
+  - other OS users on the same machine can reach `127.0.0.1` and run tools in your Chrome;
+  - a bug in another local program that lets a remote attacker make it send a POST with a chosen
+    JSON body to the daemon (server-side request forgery) would pass the checks;
+  - another extension you installed can connect as a browser and see the calls sent to it (it
+    still cannot call the tool API).
+
+  On a machine shared with other users, stop the daemon when you are not using it
+  (`browserctl daemon stop`, and `BROWSERCTL_AUTO_START=manual` so clients do not start it). A
+  secret token on every call is the planned next layer.
+
 ## 1.0.2
 
 Reload the extension after updating: it speaks wire protocol 2, and the daemon refuses an older one

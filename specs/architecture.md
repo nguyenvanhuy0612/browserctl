@@ -1,6 +1,6 @@
 # Architecture
 
-Status: verified
+Status: verified (2026-11-23: invariant 8, web pages never reach the daemon, owner approved; was verified)
 Depends on: none
 
 ## Goal
@@ -67,6 +67,8 @@ Lane choice rules:
    stale ref is an error, never a guess.
 6. Tool names carry no prefix: `click`, `snapshot`. The MCP client already namespaces them.
 7. The extension never puts an entry on its `chrome://extensions` Errors page (see below).
+8. Web pages never reach the daemon: only local processes and the browserctl extension can run a
+   tool or read an answer (`interface.md`, who may call the daemon).
 
 ## Extension error handling
 
